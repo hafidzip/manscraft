@@ -98,7 +98,10 @@ export class World {
     x: number; y: number; z: number;
     dist: number;
   } | null {
-    const h = raycastVoxel(this, origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, maxDist);
+    // projectiles / line-of-sight: plants are never cover
+    const h = raycastVoxel(this, origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, maxDist, {
+      ignoreNonSolid: true,
+    });
     if (!h) return null;
     return {
       point: origin.clone().addScaledVector(dir, h.dist),
@@ -117,17 +120,52 @@ export class World {
   ): number {
     let count = 0;
     const r2 = radius * radius;
+    const touched = new Map<string, Chunk>();
+    /** flat [x, y, z, oldId] records, replayed to onChanged after the batch */
+    const carved: number[] = [];
+
+    // One batch for the entire blast. Without it every single voxel would
+    // trigger a full chunk remesh (16 x 80 x 16 voxels each), so a rocket
+    // carving ~100 blocks rebuilt ~100 chunk meshes in one frame and locked
+    // the main thread for seconds.
+    this.beginBatch();
     for (let x = Math.floor(center.x - radius); x <= Math.ceil(center.x + radius); x++) {
       for (let y = Math.floor(center.y - radius); y <= Math.ceil(center.y + radius); y++) {
+        if (y <= 0 || y >= H) continue;
         for (let z = Math.floor(center.z - radius); z <= Math.ceil(center.z + radius); z++) {
           const dx = x + 0.5 - center.x, dy = y + 0.5 - center.y, dz = z + 0.5 - center.z;
           if (dx * dx + dy * dy + dz * dz > r2 + Math.random() * 1.2) continue;
           const b = this.getBlockRaw(x, y, z);
-          if (b === B.AIR || b === B.BEDROCK || y <= 0) continue;
+          if (b === B.AIR || b === B.BEDROCK) continue;
           this.setBlock(x, y, z, B.AIR);
+
+          const px = Math.floor(wrapBlock(x));
+          const pz = Math.floor(wrapBlock(z));
+          const c = this.ensureData(Math.floor(px / S), Math.floor(pz / S));
+          c.dirty = true; // blast craters are player edits: keep them resident
+          touched.set(this.key(c.cx, c.cz), c);
+          carved.push(px, y, pz, b);
+
           onBlockDestroyed?.(x, y, z, b);
           count++;
         }
+      }
+    }
+    this.endBatch();
+
+    // Rebuild each affected chunk exactly once (a blast spans 1–4 chunks),
+    // and let the border neighbours refresh through the streaming queue.
+    for (const c of touched.values()) {
+      if (c.hasMesh) this.buildMesh(c);
+      this.markNeighborBorders(c.cx, c.cz);
+    }
+
+    // Replay the edits for water reflow once the geometry is settled; the
+    // fluid sim dedupes its own cell queue.
+    const notify = this.onChanged;
+    if (notify) {
+      for (let i = 0; i < carved.length; i += 4) {
+        notify(carved[i], carved[i + 1], carved[i + 2], carved[i + 3], B.AIR);
       }
     }
     return count;

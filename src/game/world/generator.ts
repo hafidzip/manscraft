@@ -244,7 +244,11 @@ export class TerrainGenerator {
         const pz = wrapBlock(baseZ + lz);
         const { h, biome, surface } = this.columnAt(px, pz);
         const bDef = BIOME_DEFS[biome];
-        const underwater = h < SEA_LEVEL;
+        // compare against the planet's OWN sea level. Using the global
+        // SEA_LEVEL here desynced coastlines on themed worlds: water bodies
+        // filled up to `this.sea` while columns were classified "dry" against
+        // 30, leaving sheer water slabs floating beside grass.
+        const underwater = h < this.sea;
 
         for (let y = 0; y <= h; y++) {
           let id: number;

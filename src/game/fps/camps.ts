@@ -8,7 +8,7 @@ export const CAMP_CONFIG = {
   respawnDelay: 20,        // seconds before a dead camper respawns
   repopulateDelay: 90,     // seconds before a CLEARED camp repopulates (0 = never)
   patrolSpeedFactor: 0.55, // patrol walk speed multiplier
-  maxLeash: 45,            // aggro leash radius from camp center
+  maxLeash: 70,            // aggro leash radius from camp center
 };
 
 export type { CampSite, CampBuild } from '../world/camps';

@@ -828,12 +828,19 @@ export class GameEngine {
     this.mouse.left = false;
     this.mouse.right = false;
     this.breakT = 0;
+    // holster every hand tool so no rifle/laser/block viewmodel rides along
+    // into the cockpit (the chase camera would otherwise render them)
+    this.weapons.setAllVisible(false);
+    this.heldBlock.update(0, false, 0);
+    this.heldFood.visible = false;
     this.sound.playBoard();
   }
 
   private exitShip(): void {
     this.piloting = false;
     this.spaceExited = false; // allow re-triggering on the next climb
+    // bring the correct hand tool back for the current hotbar mode
+    this.weapons.setHolstered(this.toolMode !== 'weapon');
     this.sound.playDisembark();
     this.sound.stopShip();
     // step out beside the ship onto safe ground
@@ -1496,7 +1503,15 @@ export class GameEngine {
   private handleExplosion(pos: THREE.Vector3): void {
     const dist = pos.distanceTo(this.player.pos);
     this.enemies.damageInRadius(pos, 3.4, 120);
+
+    // A blast carves ~100 voxels. Spawning an un-pooled item entity for every
+    // one of them stalls the frame (and buries the player in pickups), so the
+    // crater only yields a sampled handful — like a Minecraft explosion.
+    const MAX_BLAST_DROPS = 14;
+    let drops = 0;
     const destroyed = this.world.destroySphere(pos, 2.9, (x, y, z, id) => {
+      if (drops >= MAX_BLAST_DROPS || Math.random() > 0.28) return;
+      drops++;
       this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
     });
     if (destroyed > 0) {

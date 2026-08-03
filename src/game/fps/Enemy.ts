@@ -59,23 +59,32 @@ export const ENEMY_FIRE_MODE: 'config' | 'distance' = 'config';
 /** Global fallback range used when ENEMY_FIRE_MODE === 'distance'. */
 export const ENEMY_FIRE_RANGE = 28;
 
+/**
+ * Walk speeds are tuned against the player controller (walk 4.4, sprint 6.6).
+ * Anything slower than a sprint means the AI can never close a gap, so the
+ * squad reads as harmless — grunts keep pace with a walk and runners can
+ * actually run a fleeing player down.
+ */
 export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
   grunt: {
-    id: 'grunt', name: 'GRUNT', hp: 40, speed: 3.0, sightRange: 9999, attackRange: 26,
-    preferredRange: 12, attackCooldown: 1.6, burst: 3, burstDelay: 0.16,
+    id: 'grunt', name: 'GRUNT', hp: 40, speed: 4.6, sightRange: 9999, attackRange: 26,
+    preferredRange: 10, attackCooldown: 1.6, burst: 3, burstDelay: 0.16,
     accuracy: 0.72, damage: 7, skin: '#c98f5f', shirt: '#4a5d3a', pants: '#3a3f4a', seed: 12,
   },
   runner: {
-    id: 'runner', name: 'RUNNER', hp: 26, speed: 4.4, sightRange: 9999, attackRange: 20,
-    preferredRange: 7, attackCooldown: 1.1, burst: 4, burstDelay: 0.11,
+    id: 'runner', name: 'RUNNER', hp: 26, speed: 6.2, sightRange: 9999, attackRange: 20,
+    preferredRange: 6, attackCooldown: 1.1, burst: 4, burstDelay: 0.11,
     accuracy: 0.6, damage: 5, skin: '#a9764b', shirt: '#7a3030', pants: '#2c2c30', seed: 31,
   },
   heavy: {
-    id: 'heavy', name: 'HEAVY', hp: 90, speed: 2.1, sightRange: 9999, attackRange: 34,
-    preferredRange: 16, attackCooldown: 2.1, burst: 6, burstDelay: 0.13,
+    id: 'heavy', name: 'HEAVY', hp: 90, speed: 3.6, sightRange: 9999, attackRange: 34,
+    preferredRange: 14, attackCooldown: 2.1, burst: 6, burstDelay: 0.13,
     accuracy: 0.8, damage: 10, skin: '#b9825a', shirt: '#2f3a4a', pants: '#23262c', seed: 55,
   },
 };
+
+/** Extra speed while sprinting after a player who is out of firing position. */
+const CHASE_SPRINT = 1.3;
 
 /** minimal player surface enemies need (the unified engine Player satisfies it) */
 export interface EnemyPlayer {
@@ -139,6 +148,8 @@ export class Enemy {
   private searchT = 0;
   private grounded = false;
   private jumpCd = 0;
+  /** while > 0 a wall beat direct pursuit, so route around it with A* */
+  private directBlockT = 0;
   private repathFails = 0;
   private wanderAngle = Math.random() * Math.PI * 2;
   private flashT = 0;
@@ -481,18 +492,37 @@ export class Enemy {
         // dwelling: damp velocity, idle arm sway
         wx = 0; wz = 0;
       }
-    } else if (inCombatRange) {
-      // Direct steering: hold preferred range and orbit. No pathfinding cost.
+    } else if (hasLos && this.directBlockT <= 0) {
+      // ---- direct pursuit: the player is visible, so run them down at ANY
+      // distance. Previously this branch only ran inside preferredRange and
+      // everything further away fell through to A*, where a starved path
+      // budget left the agent standing still — the "enemies never catch you"
+      // bug. Pathfinding is now reserved for broken line of sight.
       this.path.length = 0;
       this.pathIdx = 0;
       const inv = 1 / (dist || 1);
       const fx = toPlayer.x * inv, fz = toPlayer.z * inv;
       const rx = fz, rz = -fx;
-      if (dist > c.preferredRange) { wx += fx; wz += fz; }
-      else if (dist < c.preferredRange * 0.55) { wx -= fx * 0.85; wz -= fz * 0.85; }
-      wx += rx * this.strafeDir * 0.7;
-      wz += rz * this.strafeDir * 0.7;
-      // hop over small ledges while circling
+      const want = c.preferredRange;
+
+      if (dist > want) {
+        // commit to closing the gap: orbiting fades out as range grows
+        const urgency = Math.min(1, (dist - want) / 7);
+        wx += fx; wz += fz;
+        const orbit = 0.6 * (1 - urgency);
+        wx += rx * this.strafeDir * orbit;
+        wz += rz * this.strafeDir * orbit;
+      } else if (dist < want * 0.55) {
+        wx -= fx * 0.85; wz -= fz * 0.85;
+        wx += rx * this.strafeDir * 0.7;
+        wz += rz * this.strafeDir * 0.7;
+      } else {
+        wx += fx * 0.3; wz += fz * 0.3;
+        wx += rx * this.strafeDir * 0.7;
+        wz += rz * this.strafeDir * 0.7;
+      }
+
+      // hop over small ledges while advancing / circling
       if (this.grounded && this.jumpCd <= 0) {
         const ax = Math.round(this.pos.x + wx * 0.7);
         const az = Math.round(this.pos.z + wz * 0.7);
@@ -506,7 +536,7 @@ export class Enemy {
       const nearGoal = this.pos.distanceToSquared(this.lastKnown) < 2.5;
       if ((this.repathT <= 0 || goalMoved || needPath) && pathBudget.tokens > 0 && !nearGoal) {
         pathBudget.tokens--;
-        this.repathT = 0.4 + Math.random() * 0.45;
+        this.repathT = 0.26 + Math.random() * 0.3;
         this.pathGoal.copy(this.lastKnown);
         const ok = findPath(
           this.deps.world,
@@ -546,26 +576,46 @@ export class Enemy {
 
         // way off the path (knocked back / fell) -> repath sooner
         if (hd > 4.5) this.repathT = Math.min(this.repathT, 0.1);
-      } else if (this.searchT > 5) {
-        // lost the trail: slow wander so they don't freeze in place
-        this.wanderAngle += (Math.random() - 0.5) * dt * 2;
-        wx = Math.sin(this.wanderAngle) * 0.45;
-        wz = Math.cos(this.wanderAngle) * 0.45;
+      } else {
+        // No usable route this frame (budget spent, search failed, or the
+        // goal is unreachable). Standing still here is what made the squad
+        // look asleep — instead walk the straight line to the memory and let
+        // collision step-up / stuck recovery deal with the geometry.
+        const dxw = this.lastKnown.x - this.pos.x;
+        const dzw = this.lastKnown.z - this.pos.z;
+        const hd = Math.hypot(dxw, dzw);
+        if (hd > 1.1) {
+          wx = dxw / hd;
+          wz = dzw / hd;
+        } else if (this.searchT > 3) {
+          // arrived at the memory and found nothing: sweep the area
+          this.wanderAngle += (Math.random() - 0.5) * dt * 2;
+          wx = Math.sin(this.wanderAngle) * 0.5;
+          wz = Math.cos(this.wanderAngle) * 0.5;
+        }
       }
     }
 
-    if (this.state === 'attack' && inCombatRange) { wx *= 0.3; wz *= 0.3; }
+    // Plant the feet to shoot only once actually at the preferred range —
+    // damping while still closing the gap is what let players walk away from
+    // a firing squad.
+    if (this.state === 'attack' && inCombatRange && dist < c.preferredRange * 0.95) {
+      wx *= 0.35; wz *= 0.35;
+    }
 
     const wlen = Math.hypot(wx, wz);
     if (wlen > 1) { wx /= wlen; wz /= wlen; }
 
-    const accel = 26;
+    const accel = 32;
     this.vel.x += wx * accel * dt;
     this.vel.z += wz * accel * dt;
     const damp = Math.max(0, 1 - 8 * dt);
     this.vel.x *= damp; this.vel.z *= damp;
     const hs = Math.hypot(this.vel.x, this.vel.z);
-    const maxS = c.speed;
+    // sprint while running a fleeing player down; walk while holding a firing
+    // position or patrolling
+    const sprinting = this.state !== 'patrol' && dist > c.preferredRange * 1.1;
+    const maxS = c.speed * (sprinting ? CHASE_SPRINT : 1);
     if (hs > maxS) { this.vel.x *= maxS / hs; this.vel.z *= maxS / hs; }
 
     // ---- gravity, deliberate jumps and stuck recovery
@@ -582,15 +632,25 @@ export class Enemy {
     const wantsToMove = Math.hypot(wx, wz) > 0.1;
     if (this.stateT > 0.6 && wantsToMove && moveDelta < 0.02 && this.grounded) {
       this.stuckTimer += dt;
-      if (this.stuckTimer > 0.35) {
-        // try hopping the obstruction, and rebuild the route
+      if (this.stuckTimer > 0.28) {
+        // Something taller than a step is in the way. Hop it, shove sideways
+        // so we stop grinding into the same corner, and hand the next second
+        // of navigation to A* even if the player is in plain sight.
         if (this.jumpCd <= 0) { this.vel.y = 8.6; this.jumpCd = 0.35; }
+        const sx = Math.cos(this.yaw) * this.strafeDir;
+        const sz = -Math.sin(this.yaw) * this.strafeDir;
+        this.vel.x += sx * 3.4;
+        this.vel.z += sz * 3.4;
+        this.strafeDir = -this.strafeDir;
+        this.directBlockT = 1.1;
+        if (hasLos) { this.lastKnown.copy(player.pos); this.hasTarget = true; this.searchT = 0; }
         this.stuckTimer = 0;
         this.repathT = 0;
         this.path.length = 0;
         this.pathIdx = 0;
       }
     } else this.stuckTimer = 0;
+    this.directBlockT = Math.max(0, this.directBlockT - dt);
     this.lastX = this.pos.x; this.lastZ = this.pos.z;
 
     // ---- physics (axis-separated AABB)
@@ -711,8 +771,39 @@ export class Enemy {
   }
 
   // ------------------------------------------------------------ physics
+
+  /** true when the agent's full-height AABB is clear at this position */
+  private fits(x: number, y: number, z: number): boolean {
+    const w = this.deps.world;
+    const hw = this.halfW, h = this.height;
+    const minX = Math.floor(x - hw), maxX = Math.floor(x + hw);
+    const minY = Math.floor(y), maxY = Math.floor(y + h - 0.001);
+    const minZ = Math.floor(z - hw), maxZ = Math.floor(z + hw);
+    for (let bx = minX; bx <= maxX; bx++)
+      for (let by = minY; by <= maxY; by++)
+        for (let bz = minZ; bz <= maxZ; bz++)
+          if (w.solid(bx, by, bz)) return false;
+    return true;
+  }
+
   private moveAxis(axis: 0 | 2, delta: number) {
     if (delta === 0) return;
+
+    // Auto step-up: single-block ledges, stairs, camp thresholds and rough
+    // terrain are walked over instead of body-blocking the chase.
+    const tx = axis === 0 ? this.pos.x + delta : this.pos.x;
+    const tz = axis === 2 ? this.pos.z + delta : this.pos.z;
+    if (this.fits(tx, this.pos.y, tz)) {
+      this.pos.x = tx; this.pos.z = tz;
+      return;
+    }
+    if (this.grounded && this.fits(tx, this.pos.y + 1.02, tz)) {
+      this.pos.y += 1.02;
+      this.pos.x = tx; this.pos.z = tz;
+      this.stuckTimer = 0;
+      return;
+    }
+
     if (axis === 0) this.pos.x += delta; else this.pos.z += delta;
     const w = this.deps.world;
     const hw = this.halfW, h = this.height;
@@ -835,7 +926,9 @@ export class EnemyManager {
     if (!this.enabled) return;
     if (!this.primed) { this.primed = true; for (const c of this.camps) this.spawnCamp(c); }
 
-    pathBudget.tokens = 2;
+    // A* is only used when line of sight is broken now, so a bigger budget
+    // costs little and keeps blind pursuers moving on fresh routes.
+    pathBudget.tokens = 5;
 
     // update + cull
     for (let i = this.enemies.length - 1; i >= 0; i--) {

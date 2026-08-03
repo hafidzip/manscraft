@@ -17,12 +17,25 @@ export interface RayHit {
   dist: number;
 }
 
+export interface RaycastOptions {
+  /**
+   * Skip non-colliding decoration blocks (flowers, tall grass…).
+   *
+   * Mining/placement wants them (you must be able to target a flower), but
+   * projectiles and line-of-sight have to fly straight through: a poppy is
+   * not cover.
+   */
+  ignoreNonSolid?: boolean;
+}
+
 export function raycastVoxel(
   world: World,
   ox: number, oy: number, oz: number,
   dx: number, dy: number, dz: number,
-  maxDist: number
+  maxDist: number,
+  opts?: RaycastOptions
 ): RayHit | null {
+  const ignoreNonSolid = opts?.ignoreNonSolid === true;
   let x = Math.floor(ox);
   let y = Math.floor(oy);
   let z = Math.floor(oz);
@@ -56,7 +69,10 @@ export function raycastVoxel(
 
     const id = world.getBlockRaw(x, y, z);
     if (id === -1) return null;
-    if (id !== B.AIR && !isWaterId(id) && (DEFS[id].solid || DEFS[id].cross)) {
+    if (id === B.AIR || isWaterId(id)) continue;
+    const def = DEFS[id];
+    const blocks = ignoreNonSolid ? def.solid : def.solid || def.cross === true;
+    if (blocks) {
       return { x, y, z, nx, ny, nz, id, dist: t };
     }
   }
