@@ -20,6 +20,9 @@ const TILE_NAMES = [
   'log_side', 'log_top', 'leaves', 'planks', 'glass', 'snow',
   'snow_side', 'bedrock', 'flower_red', 'flower_yellow', 'tallgrass',
   'cactus_side', 'cactus_top', 'water',
+  'craft_top', 'craft_side', 'craft_bottom',
+  'furnace_front', 'furnace_front_lit', 'furnace_side', 'furnace_top',
+  'cobble',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -94,9 +97,11 @@ const TINT_REF: Record<string, RGB> = {
 const TILE_GROUP: Record<string, string> = {
   grass_top: 'grass', grass_side: 'grass', tallgrass: 'grass',
   dirt: 'dirt', snow_side: 'snow',
-  stone: 'stone', gravel: 'stone', bedrock: 'stone',
+  stone: 'stone', gravel: 'stone', bedrock: 'stone', cobble: 'stone',
+  furnace_top: 'stone', furnace_side: 'stone', furnace_front: 'stone',
   sand: 'sand', leaves: 'leaves',
   log_side: 'log', log_top: 'log', planks: 'planks',
+  craft_top: 'planks', craft_side: 'planks', craft_bottom: 'planks',
   snow: 'snow', water: 'water', cactus_side: 'cactus', cactus_top: 'cactus',
   // flower_red / flower_yellow / glass stay untinted on purpose
 };
@@ -325,13 +330,14 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
     }),
   tallgrass: (img, r) => {
-    const blades: { x: number; h: number; lean: number; c: RGB }[] = [];
+    // same base palette as grass_top — dark foliage values turn dense grass
+    // into black needles under shadow, so we shade the grass green instead
+    const blades: { x: number; h: number; lean: number }[] = [];
     for (let i = 0; i < 7; i++) {
       blades.push({
         x: 1 + Math.floor(r() * 14),
         h: 6 + Math.floor(r() * 9),
         lean: r() < 0.5 ? -1 : 1,
-        c: r() < 0.5 ? [88, 148, 54] : [70, 126, 44],
       });
     }
     return tileRegion(img, TILES.tallgrass, (x, y) => {
@@ -339,7 +345,7 @@ const PAINTERS: Partial<Record<string, Painter>> = {
         const by = TILE - 1 - y; // grow upward from the bottom
         if (by < b.h) {
           const bx = b.x + Math.floor((by / b.h) * 2) * b.lean;
-          if (x === bx) return vary(b.c, 10, r);
+          if (x === bx) return shadeMul(GRASS_BASE, 0.86 + r() * 0.24);
         }
       }
       return null;
@@ -362,6 +368,89 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     tileRegion(img, TILES.water, (x, y) => {
       const wave = (x + y * 3) % 7 === 0;
       return wave ? vary([92, 138, 244], 8, r) : vary([58, 102, 222], 10, r);
+    }),
+
+  // ---- crafting table: planks base with a worked-in grid motif on top ----
+  craft_top: (img, r) =>
+    tileRegion(img, TILES.craft_top, (x, y) => {
+      const seam = x === 7 || x === 8 || y === 7 || y === 8;
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([96, 70, 40], 8, r);
+      if (seam) return vary([70, 50, 28], 6, r);
+      return vary([164, 129, 76], 10, r);
+    }),
+  craft_side: (img, r) => {
+    const base: RGB[] = [];
+    for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] : [164, 129, 76];
+    return tileRegion(img, TILES.craft_side, (x, y) => {
+      if (y < 2) return vary([120, 92, 54], 8, r);              // top trim
+      if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {             // tool-panel inset
+        if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28], 6, r);
+        return vary([132, 102, 60], 8, r);
+      }
+      return vary(base[x], 10, r);
+    });
+  },
+  craft_bottom: (img, r) =>
+    tileRegion(img, TILES.craft_bottom, (_x, y) => {
+      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
+      return vary([150, 118, 70], 10, r);
+    }),
+
+  // chunky cobblestone: irregular light stones separated by dark mortar
+  cobble: (img, r) =>
+    tileRegion(img, TILES.cobble, (x, y) => {
+      const cell = ((x + (Math.floor(y / 5) % 2) * 3) / 5) | 0;
+      const row = (y / 5) | 0;
+      const edge = x % 5 === 4 || y % 5 === 4;
+      if (edge) return vary([74, 74, 78], 8, r);
+      const tone = (cell + row) % 3;
+      const base: RGB = tone === 0 ? [140, 140, 144] : tone === 1 ? [118, 118, 122] : [100, 100, 104];
+      return vary(base, 12, r);
+    }),
+
+  // ---- furnace: cobble shell, dark arch opening, lit variant glows ----
+  furnace_top: (img, r) =>
+    tileRegion(img, TILES.furnace_top, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      // recessed vent square in the middle
+      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66], 8, r);
+      return vary([124, 124, 128], 12, r);
+    }),
+  furnace_side: (img, r) =>
+    tileRegion(img, TILES.furnace_side, () =>
+      Math.random() < 0.001 ? vary([100, 100, 104], 8, r) : vary([120, 120, 124], 14, r)
+    ),
+  furnace_front: (img, r) =>
+    tileRegion(img, TILES.furnace_front, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      // hearth opening: arch across the lower-middle
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);   // lintel shadow
+        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);  // dark mouth
+        if (y === 12) return vary([70, 70, 74], 6, r);           // hearth lip
+      }
+      return vary([124, 124, 128], 12, r);
+    }),
+  furnace_front_lit: (img, r) =>
+    tileRegion(img, TILES.furnace_front_lit, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
+        if (y >= 7 && y <= 11) {
+          // flame tongues rising out of the coals
+          const h = 11 - y;
+          const flame = (x * 7 + h * 3) % 5;
+          if (h >= 3) return flame < 2 ? vary([255, 214, 92], 18, r) : vary([28, 24, 22], 5, r);
+          if (h === 2) return flame < 3 ? vary([255, 160, 40], 20, r) : vary([120, 40, 16], 12, r);
+          return vary([228, 88, 24], 22, r);
+        }
+        if (y === 12) return vary([70, 70, 74], 6, r);
+      }
+      return vary([124, 124, 128], 12, r);
     }),
 };
 

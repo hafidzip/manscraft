@@ -5,7 +5,7 @@
 // override think() for fully custom behaviour.
 import * as THREE from 'three';
 import type { WorldLike } from './World';
-import { WORLD_SIZE } from './World';
+import { WORLD_SIZE, WORLD_HEIGHT, wrapDelta } from '../core/constants';
 import { Effects } from './effects';
 import { AudioSynth } from './audio';
 import { box, MATS } from './models';
@@ -86,6 +86,45 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
 /** Extra speed while sprinting after a player who is out of firing position. */
 const CHASE_SPRINT = 1.3;
 
+// ---------------------------------------------------------------------------
+// CONTEXT STEERING
+// ---------------------------------------------------------------------------
+// Rather than shoving the agent straight at its goal and hoping collision
+// resolves the rest (which reads as "walks into walls until it gives up"),
+// every frame we score a fan of candidate directions against the voxel world:
+//
+//   interest  how well the direction serves the goal (dot product)
+//   danger    walls taller than a step, lethal drops, corner clipping
+//
+// The best-scoring direction wins. This is the standard context-steering /
+// steering-behaviour approach and it gives smooth wall sliding, doorway
+// threading and ledge avoidance for free, with A* reserved for real routing.
+// ---------------------------------------------------------------------------
+
+/** candidate directions in the context map (45° apart) */
+const STEER_DIRS = 8;
+const STEER_COS = new Float32Array(STEER_DIRS);
+const STEER_SIN = new Float32Array(STEER_DIRS);
+for (let i = 0; i < STEER_DIRS; i++) {
+  const a = (i / STEER_DIRS) * Math.PI * 2;
+  STEER_COS[i] = Math.cos(a);
+  STEER_SIN[i] = Math.sin(a);
+}
+
+/** how far ahead each probe looks (blocks) */
+const PROBE_DIST = 1.15;
+/** tallest ledge the agent walks up without jumping */
+const MAX_STEP = 1;
+/** tallest ledge the agent will jump onto */
+const MAX_JUMP_UP = 2;
+/** deepest drop the agent is willing to walk off */
+const MAX_SAFE_DROP = 4;
+
+/** line-of-sight sample heights: head, chest, feet (module-level: no per-frame array alloc) */
+const LOS_HEIGHTS = [1.6, 1.1, 0.2];
+/** out of firing range a single torso ray keeps awareness at 1/3 the cost */
+const LOS_HEIGHTS_FAR = [1.1];
+
 /** minimal player surface enemies need (the unified engine Player satisfies it) */
 export interface EnemyPlayer {
   pos: THREE.Vector3;
@@ -103,6 +142,10 @@ export interface EnemyDeps {
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
 const tmpV3 = new THREE.Vector3();
+/** per-frame minimum-image copy of the player position (toroidal world) */
+const tmpPlayerImg = new THREE.Vector3();
+/** scratch result for the context-steering solver (single-threaded) */
+const steerOut = { x: 0, z: 0, jump: false };
 
 export class Enemy {
   cfg: EnemyConfig;
@@ -150,6 +193,24 @@ export class Enemy {
   private jumpCd = 0;
   /** while > 0 a wall beat direct pursuit, so route around it with A* */
   private directBlockT = 0;
+  /** last context-steering direction index (commitment / anti-jitter) */
+  private lastSteerIdx = -1;
+  /** consecutive frames the context map found no way forward */
+  private boxedT = 0;
+  // ---- steering throttle: the context map is resolved a few times a second
+  // (staggered per agent), not every frame. Velocity integration keeps the
+  // motion smooth in between, and re-solving faster than the agent can cross
+  // a voxel is wasted work.
+  private steerT = Math.random() * 0.1;
+  private steerX = 0;
+  private steerZ = 0;
+  private steerJump = false;
+  private steerBoxed = false;
+  /** cached corridor test (same cadence as steering) */
+  private corridorT = Math.random() * 0.15;
+  private corridorOk = false;
+  /** LOD: solve cadence, widened for agents far from the camera */
+  private steerInterval = 0.08;
   private repathFails = 0;
   private wanderAngle = Math.random() * Math.PI * 2;
   private flashT = 0;
@@ -384,6 +445,10 @@ export class Enemy {
     }
 
     if (this.state === 'spawn') {
+      // keep the rise-from-the-ground intro on the camera's render image
+      const camS = this.deps.camera.position;
+      this.group.position.x = this.pos.x + Math.round((camS.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE;
+      this.group.position.z = this.pos.z + Math.round((camS.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE;
       this.group.position.y = this.pos.y + Math.min(1, this.stateT / 0.5) * 0 - (1 - Math.min(1, this.stateT / 0.5)) * 1.2;
       if (this.stateT > 0.5) { this.state = this.patrolPoints.length ? 'patrol' : 'chase'; this.group.position.y = this.pos.y; }
       return true;
@@ -400,18 +465,33 @@ export class Enemy {
       this.strafeDir = Math.random() > 0.5 ? 1 : -1;
     }
 
+    // ---- toroidal minimum-image: the player rides unbounded trip space
+    // while enemies live in wrapped torus space. Every perception/aim
+    // computation below uses the player IMAGE nearest to this agent, so
+    // aggro, LOS and shooting keep working after the ship crosses the world
+    // seam (the "camps look deserted after landing from space" bug).
+    const pp = tmpPlayerImg.set(
+      this.pos.x + wrapDelta(player.pos.x - this.pos.x, WORLD_SIZE),
+      player.pos.y,
+      this.pos.z + wrapDelta(player.pos.z - this.pos.z, WORLD_SIZE),
+    );
+
     // ---- perception (multi-point LOS: check eyes-to-head, eyes-to-torso,
     // eyes-to-feet so the AI can spot a partially exposed player)
-    const toPlayer = tmpV.copy(player.pos).sub(this.pos);
+    const toPlayer = tmpV.copy(pp).sub(this.pos);
     const dist = Math.hypot(toPlayer.x, toPlayer.z);
     void toPlayer.length(); // used implicitly via dist
     if (this.losTimer <= 0) {
-      this.losTimer = 0.2;
+      // distant agents re-check line of sight far less often; each check is
+      // up to three voxel raycasts
+      this.losTimer = dist < 30 ? 0.2 : dist < 70 ? 0.5 : 1.0;
       const eye = tmpV2.copy(this.pos).add(tmpV3.set(0, 1.6, 0));
       this.hasLos = false;
-      // check three heights: head (1.6), chest (1.1), feet (0.2)
-      for (const tgtY of [1.6, 1.1, 0.2]) {
-        const dir = tmpV3.copy(player.pos).add(tmpV.set(0, tgtY, 0)).sub(eye);
+      // check three heights: head (1.6), chest (1.1), feet (0.2). Beyond
+      // firing range a single torso ray is enough to maintain awareness.
+      const rays = dist <= c.attackRange ? LOS_HEIGHTS : LOS_HEIGHTS_FAR;
+      for (const tgtY of rays) {
+        const dir = tmpV3.copy(pp).add(tmpV.set(0, tgtY, 0)).sub(eye);
         const d = dir.length();
         dir.divideScalar(d || 1);
         const hit = this.deps.world.raycast(eye, dir, d);
@@ -422,7 +502,7 @@ export class Enemy {
     // ---- target memory
     let hasLos = this.hasLos;  // let so leash can suppress it
     if (hasLos) {
-      this.lastKnown.copy(player.pos);
+      this.lastKnown.copy(pp);
       this.hasTarget = true;
       this.searchT = 0;
     } else {
@@ -431,7 +511,7 @@ export class Enemy {
 
     // ── leash: player dragged us too far from camp ──
     if (this.home && this.state !== 'dead') {
-      const pd = Math.hypot(player.pos.x - this.home.x, player.pos.z - this.home.z);
+      const pd = Math.hypot(pp.x - this.home.x, pp.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
         this.leashT += dt;
         if (this.leashT > 3) {
@@ -466,6 +546,11 @@ export class Enemy {
       faceX = wp.x - this.pos.x;
       faceZ = wp.z - this.pos.z;
     }
+    // While moving without a clear shot, face where we are actually walking —
+    // otherwise the model moon-walks around obstacles while staring ahead.
+    if (!hasLos && (Math.abs(this.vel.x) + Math.abs(this.vel.z)) > 0.8) {
+      faceX = this.vel.x; faceZ = this.vel.z;
+    }
     const targetYaw = Math.atan2(faceX, faceZ);
     let dy = targetYaw - this.yaw;
     while (dy > Math.PI) dy -= Math.PI * 2;
@@ -473,6 +558,12 @@ export class Enemy {
     this.yaw += dy * Math.min(1, dt * 8);
 
     // ---- steering (world space)
+    // LOD: agents the player can't scrutinise re-solve their context map far
+    // less often. Combat-range agents stay responsive; a distant camp costs
+    // almost nothing.
+    this.steerInterval = dist < 24 ? 0.08 : dist < 60 ? 0.2 : 0.45;
+    this.steerT -= dt;
+    this.corridorT -= dt;
     this.repathT -= dt;
     this.jumpCd = Math.max(0, this.jumpCd - dt);
     let wx = 0, wz = 0;
@@ -485,14 +576,19 @@ export class Enemy {
       if (patrolSteerGoal) {
         const pdx = patrolSteerGoal.x - this.pos.x;
         const pdz = patrolSteerGoal.z - this.pos.z;
-        const pd = Math.hypot(pdx, pdz) || 1;
-        wx = (pdx / pd) * CAMP_CONFIG.patrolSpeedFactor;
-        wz = (pdz / pd) * CAMP_CONFIG.patrolSpeedFactor;
+        this.steerContext(pdx, pdz, steerOut);
+        wx = steerOut.x * CAMP_CONFIG.patrolSpeedFactor;
+        wz = steerOut.z * CAMP_CONFIG.patrolSpeedFactor;
+        if (steerOut.jump) wantJump = true;
+        // fully boxed in on patrol: turn around at the next waypoint
+        if (steerOut.x === 0 && steerOut.z === 0) {
+          this.patrolIdx = (this.patrolIdx + 1) % Math.max(1, this.patrolPoints.length);
+        }
       } else {
         // dwelling: damp velocity, idle arm sway
         wx = 0; wz = 0;
       }
-    } else if (hasLos && this.directBlockT <= 0) {
+    } else if (hasLos && this.directBlockT <= 0 && this.corridorCached(pp.x, pp.z)) {
       // ---- direct pursuit: the player is visible, so run them down at ANY
       // distance. Previously this branch only ran inside preferredRange and
       // everything further away fell through to A*, where a starved path
@@ -505,29 +601,44 @@ export class Enemy {
       const rx = fz, rz = -fx;
       const want = c.preferredRange;
 
+      // build the DESIRED heading (tactics), then let the context map find a
+      // walkable direction closest to it (navigation)
+      let dX = 0, dZ = 0;
       if (dist > want) {
-        // commit to closing the gap: orbiting fades out as range grows
         const urgency = Math.min(1, (dist - want) / 7);
-        wx += fx; wz += fz;
+        dX += fx; dZ += fz;
         const orbit = 0.6 * (1 - urgency);
-        wx += rx * this.strafeDir * orbit;
-        wz += rz * this.strafeDir * orbit;
+        dX += rx * this.strafeDir * orbit;
+        dZ += rz * this.strafeDir * orbit;
       } else if (dist < want * 0.55) {
-        wx -= fx * 0.85; wz -= fz * 0.85;
-        wx += rx * this.strafeDir * 0.7;
-        wz += rz * this.strafeDir * 0.7;
+        dX -= fx * 0.85; dZ -= fz * 0.85;
+        dX += rx * this.strafeDir * 0.7;
+        dZ += rz * this.strafeDir * 0.7;
       } else {
-        wx += fx * 0.3; wz += fz * 0.3;
-        wx += rx * this.strafeDir * 0.7;
-        wz += rz * this.strafeDir * 0.7;
+        dX += fx * 0.3; dZ += fz * 0.3;
+        dX += rx * this.strafeDir * 0.7;
+        dZ += rz * this.strafeDir * 0.7;
       }
 
-      // hop over small ledges while advancing / circling
-      if (this.grounded && this.jumpCd <= 0) {
-        const ax = Math.round(this.pos.x + wx * 0.7);
-        const az = Math.round(this.pos.z + wz * 0.7);
-        const fy = Math.floor(this.pos.y);
-        if (this.deps.world.solid(ax, fy, az) && !this.deps.world.solid(ax, fy + 2, az)) wantJump = true;
+      this.steerContext(dX, dZ, steerOut);
+      if (steerOut.x === 0 && steerOut.z === 0) {
+        // nowhere to go locally — hand this over to A* immediately instead of
+        // grinding into the wall until the stuck timer notices
+        this.boxedT += dt;
+        this.directBlockT = 0.9;
+        this.lastKnown.copy(pp);
+        this.hasTarget = true;
+        this.repathT = 0;
+      } else {
+        this.boxedT = 0;
+        wx = steerOut.x; wz = steerOut.z;
+        if (steerOut.jump) wantJump = true;
+        // flip the orbit direction when the chosen path fights the desired
+        // one badly (we are sliding along a wall) so we round corners
+        if (steerOut.x * dX + steerOut.z * dZ < 0.25 && this.strafeTimer > 0.6) {
+          this.strafeDir = -this.strafeDir;
+          this.strafeTimer = 0.5;
+        }
       }
     } else if (this.hasTarget) {
       // ---- navigate to the last known position with A*
@@ -556,6 +667,22 @@ export class Enemy {
 
       // ---- follow the path
       if (this.pathIdx < this.path.length) {
+        // string-pulling: skip ahead to the furthest waypoint we can still
+        // walk to in a straight line. Raw A* output is a blocky staircase;
+        // this turns it into natural diagonal movement.
+        // only re-evaluate on a steer tick: the smoothing result is stable
+        // between solves and this used to run up to 4 corridor scans a frame
+        if (this.steerT <= 0) {
+          let look = this.pathIdx;
+          const maxLook = Math.min(this.path.length - 1, this.pathIdx + 3);
+          for (let k = maxLook; k > this.pathIdx; k--) {
+            const cand = this.path[k];
+            if (Math.abs(cand.y - this.pos.y) <= MAX_JUMP_UP &&
+                this.corridorClear(cand.x, cand.z, 6)) { look = k; break; }
+          }
+          this.pathIdx = look;
+        }
+
         const wp = this.path[this.pathIdx];
         const dxw = wp.x - this.pos.x;
         const dzw = wp.z - this.pos.z;
@@ -567,9 +694,17 @@ export class Enemy {
         if (hd < 0.42 && dyw < 0.6 && dyw > -1.6) {
           this.pathIdx++;
         } else {
-          const invd = 1 / (hd || 1);
-          wx = dxw * invd;
-          wz = dzw * invd;
+          // steer through the voxels toward the waypoint rather than at it
+          this.steerContext(dxw, dzw, steerOut);
+          if (steerOut.x === 0 && steerOut.z === 0) {
+            // the route is stale (world changed / bad node) — force a rebuild
+            this.repathT = 0;
+            this.path.length = 0;
+            this.pathIdx = 0;
+          } else {
+            wx = steerOut.x; wz = steerOut.z;
+            if (steerOut.jump) wantJump = true;
+          }
           // jump up a step, or hop a gap when the next node is across a drop
           if (this.grounded && this.jumpCd <= 0 && dyw > 0.55 && hd < 1.6) wantJump = true;
         }
@@ -585,13 +720,19 @@ export class Enemy {
         const dzw = this.lastKnown.z - this.pos.z;
         const hd = Math.hypot(dxw, dzw);
         if (hd > 1.1) {
-          wx = dxw / hd;
-          wz = dzw / hd;
+          this.steerContext(dxw, dzw, steerOut);
+          wx = steerOut.x; wz = steerOut.z;
+          if (steerOut.jump) wantJump = true;
         } else if (this.searchT > 3) {
           // arrived at the memory and found nothing: sweep the area
           this.wanderAngle += (Math.random() - 0.5) * dt * 2;
-          wx = Math.sin(this.wanderAngle) * 0.5;
-          wz = Math.cos(this.wanderAngle) * 0.5;
+          this.steerContext(Math.sin(this.wanderAngle), Math.cos(this.wanderAngle), steerOut);
+          if (steerOut.x === 0 && steerOut.z === 0) {
+            // cornered while searching — spin to a fresh heading
+            this.wanderAngle += Math.PI * (0.5 + Math.random());
+          } else {
+            wx = steerOut.x * 0.5; wz = steerOut.z * 0.5;
+          }
         }
       }
     }
@@ -632,18 +773,30 @@ export class Enemy {
     const wantsToMove = Math.hypot(wx, wz) > 0.1;
     if (this.stateT > 0.6 && wantsToMove && moveDelta < 0.02 && this.grounded) {
       this.stuckTimer += dt;
-      if (this.stuckTimer > 0.28) {
-        // Something taller than a step is in the way. Hop it, shove sideways
-        // so we stop grinding into the same corner, and hand the next second
-        // of navigation to A* even if the player is in plain sight.
-        if (this.jumpCd <= 0) { this.vel.y = 8.6; this.jumpCd = 0.35; }
-        const sx = Math.cos(this.yaw) * this.strafeDir;
-        const sz = -Math.sin(this.yaw) * this.strafeDir;
-        this.vel.x += sx * 3.4;
-        this.vel.z += sz * 3.4;
+      if (this.stuckTimer > 0.3) {
+        // Context steering should have prevented this, so a stall here means
+        // something unusual: a closing door, another agent, or a freshly
+        // placed block. Escape along the widest opening rather than blindly
+        // strafing, then rebuild the route.
+        let escX = 0, escZ = 0, bestCost = Infinity;
+        for (let i = 0; i < STEER_DIRS; i++) {
+          const cost = this.probeStep(STEER_COS[i], STEER_SIN[i]);
+          if (cost >= 0 && cost < bestCost) {
+            bestCost = cost; escX = STEER_COS[i]; escZ = STEER_SIN[i];
+          }
+        }
+        if (bestCost === Infinity) {
+          // truly entombed: jump straight up, it is the only axis left
+          if (this.jumpCd <= 0) { this.vel.y = 8.6; this.jumpCd = 0.35; }
+        } else {
+          this.vel.x += escX * 3.6;
+          this.vel.z += escZ * 3.6;
+          if (bestCost >= 1.6 && this.jumpCd <= 0) { this.vel.y = 8.6; this.jumpCd = 0.35; }
+        }
+        this.lastSteerIdx = -1;
         this.strafeDir = -this.strafeDir;
         this.directBlockT = 1.1;
-        if (hasLos) { this.lastKnown.copy(player.pos); this.hasTarget = true; this.searchT = 0; }
+        if (hasLos) { this.lastKnown.copy(pp); this.hasTarget = true; this.searchT = 0; }
         this.stuckTimer = 0;
         this.repathT = 0;
         this.path.length = 0;
@@ -667,12 +820,15 @@ export class Enemy {
     // but holds its fire, so it can't snipe you across the map.
     const fireRange = ENEMY_FIRE_MODE === 'distance' ? ENEMY_FIRE_RANGE : c.attackRange;
     const inFireRange = dist <= fireRange;
+    // Camps keep shooting at a piloting player too — the ship is invulnerable
+    // (damagePlayer ignores hits in flight) but the firefight reads correctly.
+    // Tracers can't pile up because the FX pool advances in tickPilot as well.
     if (this.state !== 'patrol' && hasLos && inFireRange) {
       this.state = 'attack';
       if (this.burstLeft > 0) {
         this.burstTimer -= dt;
         if (this.burstTimer <= 0) {
-          this.fireOneShot(player, dist);
+          this.fireOneShot(pp, dist);
           this.burstLeft--;
           this.burstTimer = c.burstDelay;
         }
@@ -693,7 +849,7 @@ export class Enemy {
 
     // Aim the two arms and weapon as one combat pose whenever there is line of sight.
     const shoulder = tmpV.set(this.pos.x + Math.sin(this.yaw) * 0.31, this.pos.y + 1.28, this.pos.z + Math.cos(this.yaw) * 0.31);
-    const aim = tmpV2.copy(player.pos).add(tmpV3.set(0, 1.1, 0)).sub(shoulder);
+    const aim = tmpV2.copy(pp).add(tmpV3.set(0, 1.1, 0)).sub(shoulder);
     const horiz = Math.hypot(aim.x, aim.z);
     const pitch = Math.atan2(aim.y, horiz || 1);
     this.aimPitch = THREE.MathUtils.clamp(pitch, -0.38, 0.38);
@@ -721,22 +877,40 @@ export class Enemy {
       for (const m of this.bodyMats) m.emissive.setRGB(e, e, e);
     }
 
-    // ---- sync transform
-    this.group.position.copy(this.pos);
+    // ---- sync transform: render at the nearest-image copy toward the
+    // camera, exactly like World.syncChunkOffsets does for terrain. Without
+    // this the camp mesh and its defenders drift a full world length apart
+    // once the player crosses the torus seam.
+    const camPos = this.deps.camera.position;
+    this.group.position.set(
+      this.pos.x + Math.round((camPos.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE,
+      this.pos.y,
+      this.pos.z + Math.round((camPos.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE,
+    );
     this.group.rotation.y = this.yaw;
-    this.hpBar.lookAt(this.deps.camera.position.x, this.hpBar.getWorldPosition(tmpV).y, this.deps.camera.position.z);
     const f = Math.max(0, this.hp / c.hp);
-    this.hpFill.scale.x = f;
-    this.hpFill.position.x = -(1 - f) * 0.33;
+    // health bar only exists once damaged — skip the billboard matrix work
+    // (getWorldPosition forces a matrix update) for untouched agents
+    this.hpBar.visible = f < 1;
+    if (f < 1) {
+      this.hpBar.lookAt(this.deps.camera.position.x, this.hpBar.getWorldPosition(tmpV).y, this.deps.camera.position.z);
+      this.hpFill.scale.x = f;
+      this.hpFill.position.x = -(1 - f) * 0.33;
+    }
     this.hpFill.visible = f < 1;
     return true;
   }
 
-  private fireOneShot(player: EnemyPlayer, dist: number) {
+  /** `playerPos` must already be the minimum-image copy near this agent. */
+  private fireOneShot(playerPos: THREE.Vector3, dist: number) {
     this.recoilT = 0.06;
     this.weaponKick = 1;
     const muzzle = this.muzzle.getWorldPosition(new THREE.Vector3());
-    const target = player.pos.clone().add(tmpV.set(0, 1.0, 0));
+    // the muzzle world position carries the render image offset; shots must
+    // be computed in the agent's own (wrapped) space
+    muzzle.x = this.pos.x + wrapDelta(muzzle.x - this.pos.x, WORLD_SIZE);
+    muzzle.z = this.pos.z + wrapDelta(muzzle.z - this.pos.z, WORLD_SIZE);
+    const target = playerPos.clone().add(tmpV.set(0, 1.0, 0));
     const dir = target.sub(muzzle).normalize();
     const spread = (1 - this.cfg.accuracy) * 0.09;
     dir.x += (Math.random() - 0.5) * spread;
@@ -744,33 +918,218 @@ export class Enemy {
     dir.z += (Math.random() - 0.5) * spread;
     dir.normalize();
 
-    this.deps.effects.muzzleFlash(muzzle, 0.45);
+    // visuals render in camera space: shift by the camera's image offset so
+    // tracers/flashes stay visible on whichever side of the seam we render
+    const cam = this.deps.camera.position;
+    const vX = Math.round((cam.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE;
+    const vZ = Math.round((cam.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE;
+    const vis = (v: THREE.Vector3) => new THREE.Vector3(v.x + vX, v.y, v.z + vZ);
+
+    this.deps.effects.muzzleFlash(vis(muzzle), 0.45);
     this.deps.audio.shot({ freq: 1700, dur: 0.07, gain: 0.26 * THREE.MathUtils.clamp(1 - dist / 150, 0.15, 1), sub: 260 });
 
     // did the shot reach the player before terrain?
-    const toP = player.pos.clone().add(tmpV.set(0, 0.95, 0)).sub(muzzle);
+    const toP = playerPos.clone().add(tmpV.set(0, 0.95, 0)).sub(muzzle);
     const t = toP.dot(dir);
     let hitPlayer = false;
     if (t > 0) {
       const closest = muzzle.clone().addScaledVector(dir, t);
-      if (closest.distanceTo(player.pos.clone().add(tmpV.set(0, 0.95, 0))) < 0.55) {
+      if (closest.distanceTo(playerPos.clone().add(tmpV.set(0, 0.95, 0))) < 0.55) {
         const worldHit = this.deps.world.raycast(muzzle, dir, t);
         if (!worldHit || worldHit.dist > t - 0.1) hitPlayer = true;
       }
     }
     const end = muzzle.clone().addScaledVector(dir, 200);
     if (hitPlayer) {
-      this.deps.effects.tracer(muzzle, player.pos.clone().add(tmpV.set(0, 1.0, 0)));
+      this.deps.effects.tracer(vis(muzzle), vis(playerPos).add(tmpV.set(0, 1.0, 0)));
       this.deps.onPlayerHit(this.cfg.damage, muzzle);
     } else {
       const worldHit = this.deps.world.raycast(muzzle, dir, 200);
       const endPoint = worldHit ? worldHit.point : end;
-      this.deps.effects.tracer(muzzle, endPoint);
-      if (worldHit) this.deps.effects.impact(worldHit.point, worldHit.normal, worldHit.block);
+      this.deps.effects.tracer(vis(muzzle), vis(endPoint));
+      if (worldHit) this.deps.effects.impact(vis(worldHit.point), worldHit.normal, worldHit.block);
     }
   }
 
   // ------------------------------------------------------------ physics
+
+  /** collision-safe lateral shove (used by squad separation) */
+  nudge(dx: number, dz: number): void {
+    this.moveAxis(0, dx);
+    this.moveAxis(2, dz);
+  }
+
+  // ---------------------------------------------------- navigation sensing
+
+  /**
+   * Ground level the agent would stand on near (x, z), searching from
+   * `fromY + MAX_JUMP_UP` downward. Returns the feet Y, or -1 when there is
+   * no footing within MAX_SAFE_DROP (a cliff, water pit or the void).
+   */
+  private groundNear(x: number, z: number, fromY: number): number {
+    const w = this.deps.world;
+    const hw = this.halfW;
+    // Footprint columns: the 0.6-wide body spans at most 2 cells per axis, so
+    // resolve them once instead of re-deriving them for every Y (the old code
+    // called fits() per level = up to 8 voxel reads each).
+    const x0 = Math.floor(x - hw), x1 = Math.floor(x + hw);
+    const z0 = Math.floor(z - hw), z1 = Math.floor(z + hw);
+    const twoX = x1 !== x0, twoZ = z1 !== z0;
+
+    const top = Math.floor(fromY) + MAX_JUMP_UP;
+    const bottom = Math.floor(fromY) - MAX_SAFE_DROP;
+
+    // Walk down one level at a time reusing the "body clear" test from the
+    // level above: clear(y) needs y and y+1 free, so cache the upper row.
+    let upperFree = this.rowFree(w, x0, x1, z0, z1, twoX, twoZ, top + 1);
+    for (let y = top; y >= bottom; y--) {
+      if (y < 1) break;
+      const midFree = this.rowFree(w, x0, x1, z0, z1, twoX, twoZ, y);
+      if (midFree && upperFree && this.rowSolidAny(w, x0, x1, z0, z1, twoX, twoZ, y - 1)) return y;
+      upperFree = midFree;
+    }
+    return -1;
+  }
+
+  /** every footprint cell on this level is non-solid */
+  private rowFree(
+    w: WorldLike, x0: number, x1: number, z0: number, z1: number,
+    twoX: boolean, twoZ: boolean, y: number,
+  ): boolean {
+    if (w.solid(x0, y, z0)) return false;
+    if (twoX && w.solid(x1, y, z0)) return false;
+    if (twoZ && w.solid(x0, y, z1)) return false;
+    if (twoX && twoZ && w.solid(x1, y, z1)) return false;
+    return true;
+  }
+
+  /** at least one footprint cell on this level is solid (a floor exists) */
+  private rowSolidAny(
+    w: WorldLike, x0: number, x1: number, z0: number, z1: number,
+    twoX: boolean, twoZ: boolean, y: number,
+  ): boolean {
+    if (w.solid(x0, y, z0)) return true;
+    if (twoX && w.solid(x1, y, z0)) return true;
+    if (twoZ && w.solid(x0, y, z1)) return true;
+    if (twoX && twoZ && w.solid(x1, y, z1)) return true;
+    return false;
+  }
+
+  /**
+   * Cost of stepping one probe-length along (dx, dz).
+   *   -1  impassable: wall above jump height, cliff, or a clipped corner
+   *    0  flat and clear
+   *   >0  climbing / dropping penalty
+   */
+  private probeStep(dx: number, dz: number): number {
+    const px = this.pos.x + dx * PROBE_DIST;
+    const pz = this.pos.z + dz * PROBE_DIST;
+
+    const gy = this.groundNear(px, pz, this.pos.y);
+    if (gy < 0) return -1;                        // cliff or blocked column
+
+    const rise = gy - Math.floor(this.pos.y);
+    if (rise > MAX_JUMP_UP) return -1;            // wall we cannot mount
+
+    // corner guard: the halfway cell must also admit the body, otherwise the
+    // agent scrapes a block edge and stalls
+    const mx = this.pos.x + dx * PROBE_DIST * 0.5;
+    const mz = this.pos.z + dz * PROBE_DIST * 0.5;
+    if (this.groundNear(mx, mz, this.pos.y) < 0) return -1;
+
+    let cost = 0;
+    if (rise > MAX_STEP) cost += 1.6;             // needs a jump
+    else if (rise > 0) cost += 0.25;              // step up
+    const drop = Math.floor(this.pos.y) - gy;
+    if (drop > 1) cost += drop * 0.4;             // discourage tumbling down
+    return cost;
+  }
+
+  /**
+   * Throttled front-end for the context map. Re-solves at `steerHz` and
+   * replays the cached direction in between, which is what keeps a full
+   * squad off the frame budget. `steerT` is seeded randomly per agent so
+   * the solves spread across frames instead of spiking together.
+   */
+  private steerContext(desX: number, desZ: number, out: { x: number; z: number; jump: boolean }): void {
+    if (this.steerT > 0) {
+      out.x = this.steerX; out.z = this.steerZ; out.jump = this.steerJump;
+      if (this.steerBoxed) { out.x = 0; out.z = 0; }
+      return;
+    }
+    this.steerT = this.steerInterval;
+    this.solveContext(desX, desZ, out);
+    this.steerX = out.x; this.steerZ = out.z; this.steerJump = out.jump;
+    this.steerBoxed = out.x === 0 && out.z === 0;
+  }
+
+  /**
+   * Context steering: score every candidate direction against the desired
+   * heading and the surrounding voxels, then return the best one in
+   * (outX, outZ). Falls back to zero when fully boxed in.
+   */
+  private solveContext(desX: number, desZ: number, out: { x: number; z: number; jump: boolean }): void {
+    out.x = 0; out.z = 0; out.jump = false;
+    const dl = Math.hypot(desX, desZ);
+    if (dl < 1e-4) return;
+    desX /= dl; desZ /= dl;
+
+    let bestScore = -Infinity;
+    let bestIdx = -1;
+    let bestCost = 0;
+    for (let i = 0; i < STEER_DIRS; i++) {
+      const cx = STEER_COS[i], cz = STEER_SIN[i];
+      const align = cx * desX + cz * desZ;
+      if (align < -0.2) continue;                 // never reverse into the goal
+      const cost = this.probeStep(cx, cz);
+      if (cost < 0) continue;                     // impassable
+      // interest minus danger, with a nudge toward last frame's pick so the
+      // agent commits to a detour instead of oscillating at a corner
+      let s = align - cost * 0.55;
+      if (i === this.lastSteerIdx) s += 0.18;
+      if (s > bestScore) { bestScore = s; bestIdx = i; bestCost = cost; }
+    }
+
+    if (bestIdx < 0) return;                      // boxed in — caller repaths
+    this.lastSteerIdx = bestIdx;
+    out.x = STEER_COS[bestIdx];
+    out.z = STEER_SIN[bestIdx];
+    out.jump = bestCost >= 1.6;                   // chosen route needs a hop
+  }
+
+  /**
+   * Is there a straight, walkable corridor from here to (tx, tz)? Used to
+   * decide whether direct pursuit is honest or whether we owe the agent a
+   * real A* route around the geometry.
+   */
+  private corridorCached(tx: number, tz: number): boolean {
+    if (this.corridorT > 0) return this.corridorOk;
+    this.corridorT = this.steerInterval * 1.5;
+    this.corridorOk = this.corridorClear(tx, tz);
+    return this.corridorOk;
+  }
+
+  private corridorClear(tx: number, tz: number, maxLen = 14): boolean {
+    const dx = tx - this.pos.x, dz = tz - this.pos.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.001) return true;
+    if (len > maxLen) return false;
+    const nx = dx / len, nz = dz / len;
+    // 1.6-block stride: fine enough to catch a 1-block pillar, half the
+    // samples of the original 0.9 stride
+    const steps = Math.ceil(len / 1.6);
+    let y = this.pos.y;
+    for (let i = 1; i <= steps; i++) {
+      const t = (i / steps) * len;
+      const sx = this.pos.x + nx * t;
+      const sz = this.pos.z + nz * t;
+      const gy = this.groundNear(sx, sz, y);
+      if (gy < 0) return false;
+      if (Math.abs(gy - y) > MAX_JUMP_UP) return false;
+      y = gy;
+    }
+    return true;
+  }
 
   /** true when the agent's full-height AABB is clear at this position */
   private fits(x: number, y: number, z: number): boolean {
@@ -939,17 +1298,25 @@ export class EnemyManager {
         this.enemies.splice(i, 1);
       }
     }
-    // separation
+    // separation — squadmates push apart so they never merge into one body,
+    // but the shove is routed through collision so it can't force anyone
+    // inside a wall (the old direct pos writes did exactly that)
     for (let i = 0; i < this.enemies.length; i++) {
       for (let j = i + 1; j < this.enemies.length; j++) {
         const a = this.enemies[i], b = this.enemies[j];
         if (!a.alive || !b.alive) continue;
-        const dx = a.pos.x - b.pos.x, dz = a.pos.z - b.pos.z;
+        if (Math.abs(a.pos.y - b.pos.y) > 2) continue;   // different floors
+        // cheap reject before the wrap math: squadmates that are nowhere
+        // near each other dominate this O(n^2) pass
+        const rx = a.pos.x - b.pos.x, rz = a.pos.z - b.pos.z;
+        if (rx * rx + rz * rz > 4 && Math.abs(rx) < WORLD_SIZE * 0.5) continue;
+        const dx = wrapDelta(rx, WORLD_SIZE);
+        const dz = wrapDelta(rz, WORLD_SIZE);
         const d = Math.hypot(dx, dz);
-        if (d < 0.9 && d > 0.001) {
-          const push = (0.9 - d) * 2 * dt;
-          a.pos.x += (dx / d) * push; a.pos.z += (dz / d) * push;
-          b.pos.x -= (dx / d) * push; b.pos.z -= (dz / d) * push;
+        if (d < 0.95 && d > 0.001) {
+          const push = (0.95 - d) * 2.4 * dt;
+          a.nudge((dx / d) * push, (dz / d) * push);
+          b.nudge(-(dx / d) * push, -(dz / d) * push);
         }
       }
     }
@@ -970,14 +1337,20 @@ export class EnemyManager {
   /** nearest standable block column, biased to camp ground so nobody spawns on a tent roof */
   private standablePos(x: number, z: number, hintY: number): THREE.Vector3 | null {
     const w = this.deps.world;
-    const fx = Math.floor(x), fz = Math.floor(z);
-    const top = w.highestY(fx, fz) + 1;
-    let y = Math.min(top, hintY + 4);
-    if (!canStand(w, fx, y, fz)) {
-      y = snapToGround(w, fx, y, fz, 12);
-      if (y < 0) { y = top; if (!canStand(w, fx, y, fz)) return null; }
+    const fx = ((Math.floor(x) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+    const fz = ((Math.floor(z) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+    const top = w.highestY(fx, fz);
+
+    // highestY can point at a flower/tall-grass voxel, which is not a floor.
+    // Search from the real column top down first, then use the normal snapper
+    // as a bounded fallback. This makes every valid camp column spawnable.
+    for (let y = Math.min(WORLD_HEIGHT - 2, top + 1); y >= 1; y--) {
+      if (canStand(w, fx, y, fz)) return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
+      if (top - y > 18) break;
     }
-    return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
+    const baseY = Math.max(1, Math.min(hintY + 4, WORLD_HEIGHT - 2));
+    const snapped = snapToGround(w, fx, baseY, fz, 24);
+    return snapped >= 0 ? new THREE.Vector3(fx + 0.5, snapped, fz + 0.5) : null;
   }
 
   /** watchposts first, then the patrol ring, then a fallback inner circle */
@@ -999,13 +1372,48 @@ export class EnemyManager {
       const p = this.standablePos(x, z, s.y);
       if (p) return p;
     }
+
+    // Structures can occupy every post on steep or snow-heavy worlds. Scan
+    // inward in a deterministic spiral before giving up on the camp.
+    for (let rad = 0; rad <= s.radius; rad += 2) {
+      const steps = rad === 0 ? 1 : Math.max(8, Math.ceil(rad * 2.2));
+      for (let i = 0; i < steps; i++) {
+        const a = (i / steps) * Math.PI * 2 + slot * 0.37;
+        const p = this.standablePos(s.cx + Math.cos(a) * rad, s.cz + Math.sin(a) * rad, s.y);
+        if (p) return p;
+      }
+    }
     return this.standablePos(s.cx, s.cz, s.y);
   }
 
   private spawnMember(camp: CampState, slot: number, guardPlayer: boolean): boolean {
-    const p = this.campSpawnPos(camp, slot);
-    if (!p) return false;
-    if (guardPlayer && p.distanceTo(this.player.pos) < RESPAWN_SAFE_DIST) return false;
+    let p = this.campSpawnPos(camp, slot);
+
+    // Last resort: the site center was verified dry at generation time, so
+    // drop the member on top of whatever the column holds and let physics
+    // settle them. Without this, exotic planets could leave a fully built
+    // camp with zero defenders because every probe happened to fail.
+    if (!p) {
+      const s = camp.site;
+      const w = this.deps.world;
+      const fy = w.highestY(
+        ((Math.floor(s.cx) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE,
+        ((Math.floor(s.cz) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE,
+      );
+      p = new THREE.Vector3(
+        ((Math.floor(s.cx) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE + 0.5,
+        fy + 1,
+        ((Math.floor(s.cz) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE + 0.5,
+      );
+    }
+    if (guardPlayer) {
+      // minimum-image distance: the player may be many world-lengths away
+      // in trip space while standing right on top of the camp
+      const gdx = wrapDelta(this.player.pos.x - p.x, WORLD_SIZE);
+      const gdz = wrapDelta(this.player.pos.z - p.z, WORLD_SIZE);
+      const gdy = this.player.pos.y - p.y;
+      if (gdx * gdx + gdy * gdy + gdz * gdz < RESPAWN_SAFE_DIST * RESPAWN_SAFE_DIST) return false;
+    }
     const e = new Enemy(camp.roster[slot % camp.roster.length], p, this.deps);
     e.assignCamp(camp.build);          // patrol route + leash (Task 3)
     this.enemies.push(e);
@@ -1018,7 +1426,7 @@ export class EnemyManager {
   spawnCamp(camp: CampState): void {
     for (let i = camp.squad.length; i < camp.squadSize; i++) this.spawnMember(camp, i, false);
     if (camp.squad.length) { camp.spawnedEver = true; camp.respawnTimer = CAMP_MEMBER_RESPAWN; }
-    else camp.respawnTimer = 10;        // hostile terrain: retry, don't flag cleared
+    else camp.respawnTimer = 2;         // hostile terrain: retry fast, don't flag cleared
   }
 
   /** per-camp: trickle dead members back, or repopulate a wiped camp */
@@ -1056,11 +1464,14 @@ export class EnemyManager {
     let best: EnemyHit | null = null;
     for (const e of this.enemies) {
       if (!e.alive) continue;
+      // hit-test against the enemy image nearest the shooter (torus seam)
+      const iox = Math.round((origin.x - e.pos.x) / WORLD_SIZE) * WORLD_SIZE;
+      const ioz = Math.round((origin.z - e.pos.z) / WORLD_SIZE) * WORLD_SIZE;
       // body sphere
-      const bc = e.pos.clone().add(tmpV.set(0, 1.0, 0));
+      const bc = e.pos.clone().add(tmpV.set(iox, 1.0, ioz));
       const tb = this.raySphere(origin, dir, bc, 0.52);
       // head sphere
-      const hc = e.pos.clone().add(tmpV.set(0, 1.77, 0));
+      const hc = e.pos.clone().add(tmpV.set(iox, 1.77, ioz));
       const th = this.raySphere(origin, dir, hc, 0.26);
       let t = -1, head = false;
       if (th >= 0 && (tb < 0 || th <= tb)) { t = th; head = true; }
@@ -1086,8 +1497,12 @@ export class EnemyManager {
     const r2 = hearRange * hearRange;
     for (const e of this.enemies) {
       if (!e.alive) continue;
-      if (e.pos.distanceToSquared(soundPos) < r2) {
-        e.investigate(soundPos);
+      const dx = wrapDelta(soundPos.x - e.pos.x, WORLD_SIZE);
+      const dz = wrapDelta(soundPos.z - e.pos.z, WORLD_SIZE);
+      const dy = soundPos.y - e.pos.y;
+      if (dx * dx + dy * dy + dz * dz < r2) {
+        // hand the agent the sound's image in its own wrapped neighborhood
+        e.investigate(new THREE.Vector3(e.pos.x + dx, soundPos.y, e.pos.z + dz));
       }
     }
   }
@@ -1096,14 +1511,20 @@ export class EnemyManager {
     const r2 = radius * radius;
     for (const e of this.enemies) {
       if (!e.alive) continue;
-      if (e.pos.distanceToSquared(pos) < r2) e.invalidatePath();
+      const dx = wrapDelta(pos.x - e.pos.x, WORLD_SIZE);
+      const dz = wrapDelta(pos.z - e.pos.z, WORLD_SIZE);
+      const dy = pos.y - e.pos.y;
+      if (dx * dx + dy * dy + dz * dz < r2) e.invalidatePath();
     }
   }
 
   damageInRadius(pos: THREE.Vector3, radius: number, dmg: number) {
     for (const e of this.enemies) {
       if (!e.alive) continue;
-      const d = e.pos.clone().add(tmpV.set(0, 1, 0)).distanceTo(pos);
+      const dx = wrapDelta(pos.x - e.pos.x, WORLD_SIZE);
+      const dz = wrapDelta(pos.z - e.pos.z, WORLD_SIZE);
+      const dy = pos.y - (e.pos.y + 1);
+      const d = Math.hypot(dx, dy, dz);
       if (d < radius + 0.6) e.takeDamage(dmg * (1 - d / (radius + 1)), pos, false);
     }
   }

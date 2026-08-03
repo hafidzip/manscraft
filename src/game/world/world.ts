@@ -48,11 +48,16 @@ export class World {
   readonly group = new THREE.Group();
   readonly gen: TerrainGenerator;
 
-  private chunks = new Map<string, Chunk>();
+  // Numeric keys (cx << 5 | cz) — string template keys allocated on every
+  // single voxel query, which dominated AI sensing cost.
+  private chunks = new Map<number, Chunk>();
+  /** 1-entry memo: neighbouring voxel queries almost always share a chunk */
+  private memoKey = -1;
+  private memoChunk: Chunk | null = null;
   private loadQueue: { cx: number; cz: number }[] = [];
   private dirtyQueue: Chunk[] = [];
   private dirtySet = new Set<Chunk>();
-  private lastCenter = '';
+  private lastCenter = -1;
   private lastUnloadCheck = 0;
   private batchDepth = 0;
   /** latest camera position — drives nearest-image chunk placement */
@@ -120,7 +125,7 @@ export class World {
   ): number {
     let count = 0;
     const r2 = radius * radius;
-    const touched = new Map<string, Chunk>();
+    const touched = new Map<number, Chunk>();
     /** flat [x, y, z, oldId] records, replayed to onChanged after the batch */
     const carved: number[] = [];
 
@@ -173,8 +178,9 @@ export class World {
 
   // ------------------------------------------------------------------ utils
 
-  private key(cx: number, cz: number): string {
-    return `${wrapChunk(cx)},${wrapChunk(cz)}`;
+  /** canonical numeric chunk key — allocation-free (WORLD_CHUNKS = 32) */
+  private key(cx: number, cz: number): number {
+    return (wrapChunk(cx) << 5) | wrapChunk(cz);
   }
 
   static cellsInRadius(r: number): number {
@@ -191,7 +197,10 @@ export class World {
   private ensureData(rawCx: number, rawCz: number): Chunk {
     const cx = wrapChunk(rawCx);
     const cz = wrapChunk(rawCz);
-    const k = this.key(cx, cz);
+    const k = (cx << 5) | cz;
+    // Hot path: AI probes and meshing walk neighbouring voxels, so the same
+    // chunk repeats over and over. Skip the Map hash entirely on a hit.
+    if (k === this.memoKey && this.memoChunk) return this.memoChunk;
     let c = this.chunks.get(k);
     if (!c) {
       const data = new Uint8Array(S * H * S);
@@ -208,6 +217,8 @@ export class World {
       // borders of existing neighbors may change -> re-mesh them once
       this.markNeighborBorders(cx, cz);
     }
+    this.memoKey = k;
+    this.memoChunk = c;
     return c;
   }
 
@@ -338,19 +349,26 @@ export class World {
     const [ox, oz] = this.renderOffset(c.cx, c.cz);
     c.kx = ox;
     c.kz = oz;
-    const add = (g: THREE.BufferGeometry | undefined, mat: THREE.Material, order: number) => {
+    const add = (
+      g: THREE.BufferGeometry | undefined, mat: THREE.Material, order: number,
+      castShadow: boolean,
+    ) => {
       if (!g) return;
       const mesh = new THREE.Mesh(g, mat);
       mesh.position.set(c.cx * S + ox, 0, c.cz * S + oz);
       mesh.renderOrder = order;
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
+      mesh.castShadow = castShadow;
+      mesh.receiveShadow = true;
       this.group.add(mesh);
       c.meshes.push(mesh);
     };
-    add(geoms.opaque, this.mats.opaque, 0);
-    add(geoms.cutout, this.mats.cutout, 1);
-    add(geoms.water, this.mats.water, 2);
+    // terrain casts + receives; foliage receives but never casts (dense
+    // alpha-tested blades would thrash the shadow map for no visual gain)
+    add(geoms.opaque, this.mats.opaque, 0, true);
+    add(geoms.cutout, this.mats.cutout, 1, false);
+    add(geoms.water, this.mats.water, 2, false);
     c.hasMesh = true;
     this.dirtySet.delete(c);
   }
@@ -421,7 +439,7 @@ export class World {
     if (this.loadQueue.length === 0 && centerKey !== this.lastCenter) {
       this.rebuildLoadQueue(ccx, ccz);
       this.lastCenter = centerKey;
-    } else if (this.loadQueue.length === 0 && this.lastCenter === '') {
+    } else if (this.loadQueue.length === 0 && this.lastCenter === -1) {
       this.rebuildLoadQueue(ccx, ccz);
       this.lastCenter = centerKey;
     }
@@ -461,7 +479,10 @@ export class World {
         if (c.hasMesh) continue;
         const dx = wrapDelta(c.cx - ccx, WORLD_CHUNKS);
         const dz = wrapDelta(c.cz - ccz, WORLD_CHUNKS);
-        if (dx * dx + dz * dz > lim2) this.chunks.delete(k);
+        if (dx * dx + dz * dz > lim2) {
+          this.chunks.delete(k);
+          if (this.memoKey === k) { this.memoKey = -1; this.memoChunk = null; }
+        }
       }
     }
 

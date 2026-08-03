@@ -209,6 +209,26 @@ export class Spaceship {
     this.flame.scale.setScalar(0.6 + this.load * 2.6 + Math.sin(this.bobT * 31) * 0.12 * this.load);
   }
 
+  /**
+   * Settle the ship into a stable parked hover at its current column, dropping
+   * it onto the ground if it was left airborne. Called on disembark so the
+   * hull doesn't hang over the freshly restored first-person camera.
+   */
+  settleHere(): void {
+    // find ground under the current position and rest just above it
+    let gy = 2;
+    for (let y = Math.min(Math.floor(this.pos.y), 200); y > 1; y--) {
+      if (this.world.solid(Math.floor(this.pos.x), y, Math.floor(this.pos.z))) { gy = y + 1; break; }
+    }
+    this.pos.y = Math.max(gy + HY + 0.1, Math.min(this.pos.y, gy + HY + 1.4));
+    this.baseY = this.pos.y;
+    this.vel.set(0, 0, 0);
+    this.pitchVis = 0;
+    this.bank = 0;
+    this.sync();
+    this.group.rotation.set(0, this.yaw, 0);
+  }
+
   /** parked: gentle hover bob + idle glow */
   updateParked(dt: number): void {
     this.bobT += dt;

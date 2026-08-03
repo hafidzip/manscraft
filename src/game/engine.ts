@@ -20,12 +20,19 @@ import { generateCamps, buildCamp, type CampSite, type CampBuild } from './world
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
 import { FluidSim } from './world/fluid';
-import { WATER_TIME } from './world/mesher';
+import { WATER_TIME, GRASS_TIME, GRASS_CAM, GRASS_FADE } from './world/mesher';
 import { Player, type InputState } from './player/player';
 import { raycastVoxel, type RayHit } from './player/raycast';
 import { Particles } from './vfx/particles';
 import { Sky } from './vfx/sky';
 import { LaserTool } from './vfx/laserTool';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { DepthFogPass } from './vfx/depthFog';
+import { VolumetricLightPass } from './vfx/volumetric';
+import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
@@ -34,7 +41,12 @@ import { Effects } from './fps/effects';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody, MATS, box } from './fps/models';
-import { Inventory, BLOCK_NAMES, FOODS } from './fps/Inventory';
+import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
+import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
+import {
+  newFurnace, tickFurnace, furnaceIdle, furnaceKey, isFuel, smeltResult, SMELT_TIME,
+  type FurnaceState,
+} from './crafting/smelting';
 import { ItemDropManager } from './fps/ItemDrop';
 import { buildExtrudedItem, paintDrumstick, targetTexture } from './fps/textures';
 import { Spring1 } from './fps/anim';
@@ -86,6 +98,12 @@ export interface HudStats {
   reloading: boolean;
   reloadT: number;
   inventoryOpen: boolean;
+  craftingOpen: boolean;
+  /** true while a furnace UI is open */
+  furnaceOpen: boolean;
+  /** 0..1 flame gauge and smelt-arrow progress for the open furnace */
+  furnaceBurn: number;
+  furnaceCook: number;
   slot: number;
   enemiesEnabled: boolean;
   mineCharge: number;
@@ -94,6 +112,8 @@ export interface HudStats {
   ads: number;
   hitSeq: number;
   damageSeq: number;
+  /** bearing of the last hit in view space: 0 = ahead, +π/2 = right, ±π = behind */
+  dmgAngle: number;
   demolition: number;
   blocksMined: number;
   targetsHit: number;
@@ -132,6 +152,8 @@ const DEATH_DURATION = 4;
 const TO_FPS: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,
   [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
+  [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
+  [B.COBBLE]: 11,
 };
 const FROM_FPS: Record<number, number> = Object.fromEntries(
   Object.entries(TO_FPS).map(([k, v]) => [v, Number(k)])
@@ -172,9 +194,29 @@ export class GameEngine {
   private triggerDown = false;
   private prevLeft = false;
   private placeCd = 0;
+
+  // ---- post-processing pipeline (built in init, disposed in dispose) ----
+  private composer: EffectComposer | null = null;
+  private composerRT: THREE.WebGLRenderTarget | null = null;
+  private depthFogPass: DepthFogPass | null = null;
+  private bloom: UnrealBloomPass | null = null;
+  private volumetricLight: VolumetricLightPass | null = null;
+  /** camera-mounted night torch */
+  private flashlight: THREE.SpotLight | null = null;
+  private flashlightTarget = new THREE.Object3D();
+  /** shadow-map refresh guards */
+  private lastShadowX = 1e9;
+  private lastShadowZ = 1e9;
+  private lastSunElev = 1e9;
   private inventoryOpen = false;
+  private craftingOpen = false;
+  /** every placed furnace's contents + burn state, keyed by block position */
+  private furnaces = new Map<string, FurnaceState>();
+  /** the furnace whose UI is open (null = closed) */
+  private openFurnaceKey: string | null = null;
   private hitSeq = 0;
   private damageSeq = 0;
+  private dmgAngle = 0;
   private demolition = 0;
   private blocksMined = 0;
   private mineCharge = 0;
@@ -243,6 +285,17 @@ export class GameEngine {
     this.theme = theme ?? null;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    // ---- post pipeline: soft PCF sun shadows, Reinhard tone mapping ----
+    // Reinhard (not ACES) preserves grass/block/shadow mid-tones in this
+    // Lambert voxel renderer — ACES crushes the dark faces too hard.
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ReinhardToneMapping;
+    this.renderer.toneMappingExposure = 0.88;
+
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 900);
     this.camera.rotation.order = 'YXZ';
     this.resize();
@@ -265,6 +318,8 @@ export class GameEngine {
       cutout: new THREE.MeshLambertMaterial({
         map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
       }),
+      // grass receives shadows like terrain but never casts; the sway +
+      // distance-collapse shader is injected below
       water: new THREE.MeshLambertMaterial({
         map: this.textures.water, vertexColors: true, transparent: true, opacity: 0.78,
         side: THREE.DoubleSide,
@@ -294,6 +349,47 @@ export class GameEngine {
            diffuseColor *= sampledDiffuseColor;`
         );
     };
+    // grass blade sway + distance collapse. Blade geometry (root at the
+    // block base, tips at +h) is built by the mesher; aSway carries
+    // (phase, strength, topWeight, height). The shader only adds wind sway
+    // at the tips and folds distant blades down into the ground (cheap LOD,
+    // no re-mesh). Root/tip shading is already baked into vertex colours.
+    mats.cutout.onBeforeCompile = (shader) => {
+      shader.uniforms.uGrassTime = GRASS_TIME;
+      shader.uniforms.uGrassCam = GRASS_CAM;
+      shader.uniforms.uGrassFade = GRASS_FADE;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+           attribute vec4 aSway;
+           uniform float uGrassTime;
+           uniform vec3 uGrassCam;
+           uniform vec2 uGrassFade;`
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+           float gPlant = step(0.001, aSway.y);
+           float gTw = aSway.z;
+           float gH = aSway.w;
+           float gDist = distance((modelMatrix * vec4(position, 1.0)).xz, uGrassCam.xz);
+           float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
+           vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
+           float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
+           vec3 gP = position;
+           gP += gWind * (gSw * gTw);
+           gP.y -= gTw * gH * (1.0 - gCol);
+           transformed = mix(position, gP, gPlant);`
+        );
+      // upward-biased normals kill angle-dependent black back faces while
+      // still answering the shadow map exactly like the grass_top surface
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <normal_fragment_begin>',
+          `vec3 normal = normalize( vec3( vNormal.x * 0.25, abs(vNormal.y) + 0.9, vNormal.z * 0.25 ) );`
+        );
+    };
 
     // deterministic per-planet seed; only fall back to random with no theme
     const seed = this.theme
@@ -302,13 +398,11 @@ export class GameEngine {
     this.world = new World(seed, mats);
     this.scene.add(this.world.group);
 
-    // generate and build camps on terrain before chunk meshing starts (skip if ocean theme)
-    if (this.theme?.id !== 'ocean') {
-      const sites = generateCamps(this.world.gen, seed);
-      this.camps = sites.map((site) => ({ site, build: buildCamp(this.world, site, seed) }));
-    } else {
-      this.camps = [];
-    }
+    // Generate camps for every planet type. Ocean worlds still receive camps
+    // on their deterministic dry islands; the generator itself filters out
+    // underwater footprints using the active planet sea level.
+    const sites = generateCamps(this.world.gen, seed);
+    this.camps = sites.map((site) => ({ site, build: buildCamp(this.world, site, seed) }));
 
     // dynamic water: revalidate flow whenever blocks change near water
     this.fluid = new FluidSim(this.world);
@@ -329,6 +423,62 @@ export class GameEngine {
     // re-entrant: re-tint the existing sky instead of rebuilding it
     if (this.sky) this.sky.applyTheme(this.theme?.skyHex ?? null);
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
+
+    // ---- celestial shadows: sun by day, moon by night. Both lights share
+    // the same compact PCF shadow settings; intensities cross-fade in Sky.
+    for (const light of [this.sky.sun, this.sky.moon]) {
+      light.castShadow = true;
+      light.shadow.mapSize.set(1024, 1024);
+      light.shadow.camera.left = -62;
+      light.shadow.camera.right = 62;
+      light.shadow.camera.top = 62;
+      light.shadow.camera.bottom = -62;
+      light.shadow.camera.near = 0.5;
+      light.shadow.camera.far = 180;
+      light.shadow.bias = -0.0003;
+      light.shadow.normalBias = 0.15;
+      light.shadow.radius = 2;
+    }
+
+    // ---- post pipeline: depth fog -> bloom -> god rays -> output ----
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.composerRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+    this.composerRT.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    this.composerRT.depthTexture.type = THREE.UnsignedIntType;
+
+    this.composer = new EffectComposer(this.renderer, this.composerRT);
+    // RenderPass draws the scene into the composer's *read* buffer (the
+    // cloned second RT), so that buffer also needs a depth texture for the
+    // fog pass to reconstruct world positions.
+    const rt2 = this.composer.renderTarget2;
+    rt2.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    rt2.depthTexture.type = THREE.UnsignedIntType;
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+
+    this.depthFogPass = new DepthFogPass(this.camera);
+    this.depthFogPass.material.uniforms.tDepth.value = this.composerRT.depthTexture;
+    this.composer.addPass(this.depthFogPass);
+
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.3, 0.55, 0.82);
+    this.composer.addPass(this.bloom);
+
+    this.volumetricLight = new VolumetricLightPass(this.scene, this.camera, size.x, size.y);
+    this.composer.addPass(this.volumetricLight);
+
+    this.composer.addPass(new OutputPass());
+
+    // ---- camera-mounted flashlight for night exploration ----
+    this.flashlight = new THREE.SpotLight(
+      0xe8f2ff, 0, 65, THREE.MathUtils.degToRad(48), 0.55, 1.6,
+    );
+    this.flashlight.position.set(0.15, -0.32, -1.1);
+    this.flashlightTarget.position.set(0, -1.6, -30);
+    this.camera.add(this.flashlight);
+    this.camera.add(this.flashlightTarget);
+    this.flashlight.target = this.flashlightTarget;
+
     this.particles = new Particles(this.scene);
     this.laser = new LaserTool(this.scene, this.camera);
     // ship is placed after the world exists (needed for ground sampling);
@@ -505,15 +655,212 @@ export class GameEngine {
     this.blocksMined++;
   }
 
-  /** Tab inventory — opening frees the cursor, closing re-locks it. */
+  // ---------------------------------------------------------------- crafting
+
+  /** open the inventory at the 2×2 pocket grid or the 3×3 table grid */
+  openCrafting(table: boolean): void {
+    if (table) this.inventory.setCraftSize(3);
+    else this.inventory.setCraftSize(2);
+    this.toggleInventory(true);
+  }
+
+  /**
+   * Commit `times` crafts of whatever the grid currently matches: consume one
+   * ingredient per filled cell per craft, hand the output to the inventory.
+   * Atomic — refuses to consume when the output would not fit.
+   */
+  takeCraftResult(times: number): boolean {
+    const inv = this.inventory;
+    const recipe = matchCraft(inv.craftCells, inv.craftSize);
+    if (!recipe) return false;
+    const s = inv.craftSize;
+    const possible = Math.min(times, craftableCount(inv.craft, s));
+    if (possible <= 0) return false;
+    const base = recipe.output;
+    const out: SlotItem = base.kind === 'weapon'
+      ? { ...base }
+      : { ...base, count: (base.count ?? 1) * possible };
+    if (!inv.canAdd(out)) return false;
+    for (let i = 0; i < s * s; i++) {
+      const it = inv.craft[i];
+      if (it && it.kind === 'block') {
+        it.count -= possible;
+        if (it.count <= 0) inv.craft[i] = null;
+      }
+    }
+    inv.addItem(out);
+    this.sound.playPlace('wood');
+    return true;
+  }
+
+  /**
+   * Console recipe-book craft: pull ingredients straight out of storage and
+   * hand over the output. Returns how many crafts actually happened (0 when
+   * ingredients or space run out). Keeps the book a pure read-the-recipe /
+   * click-to-craft flow like the console edition.
+   */
+  craftRecipe(id: string, times: number): number {
+    const recipe = RECIPES.find((r) => r.id === id);
+    if (!recipe || times <= 0) return 0;
+    const inv = this.inventory;
+
+    const need = new Map<number, number>();
+    for (const ing of recipeIngredients(recipe))
+      need.set(ing.blockId, (need.get(ing.blockId) ?? 0) + 1);
+
+    let possible = times;
+    for (const [bid, per] of need) {
+      let have = 0;
+      for (const arr of [inv.hotbar, inv.mainInv])
+        for (const s of arr) if (s && s.kind === 'block' && s.blockId === bid) have += s.count;
+      possible = Math.min(possible, Math.floor(have / per));
+    }
+    if (possible <= 0) return 0;
+
+    const base = recipe.output;
+    const out: SlotItem = base.kind === 'weapon'
+      ? { ...base }
+      : { ...base, count: (base.count ?? 1) * possible };
+    if (!inv.canAdd(out)) return 0;
+
+    for (const [bid, per] of need) {
+      let left = per * possible;
+      for (const arr of [inv.hotbar, inv.mainInv]) {
+        for (let i = 0; i < arr.length && left > 0; i++) {
+          const s = arr[i];
+          if (s && s.kind === 'block' && s.blockId === bid) {
+            const take = Math.min(s.count, left);
+            s.count -= take; left -= take;
+            if (s.count <= 0) arr[i] = null;
+          }
+        }
+      }
+    }
+    inv.addItem(out);
+    this.sound.playPlace('wood');
+    return possible;
+  }
+
+  // ----------------------------------------------------------------- furnace
+
+  /** live state of the furnace whose UI is open (HUD reads this) */
+  get openFurnace(): FurnaceState | null {
+    return this.openFurnaceKey ? this.furnaces.get(this.openFurnaceKey) ?? null : null;
+  }
+
+  private openFurnaceAt(x: number, y: number, z: number): void {
+    const k = furnaceKey(x, y, z);
+    if (!this.furnaces.has(k)) this.furnaces.set(k, newFurnace());
+    this.openFurnaceKey = k;
+    this.craftingOpen = false;
+    this.inventoryOpen = false;
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  closeFurnace(): void {
+    this.openFurnaceKey = null;
+    this.requestLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  /**
+   * Move one (or a whole stack with `all`) between a furnace slot and the
+   * player's inventory. Slot semantics mirror Minecraft: input and fuel take
+   * items in, output only gives them out.
+   */
+  furnaceTransfer(slot: 'input' | 'fuel' | 'output', all: boolean): void {
+    const st = this.openFurnace;
+    if (!st) return;
+    const inv = this.inventory;
+    const held = st[slot];
+
+    if (held) {
+      // pull out of the furnace
+      const take = all ? held : { ...held, count: held.kind === 'weapon' ? 1 : 1 } as SlotItem;
+      if (all) {
+        if (inv.canAdd(held)) { inv.addItem(held); st[slot] = null; }
+      } else if (held.kind !== 'weapon') {
+        if (inv.canAdd({ ...held, count: 1 })) {
+          inv.addItem({ ...held, count: 1 });
+          held.count -= 1;
+          if (held.count <= 0) st[slot] = null;
+        }
+      } else if (inv.canAdd(take)) { inv.addItem(take); st[slot] = null; }
+      this.events.onStats(this.buildStats());
+      return;
+    }
+
+    if (slot === 'output') return; // nothing to insert into the result slot
+
+    // insert the selected hotbar stack, if it is valid for this slot
+    const sel = inv.hotbar[this.sel];
+    if (!sel || sel.kind !== 'block') return;
+    const ok = slot === 'fuel' ? isFuel(sel.blockId) : !!smeltResult(sel.blockId);
+    if (!ok) return;
+    const n = all ? sel.count : 1;
+    st[slot] = { kind: 'block', blockId: sel.blockId, count: n };
+    sel.count -= n;
+    if (sel.count <= 0) { inv.hotbar[this.sel] = null; this.selectSlot(this.sel, true); }
+    this.events.onStats(this.buildStats());
+  }
+
+  /** advance every furnace; swap lit/unlit blocks as flames start and die */
+  private updateFurnaces(dt: number): void {
+    if (this.furnaces.size === 0) return;
+    for (const [k, st] of this.furnaces) {
+      const wasLit = st.burn > 0;
+      tickFurnace(st, dt);
+      const lit = st.burn > 0;
+      if (lit !== wasLit) {
+        const [x, y, z] = k.split(',').map(Number);
+        const cur = this.world.getBlockRaw(x, y, z);
+        if (cur === B.FURNACE || cur === B.FURNACE_LIT) {
+          this.world.setBlock(x, y, z, lit ? B.FURNACE_LIT : B.FURNACE);
+        }
+      }
+      // reclaim memory from furnaces that were emptied out
+      if (furnaceIdle(st) && k !== this.openFurnaceKey) this.furnaces.delete(k);
+    }
+  }
+
+  /** Tab — opens inventory. Opening frees the pointer; closing re-locks. */
   toggleInventory(open?: boolean): void {
     const want = open !== undefined ? open : !this.inventoryOpen;
+    // Close crafting if open while opening inventory (only one modal at a time)
+    if (want) this.craftingOpen = false;
     this.inventoryOpen = want;
     if (want) {
       if (document.pointerLockElement === this.canvas) document.exitPointerLock();
     } else {
       this.requestLock();
     }
+    // flush to React in the same frame the lock changes, so the inventory
+    // lands instantly instead of the pause screen flashing first
+    this.events.onStats(this.buildStats());
+  }
+
+  /** Open the crafting table 3×3 screen (separate from inventory). */
+  openCraftingTable(): void {
+    this.craftingOpen = true;
+    this.inventoryOpen = false;
+    this.inventory.setCraftSize(3);
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  /** Close the crafting table screen. */
+  closeCraftingTable(): void {
+    this.craftingOpen = false;
+    // return items in craft grid to inventory, shrink back to 2×2 pocket
+    const inv = this.inventory;
+    for (let i = 0; i < inv.craft.length; i++) {
+      const it = inv.craft[i];
+      if (it) { inv.addItem(it); inv.craft[i] = null; }
+    }
+    inv.setCraftSize(2);
+    this.requestLock();
+    this.events.onStats(this.buildStats());
   }
 
   toggleEnemies(enabled?: boolean): void {
@@ -676,7 +1023,18 @@ export class GameEngine {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'Tab') {
       e.preventDefault();
+      // Close whichever station is open; otherwise toggle inventory
+      if (this.openFurnaceKey) { this.closeFurnace(); return; }
+      if (this.craftingOpen) { this.closeCraftingTable(); return; }
       this.toggleInventory();
+      return;
+    }
+    if (e.code === 'Escape' && this.openFurnaceKey) {
+      this.closeFurnace();
+      return;
+    }
+    if (e.code === 'Escape' && this.craftingOpen) {
+      this.closeCraftingTable();
       return;
     }
     if (!this.locked) return;
@@ -734,6 +1092,21 @@ export class GameEngine {
       this.mouse.left = true;
       if (this.toolMode === 'laser') this.breakT = 0;
     } else if (e.button === 2) {
+      // right-click a placed crafting table (within reach) opens the 3×3 grid
+      const eye = this.player.eye();
+      this.camera.getWorldDirection(this.aimDir);
+      const hit = raycastVoxel(this.world, eye.x, eye.y, eye.z,
+        this.aimDir.x, this.aimDir.y, this.aimDir.z, 5);
+      if (hit && hit.id === B.CRAFTING_TABLE) {
+        this.mouse.right = false;
+        this.openCraftingTable();
+        return;
+      }
+      if (hit && (hit.id === B.FURNACE || hit.id === B.FURNACE_LIT)) {
+        this.mouse.right = false;
+        this.openFurnaceAt(hit.x, hit.y, hit.z);
+        return;
+      }
       this.mouse.right = true;
     }
   };
@@ -758,6 +1131,7 @@ export class GameEngine {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
+    this.composer?.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
@@ -777,6 +1151,9 @@ export class GameEngine {
     // lock drops mid-climb; the ship continues its ballistic path regardless.
     if (!this.spaceExited && this.piloting && this.ship.pos.y > SPACE_ALTITUDE) {
       this.spaceExited = true;
+      this.weapons.setAllVisible(false);
+      this.bodyGroup.visible = false;
+      this.heldFood.visible = false;
       this.events.onEnterSpace?.(this.theme);
     }
 
@@ -790,13 +1167,77 @@ export class GameEngine {
     // toroidal rendering: pull every meshed chunk to its nearest-image copy
     this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
     if (this.ship && !this.piloting) this.ship.updateParked(dt);
+    // Camps run on the main clock, not tickPlay: squads must materialize the
+    // moment a planet loads (including right after a space landing, before
+    // the first pointer lock) and keep respawning through pause/death.
+    // damagePlayer() already ignores hits while unlocked, piloting or dead.
+    this.enemies.update(dt);
+    // furnaces smelt on the main clock so they keep cooking while the player
+    // walks away or has the UI open
+    this.updateFurnaces(dt);
+    if (this.openFurnaceKey) this.events.onStats(this.buildStats());
     this.particles.update(dt);
     this.sky.update(dt, this.camera.position);
     this.sound.update(dt, this.sky.isDay);
     this.applyUnderwaterFx();
+
+    // ---- atmosphere: drive the shared fog uniforms from the sky ----
+    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor);
+    const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
+    const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
+    FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
+    FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
+      .sub(this.camera.position).normalize();
+    FOG_UNIFORMS.uFogDensity.value = 0.010 + (1 - this.sky.dayFactor) * 0.016;
+    FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
+    FOG_UNIFORMS.uFogFalloff.value = 16 + this.sky.dayFactor * 12;
+    FOG_UNIFORMS.uFogInscatter.value = 0.08 + this.sky.dayFactor * 0.78;
+    FOG_UNIFORMS.uFogStart.value = 12;
+    const edge = C.VIEW_DISTANCE * C.CHUNK_SIZE;
+    FOG_UNIFORMS.uFarFogStart.value = edge - 26;
+    FOG_UNIFORMS.uFarFogEnd.value = edge - 4;
+
+    // ---- grass animation + distance LOD camera ----
+    GRASS_TIME.value += dt;
+    GRASS_CAM.value.copy(this.camera.position);
+
+    // ---- god rays: strongest at dawn/dusk, off at night ----
+    if (this.volumetricLight) {
+      this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
+      const elev = this.sky.sunElev;
+      const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
+      this.volumetricLight.intensity = angleFactor * 0.85;
+      this.volumetricLight.tint.copy(this.sky.sunColor);
+    }
+
+    // ---- bloom fades out at night so the dark scene stays clean ----
+    if (this.bloom) {
+      this.bloom.strength = 0.30 * THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.0, 0.35);
+    }
+
+    // ---- flashlight: camera torch after dark, off while flying/dead ----
+    if (this.flashlight) {
+      const canUse = !this.dead && !this.piloting;
+      const nightAmt = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.05, 0.3);
+      this.flashlight.intensity = canUse ? nightAmt * 2.6 : 0;
+    }
+
+    // ---- celestial shadow: refresh only when the player or active light moves ----
+    const p = this.player.pos;
+    const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
+    const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
+    const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087; // ~0.5°
+    if (this.renderer.shadowMap && (moved || lightMoved)) {
+      this.lastShadowX = p.x;
+      this.lastShadowZ = p.z;
+      this.lastSunElev = activeElev;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+
     this.reportStats(dt);
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.composer) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
   };
 
   private tickMenuCamera(dt: number): void {
@@ -822,30 +1263,33 @@ export class GameEngine {
 
   private boardShip(): void {
     this.piloting = true;
+    // Stow EVERY camera child so nothing from the FPS kit rides along into
+    // the chase cam or the space handoff: weapon rigs, the laser viewmodel,
+    // the held block, the held food and the shadow body.
+    this.weapons.setAllVisible(false);
+    this.laser.update(0, { visible: false, firing: false, target: null, charge: 0, speed: 0 });
+    this.heldBlock.update(0, false, 0);
+    this.heldFood.visible = false;
+    this.bodyGroup.visible = false;
     this.flyCam.copy(this.camera.position);
     this.highlight.visible = false;
     this.crack.visible = false;
     this.mouse.left = false;
     this.mouse.right = false;
     this.breakT = 0;
-    // holster every hand tool so no rifle/laser/block viewmodel rides along
-    // into the cockpit (the chase camera would otherwise render them)
-    this.weapons.setAllVisible(false);
-    this.heldBlock.update(0, false, 0);
-    this.heldFood.visible = false;
     this.sound.playBoard();
   }
 
   private exitShip(): void {
     this.piloting = false;
     this.spaceExited = false; // allow re-triggering on the next climb
-    // bring the correct hand tool back for the current hotbar mode
-    this.weapons.setHolstered(this.toolMode !== 'weapon');
     this.sound.playDisembark();
     this.sound.stopShip();
     // step out beside the ship onto safe ground
     const yaw = this.ship.yaw;
+    let placed = false;
     for (const sign of [1, -1]) {
+      if (placed) break;
       const px = this.ship.pos.x + Math.cos(yaw) * 4.2 * sign;
       const pz = this.ship.pos.z - Math.sin(yaw) * 4.2 * sign;
       for (let y = Math.min(this.ship.pos.y + 8, 95); y > 2; y--) {
@@ -858,13 +1302,37 @@ export class GameEngine {
         ) {
           this.player.setSpawn(bx + 0.5, y, bz + 0.5);
           this.player.yaw = yaw;
-          return;
+          placed = true;
+          break;
         }
       }
     }
-    // worst case: pop out on top of the ship
-    this.player.setSpawn(this.ship.pos.x, this.ship.pos.y + 3, this.ship.pos.z);
-    this.player.yaw = yaw;
+    if (!placed) {
+      // worst case: pop out on top of the ship
+      this.player.setSpawn(this.ship.pos.x, this.ship.pos.y + 3, this.ship.pos.z);
+      this.player.yaw = yaw;
+    }
+    // hand the ship back to the parked hover state at its current altitude so
+    // it settles instead of hanging in the freshly restored first-person view
+    this.ship.settleHere();
+    // Re-arm the hotbar through the normal slot pipeline. This properly
+    // re-initializes holster state, the weapon rig springs/bones, the laser,
+    // block and food viewmodels — so the first FP frame never draws stale
+    // garbage geometry from the flight. (bodyGroup restores lazily in tick.)
+    this.selectSlot(this.sel, true);
+    // kill the stale chase-cam frame before the first FP render
+    this.snapCameraToEye();
+  }
+
+  /** snap the FP camera to the player's eye immediately (kills the stale
+   *  chase-cam frame that showed the ship hull filling the screen on exit) */
+  private snapCameraToEye(): void {
+    const eye = this.player.eye();
+    this.camera.position.copy(eye);
+    this.camera.rotation.set(this.player.pitch, this.player.yaw, 0);
+    this.fov = 75;
+    this.camera.fov = 75;
+    this.camera.updateProjectionMatrix();
   }
 
   private tickPilot(dt: number): void {
@@ -943,6 +1411,12 @@ export class GameEngine {
     this.laser.update(dt, { visible: false, firing: false, target: null, charge: 0, speed: 0 });
     this.heldBlock.update(dt, false, 0);
     this.heldFood.visible = false;
+
+    // Keep pooled VFX advancing while flying — otherwise any tracers/impacts
+    // fired the instant we boarded (or by camps below) freeze mid-air and
+    // pile up into the streaks seen crossing the cockpit view.
+    this.fx.update(dt);
+    this.particles.update(dt);
   }
 
   private tickPlay(dt: number): void {
@@ -950,6 +1424,9 @@ export class GameEngine {
       this.tickPilot(dt);
       return;
     }
+    // shadow body rides on layer 2 (never seen by the main camera) — restore
+    // it lazily here rather than in exitShip so disembark stays glitch-free
+    this.bodyGroup.visible = true;
     const p = this.player;
     this.prevVelY = p.vel.y;
 
@@ -1042,9 +1519,8 @@ export class GameEngine {
 
     this.syncCamera(dt);
 
-    // ---- enemies + combat state ----
+    // ---- combat state (enemies tick on the main clock, see tick()) ----
     if (this.invulnT > 0) this.invulnT -= dt;
-    this.enemies.update(dt);
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
 
@@ -1180,6 +1656,19 @@ export class GameEngine {
       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
       this.sound.playBreak(d.sound);
       this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      // a broken furnace spills its contents, like Minecraft
+      if (id === B.FURNACE || id === B.FURNACE_LIT) {
+        const k = furnaceKey(x, y, z);
+        const st = this.furnaces.get(k);
+        if (st) {
+          const drop = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+          for (const it of [st.input, st.fuel, st.output]) {
+            if (it && it.kind === 'block') for (let n = 0; n < it.count; n++) this.itemDrops.spawn(it.blockId, drop);
+          }
+          this.furnaces.delete(k);
+          if (this.openFurnaceKey === k) this.closeFurnace();
+        }
+      }
       this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
       this.breakT = 0;
       this.mineCharge = 0;
@@ -1354,9 +1843,28 @@ export class GameEngine {
     if (this.dead || this.invulnT > 0 || !this.locked || this.piloting) return;
     this.hp = Math.max(0, this.hp - dmg);
     this.damageSeq++;
+    // bearing of the attacker in view space (minimum-image across the torus
+    // seam) so the HUD chevron points back at the shooter
+    const p = this.player.pos;
+    const dx = C.minImageF(from.x - p.x);
+    const dz = C.minImageF(from.z - p.z);
+    const yaw = this.player.yaw;
+    const fwd = (dx * -Math.sin(yaw) + dz * -Math.cos(yaw));
+    const right = (dx * Math.cos(yaw) + dz * -Math.sin(yaw));
+    if (fwd !== 0 || right !== 0) this.dmgAngle = Math.atan2(right, fwd);
     this.fpsAudio.hurt();
     this.player.addShake(0.012);
-    if (this.hp <= 0) this.killPlayer(from);
+    if (this.hp <= 0) {
+      // attacker position arrives in wrapped torus space; image it next to
+      // the (unbounded) player so the death camera topples the right way
+      const p = this.player.pos;
+      const img = new THREE.Vector3(
+        p.x + C.minImageF(from.x - p.x),
+        from.y,
+        p.z + C.minImageF(from.z - p.z),
+      );
+      this.killPlayer(img);
+    }
   }
 
   private killPlayer(from?: THREE.Vector3): void {
@@ -1545,6 +2053,16 @@ export class GameEngine {
     this.statT -= dt;
     if (this.statT > 0) return;
     this.statT = 0.25;
+    this.events.onStats(this.buildStats());
+  }
+
+  /**
+   * Snapshot the HUD payload. Kept separate from the throttled loop push so
+   * modal toggles (inventory / crafting) can flush it to React synchronously
+   * in the same frame the pointer lock changes — otherwise the pause screen
+   * flashes for a beat before the inventory arrives.
+   */
+  private buildStats(): HudStats {
     const p = this.player.pos;
     let shipAlt = 0;
     if (this.piloting && this.ship) {
@@ -1568,7 +2086,7 @@ export class GameEngine {
       selItem && (selItem.kind === 'block' || selItem.kind === 'food') ? selItem.count :
       this.toolMode === 'weapon' ? this.weapons.ammoInfo.ammo : -1;
     const mag = this.toolMode === 'weapon' ? this.weapons.ammoInfo.mag : selItem && selItem.kind === 'block' ? 64 : 0;
-    this.events.onStats({
+    return {
       fps: Math.round(this.fps),
       x: Math.floor(C.wrapBlock(p.x)),
       y: Math.floor(p.y),
@@ -1598,6 +2116,16 @@ export class GameEngine {
       reloading: this.weapons.reloading,
       reloadT: this.weapons.reloadProgress,
       inventoryOpen: this.inventoryOpen,
+      craftingOpen: this.craftingOpen,
+      furnaceOpen: !!this.openFurnaceKey,
+      furnaceBurn: (() => {
+        const f = this.openFurnace;
+        return f && f.burnMax > 0 ? Math.max(0, Math.min(1, f.burn / f.burnMax)) : 0;
+      })(),
+      furnaceCook: (() => {
+        const f = this.openFurnace;
+        return f ? Math.max(0, Math.min(1, f.cook / SMELT_TIME)) : 0;
+      })(),
       slot: this.sel,
       enemiesEnabled: this.enemiesEnabled,
       mineCharge: this.mineCharge,
@@ -1607,6 +2135,7 @@ export class GameEngine {
       ads: this.weapons.adsT,
       hitSeq: this.hitSeq,
       damageSeq: this.damageSeq,
+      dmgAngle: this.dmgAngle,
       demolition: this.demolition,
       blocksMined: this.blocksMined,
       targetsHit: this.targetsHit,
@@ -1615,7 +2144,7 @@ export class GameEngine {
       spread:
         7 + this.weapons.bloomPx * 26 +
         Math.min(1, this.player.speedSmooth / 6) * 9 * (1 - this.weapons.adsT * 0.9),
-    });
+    };
   }
 
   /** used by the minimap overlay */
@@ -1634,6 +2163,11 @@ export class GameEngine {
     this.itemDrops?.clear();
     this.removeListeners();
     window.removeEventListener('resize', this.resize);
+    this.depthFogPass?.dispose();
+    this.bloom?.dispose();
+    this.volumetricLight?.dispose();
+    this.composer?.dispose();
+    this.composerRT?.dispose();
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments || o instanceof THREE.Points) {
         o.geometry.dispose();

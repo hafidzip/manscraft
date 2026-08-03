@@ -7,6 +7,7 @@ import { makeNoise2D, fbm } from './noise';
 export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, SANDSTONE: 5,
   LOG: 6, LEAVES: 7, CACTUS: 8, PLANK: 9, ORE: 10, COBBLE: 11, WOOL: 12, BEDROCK: 13,
+  CRAFTING_TABLE: 14, GLASS: 15, FURNACE: 16,
 } as const;
 
 const SIZE = 96;         // x/z extent
@@ -41,6 +42,9 @@ function tileFor(block: number, dy: number): number {
     case B.COBBLE: return T.COBBLE;
     case B.WOOL: return T.TARGET_WOOL;
     case B.BEDROCK: return T.COBBLE;
+    case B.CRAFTING_TABLE: return T.CRAFT_TOP;
+    case B.GLASS: return T.GLASS;
+    case B.FURNACE: return T.FURNACE;
     default: return T.STONE;
   }
 }
@@ -50,6 +54,7 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.SAND]: 0xddd3a0, [B.SANDSTONE]: 0xd8cd9c, [B.LOG]: 0x6b5136,
   [B.LEAVES]: 0x3f7a2b, [B.CACTUS]: 0x3f8f3f, [B.PLANK]: 0xa1814f,
   [B.ORE]: 0xe8b93c, [B.COBBLE]: 0x7d7f82, [B.WOOL]: 0xe8e6df, [B.BEDROCK]: 0x333336,
+  [B.CRAFTING_TABLE]: 0xa48150, [B.GLASS]: 0xcee8f5, [B.FURNACE]: 0x7c7c80,
 };
 
 export interface RayHit {

@@ -138,19 +138,6 @@ export class EnemyManager {
     return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
   }
 
-  /**
-   * Last-resort placement: drop the agent on the column top even when the
-   * strict canStand test fails (inside a tent roof, a flower, a 1-block
-   * alcove…). Physics settles it within a frame — an enemy that spawns
-   * slightly awkwardly beats a camp that never spawns its squad.
-   */
-  private groundFallback(x: number, z: number): THREE.Vector3 {
-    const w = this.deps.world;
-    const fx = Math.floor(x), fz = Math.floor(z);
-    const y = Math.max(2, Math.min(77, w.highestY(fx, fz) + 1));
-    return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
-  }
-
   private campSpawnPos(camp: CampState, slot: number): THREE.Vector3 | null {
     const { build: b, site: s } = camp;
     const ring = b.posts.length ? b.posts : b.patrolPoints;
@@ -169,19 +156,7 @@ export class EnemyManager {
       const p = this.standablePos(x, z, s.y);
       if (p) return p;
     }
-    const center = this.standablePos(s.cx, s.cz, s.y);
-    if (center) return center;
-
-    // Spiral outward from the camp center before admitting defeat — covers
-    // camps whose structures occupy every post column.
-    for (let r = 2; r <= 10; r += 2) {
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2;
-        const p = this.standablePos(s.cx + Math.cos(a) * r, s.cz + Math.sin(a) * r, s.y);
-        if (p) return p;
-      }
-    }
-    return this.groundFallback(s.cx, s.cz);
+    return this.standablePos(s.cx, s.cz, s.y);
   }
 
   private spawnMember(camp: CampState, slot: number, guardPlayer: boolean): boolean {

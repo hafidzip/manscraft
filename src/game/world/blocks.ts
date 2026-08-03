@@ -25,6 +25,10 @@ export const B = {
   BEDROCK: 14,
   GRAVEL: 15,
   CACTUS: 16,
+  CRAFTING_TABLE: 17,
+  FURNACE: 18,
+  FURNACE_LIT: 19,
+  COBBLE: 20,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -154,6 +158,30 @@ DEFS[B.CACTUS] = def({
   name: 'Cactus', top: TILES.cactus_top, side: TILES.cactus_side, hardness: 0.4, sound: 'grass',
   colors: [0x3e8a38, 0x2a6a28, 0x52a24a],
 });
+DEFS[B.CRAFTING_TABLE] = def({
+  name: 'Crafting Table',
+  top: TILES.craft_top, side: TILES.craft_side, bottom: TILES.craft_bottom, icon: TILES.craft_top,
+  hardness: 0.8, sound: 'wood',
+  colors: [0xa48150, 0x8f6d3f, 0x64482a, 0xbd9260],
+});
+DEFS[B.COBBLE] = def({
+  name: 'Cobblestone', top: TILES.cobble, hardness: 1.1, sound: 'stone',
+  colors: [0x8c8c90, 0x76767a, 0x646468],
+});
+DEFS[B.FURNACE] = def({
+  name: 'Furnace',
+  top: TILES.furnace_top, side: TILES.furnace_front, bottom: TILES.furnace_top,
+  icon: TILES.furnace_front,
+  hardness: 1.2, sound: 'stone',
+  colors: [0x7c7c80, 0x8e8e92, 0x5a5a5e, 0x2c2c30],
+});
+DEFS[B.FURNACE_LIT] = def({
+  name: 'Furnace',
+  top: TILES.furnace_top, side: TILES.furnace_front_lit, bottom: TILES.furnace_top,
+  icon: TILES.furnace_front_lit,
+  hardness: 1.2, sound: 'stone',
+  colors: [0x7c7c80, 0xffa028, 0xe45818, 0xffd65c],
+});
 
 /** hotbar pseudo-item: the water bucket (not a placeable block id) */
 export const BUCKET_ID = 100;
@@ -225,7 +253,8 @@ const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.STONE]: 'stone', [B.SAND]: 'sand',
   [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.WATER]: 'water', [B.SNOW]: 'snow',
   [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass', [B.GRAVEL]: 'stone',
-  [B.BEDROCK]: 'stone', [B.CACTUS]: 'cactus',
+  [B.BEDROCK]: 'stone', [B.CACTUS]: 'cactus', [B.CRAFTING_TABLE]: 'planks',
+  [B.FURNACE]: 'stone', [B.COBBLE]: 'stone',
 };
 
 /** stock colours, captured once so re-theming is never cumulative */

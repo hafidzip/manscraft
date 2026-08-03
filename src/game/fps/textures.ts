@@ -4,7 +4,7 @@ import { mulberry32 } from './noise';
 
 const TILE = 32;          // pixels per tile
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 4;
+const ATLAS_ROWS = 5;
 
 function mkCanvas(w: number, h: number) {
   const c = document.createElement('canvas');
@@ -42,7 +42,8 @@ export const T = {
   GRASS_TOP: 0, GRASS_SIDE: 1, DIRT: 2, STONE: 3,
   SAND: 4, SANDSTONE: 5, SANDSTONE_TOP: 6, LOG_SIDE: 7,
   LOG_TOP: 8, LEAVES: 9, CACTUS_SIDE: 10, CACTUS_TOP: 11,
-  PLANK: 12, ORE: 13, COBBLE: 14, TARGET_WOOL: 15,
+  PLANK: 12, ORE: 13, COBBLE: 14, TARGET_WOOL: 15, CRAFT_TOP: 16, GLASS: 17,
+  FURNACE: 18,
 } as const;
 
 let atlasTex: THREE.CanvasTexture | null = null;
@@ -138,6 +139,48 @@ export function buildAtlas(): THREE.CanvasTexture {
     g.strokeRect(ox + 1, oy + 17, 13, 13); g.strokeRect(ox + 17, oy + 17, 13, 13);
   });
   tile(T.TARGET_WOOL, (ox, oy) => noisyTile(g, ox, oy, '#e8e6df', 8, 116, ['#d8d5cc']));
+
+  // crafting table top: planks with a worked-in cross seam + rim
+  tile(T.CRAFT_TOP, (ox, oy) => {
+    noisyTile(g, ox, oy, '#a48150', 10, 131, ['#b8935e', '#8f6d3f']);
+    px(ox, oy, 0, 0, TILE, 2, '#64482a');
+    px(ox, oy, 0, TILE - 2, TILE, 2, '#64482a');
+    px(ox, oy, 0, 0, 2, TILE, '#64482a');
+    px(ox, oy, TILE - 2, 0, 2, TILE, '#64482a');
+    px(ox, oy, 15, 3, 2, TILE - 6, '#70512e');
+    px(ox, oy, 3, 15, TILE - 6, 2, '#70512e');
+    px(ox, oy, 12, 12, 8, 8, '#c9a066');
+    px(ox, oy, 14, 14, 4, 4, '#70512e');
+  });
+
+  // furnace face: cobble shell with a dark arch and glowing coals
+  tile(T.FURNACE, (ox, oy) => {
+    noisyTile(g, ox, oy, '#7c7c80', 12, 151, ['#8e8e92', '#68686c']);
+    px(ox, oy, 0, 0, TILE, 3, '#5a5a5e');
+    px(ox, oy, 0, TILE - 3, TILE, 3, '#5a5a5e');
+    px(ox, oy, 0, 0, 3, TILE, '#5a5a5e');
+    px(ox, oy, TILE - 3, 0, 3, TILE, '#5a5a5e');
+    // hearth arch
+    px(ox, oy, 6, 8, 20, 6, '#3a3a3e');
+    px(ox, oy, 6, 14, 20, 10, '#181819');
+    // coals + flame licks
+    px(ox, oy, 8, 20, 16, 4, '#e45818');
+    px(ox, oy, 10, 17, 3, 4, '#ffa028');
+    px(ox, oy, 15, 15, 3, 6, '#ffd65c');
+    px(ox, oy, 20, 18, 3, 3, '#ffa028');
+    px(ox, oy, 6, 24, 20, 2, '#55555a');
+  });
+
+  // glass: pale frame + diagonal glint, transparent body
+  tile(T.GLASS, (ox, oy) => {
+    px(ox, oy, 0, 0, TILE, 2, '#cee8f5');
+    px(ox, oy, 0, TILE - 2, TILE, 2, '#cee8f5');
+    px(ox, oy, 0, 0, 2, TILE, '#cee8f5');
+    px(ox, oy, TILE - 2, 0, 2, TILE, '#cee8f5');
+    px(ox, oy, 6, 8, 3, 3, '#e0f4fc');
+    px(ox, oy, 9, 11, 3, 3, '#e0f4fc');
+    px(ox, oy, 18, 20, 4, 4, '#e0f4fc');
+  });
 
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;

@@ -1,4 +1,4 @@
-import { SEA_LEVEL, WORLD_SIZE, WORLD_HEIGHT, wrapBlock, wrapDelta } from '../core/constants';
+import { WORLD_SIZE, WORLD_HEIGHT, wrapBlock, wrapDelta } from '../core/constants';
 import { mulberry32 } from '../core/noise';
 import { Biome } from './biomes';
 import type { TerrainGenerator } from './generator';
@@ -20,8 +20,8 @@ const MIN_RADIUS    = 12;
 const MAX_RADIUS    = 18;
 const BASE_FLATNESS = 2;   // strict pass
 const MAX_FLATNESS  = 5;   // last relaxed pass, then clamp to whatever was found
-const DRY_MARGIN    = 4;   // every sample must be > SEA_LEVEL + 4
-const MOUNTAIN_ODDS = 0.15; // policy: SNOW always rejected, MOUNTAINS accepted 15% of the time
+const DRY_MARGIN    = 4;   // every sample must be > the planet's sea + 4
+const MOUNTAIN_ODDS = 0.15; // strict pass policy; final fallback admits unusual biomes
 
 interface Cand {
   cx: number; cz: number; radius: number; mtnRoll: number;
@@ -93,7 +93,7 @@ export function generateCamps(
       const ev = evaluate(gen, c);
       if (ev.biome === Biome.SNOW) continue;
       if (ev.biome === Biome.MOUNTAINS && c.mtnRoll >= MOUNTAIN_ODDS) continue;
-      if (ev.min <= SEA_LEVEL + DRY_MARGIN) continue;   // whole footprint is dry land
+      if (ev.min <= gen.sea + DRY_MARGIN) continue; // whole footprint is dry land
       if (ev.flatness > limit) continue;
 
       let clash = false;
@@ -102,6 +102,30 @@ export function generateCamps(
       }
       if (clash) continue;
 
+      picked.push({
+        id: 0, cx: c.cx, cz: c.cz, radius: c.radius,
+        y: ev.y, biome: ev.biome, flatness: ev.flatness,
+      });
+    }
+  }
+
+  // The strict pass intentionally prefers broad, flat plains, but unusual
+  // planet seeds can have no five-way set that satisfies every biome rule.
+  // Do not return an empty or half-empty world: relax only the cosmetic
+  // constraints while keeping a genuinely dry footprint and spacing camps.
+  if (picked.length < count) {
+    for (const c of cands) {
+      if (picked.length >= count) break;
+      const ev = evaluate(gen, c);
+      // At this last-resort tier, dry land is the only hard requirement. A
+      // steep or snowy planet can still host a camp; rejecting it here was
+      // the reason some deterministic worlds returned zero sites.
+      if (ev.min <= gen.sea + 1) continue;
+      let clash = false;
+      for (const p of picked) {
+        if (torusDist(c.cx, c.cz, p.cx, p.cz) < (p.radius + c.radius) * 1.15) { clash = true; break; }
+      }
+      if (clash) continue;
       picked.push({
         id: 0, cx: c.cx, cz: c.cz, radius: c.radius,
         y: ev.y, biome: ev.biome, flatness: ev.flatness,
@@ -134,7 +158,7 @@ function groundY(world: World, x: number, z: number): number {
 /** never build on/над water */
 function dry(world: World, x: number, z: number): boolean {
   const h = groundY(world, x, z);
-  if (h <= SEA_LEVEL) return false;
+  if (h <= world.gen.sea) return false;
   return world.getBlockRaw(wrapBlock(x), h, wrapBlock(z)) !== B.WATER;
 }
 

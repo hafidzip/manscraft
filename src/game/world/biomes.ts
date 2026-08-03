@@ -32,11 +32,11 @@ export interface BiomeDef {
 export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.5,
-    trees: 0.006, tree: 'oak', flowers: 0.03, grass: 0.14, cactus: 0,
+    trees: 0.006, tree: 'oak', flowers: 0.03, grass: 0.58, cactus: 0,
   },
   {
     name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 4,
-    trees: 0.05, tree: 'oak', flowers: 0.012, grass: 0.18, cactus: 0,
+    trees: 0.05, tree: 'oak', flowers: 0.012, grass: 0.64, cactus: 0,
   },
   {
     name: 'Desert', surface: B.SAND, sub: B.SAND, hill: 2,
@@ -44,7 +44,7 @@ export const BIOME_DEFS: BiomeDef[] = [
   },
   {
     name: 'Mountains', surface: B.GRASS, sub: B.STONE, hill: 10,
-    trees: 0.006, tree: 'oak', flowers: 0.01, grass: 0.06, cactus: 0,
+    trees: 0.006, tree: 'oak', flowers: 0.01, grass: 0.32, cactus: 0,
   },
   {
     name: 'Snowy Taiga', surface: B.SNOW, sub: B.DIRT, hill: 5,

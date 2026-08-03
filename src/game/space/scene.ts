@@ -671,37 +671,17 @@ export class SpaceScene {
       }
     }
 
-    // ---- winner: whoever's disc the reticle sits on; proximity breaks ties.
-    // A nearby planet subtends a huge angle, so its lock cone must widen with
-    // apparent size — otherwise a far sun parked dead-center always out-scores
-    // the world you are practically touching (the old >0.9 dot rule).
-    const discCone = (radius: number, dist: number) =>
-      Math.cos(Math.min(1.35, Math.atan2(radius, Math.max(1, dist - radius))));
-
-    const starR = bestStar ? bestStar.radius : 0;
-    const planetCone = bestPlanet ? discCone(bestPlanet.spec.radius, bestPlanetDist) : 2;
-    const starCone = bestStar ? discCone(starR, bestStarDist) : 2;
-    const planetOver = bestPlanet !== null && bestPlanetDot > planetCone;
-    const starOver = bestStar !== null && bestStarDot > starCone;
-
     let kind: TargetKind = 'star';
-    if (bestPlanet && bestStar) {
-      if (planetOver && !starOver) kind = 'planet';
-      else if (starOver && !planetOver) kind = 'star';
-      else if (planetOver && starOver) {
-        // both discs under the reticle: the nearer surface wins
-        kind = bestPlanetDist - bestPlanet.spec.radius < bestStarDist - starR ? 'planet' : 'star';
-      } else kind = bestPlanetDot >= bestStarDot ? 'planet' : 'star';
-    } else if (bestPlanet) kind = 'planet';
-
-    // lock strength: 0 at the cone edge -> 1 aimed at the body's center.
-    // Planets use their widened cone so a world filling the view locks hard.
-    let rawStrength = 0;
-    if (kind === 'planet' && bestPlanet) {
-      rawStrength = THREE.MathUtils.clamp((bestPlanetDot - planetCone) / (1 - planetCone), 0, 1);
-    } else if (bestStar) {
-      rawStrength = THREE.MathUtils.clamp((bestStarDot - starCone) / (1 - starCone), 0, 1);
+    let dotWin = bestStarDot;
+    if (bestPlanet && bestPlanetDot > 0.9) {
+      kind = 'planet';
+      dotWin = bestPlanetDot;
+    } else if (!bestStar && bestPlanet) {
+      kind = 'planet';
+      dotWin = bestPlanetDot;
     }
+
+    const rawStrength = dotWin > CONE ? (dotWin - CONE) / (1 - CONE) : 0;
     this.lockStrength += (rawStrength - this.lockStrength) * Math.min(1, 8 * dt);
 
     if (kind === 'planet' && bestPlanet) {
@@ -747,10 +727,6 @@ export class SpaceScene {
     color: string
   ): TargetLock {
     const [rx, ry, rz] = this.frame.toRender(posU);
-    // the chase camera moved earlier this frame; project() reads
-    // matrixWorldInverse, so refresh it or the marker trails a frame behind
-    // and drifts toward the screen edge when hugging a big planet
-    this.camera.updateMatrixWorld();
     this.tmpV2.set(rx, ry, rz).project(this.camera);
     const onScreen = this.tmpV2.z < 1;
     const sx = this.tmpV2.x * 0.5 + 0.5;

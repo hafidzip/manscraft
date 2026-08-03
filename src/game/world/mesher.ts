@@ -144,14 +144,11 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
           const hSelf = waterHeight(info.level, info.falling);
           falling = info.falling;
 
-          // corner positions: (0,0)=E-corner(x+0,z+0) SE, (1,0)=SW, (1,1)=NW, (0,1)=NE — see corner index mapping below
           let ci = 0;
           for (let dz = 0; dz < 2; dz++) {
             for (let dx = 0; dx < 2; dx++, ci++) {
-              // the 4 cells touching this corner: (x,z), (x+sx,z), (x,z+sz), (x+sx,z+sz)
               const sx = dx ? 1 : -1;
               const sz = dz ? 1 : -1;
-              // any water above the 4 cells -> full height
               let above = false;
               for (const [nx, nz] of [[0, 0], [sx, 0], [0, sz], [sx, sz]] as const) {
                 if (isWaterId(localGet(x + nx, y + 1, z + nz))) above = true;
@@ -165,7 +162,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
               for (const [nx, nz] of [[0, 0], [sx, 0], [0, sz], [sx, sz]] as const) {
                 const nid = localGet(x + nx, y, z + nz);
                 if (nid === -1) {
-                  // unloaded: blend toward own level to avoid border seams
                   sum += hSelf;
                   cnt++;
                   continue;
@@ -176,7 +172,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
                   cnt++;
                   continue;
                 }
-                // air directly over water transfers drainage downward (pour-over dip)
                 if (nid === B.AIR) {
                   const bi = waterInfo(localGet(x + nx, y - 1, z + nz));
                   if (bi) {
@@ -184,7 +179,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
                     cnt++;
                   }
                 }
-                // solid / air over solid: excluded -> crisp flat shorelines
               }
               cornerH[ci] = cnt ? Math.max(0, Math.min(1, sum / cnt)) : hSelf;
             }

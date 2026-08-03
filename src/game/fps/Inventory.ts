@@ -23,6 +23,8 @@ export const FOOD_NAMES: Record<string, string> = Object.fromEntries(
 export interface SlotRef {
   isHotbar: boolean;
   index: number;
+  /** third slot bank: the crafting grid (2×2 pocket or 3×3 table) */
+  isCraft?: boolean;
 }
 
 export const BLOCK_NAMES: Record<number, string> = {
@@ -38,6 +40,9 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.ORE]: 'Gold Ore',
   [B.COBBLE]: 'Cobblestone',
   [B.WOOL]: 'Target Wool',
+  [B.CRAFTING_TABLE]: 'Crafting Table',
+  [B.GLASS]: 'Glass',
+  [B.FURNACE]: 'Furnace',
 };
 
 export class Inventory {
@@ -52,6 +57,7 @@ export class Inventory {
 
   mainInv: (SlotItem | null)[] = (() => {
     const arr: (SlotItem | null)[] = Array(27).fill(null);
+    arr[0] = { kind: 'block', blockId: B.COBBLE, count: 64 };
     arr[9] = { kind: 'food', foodId: 'chicken-drum', count: 64 };
     return arr;
   })();
@@ -162,10 +168,41 @@ export class Inventory {
     return true;
   }
 
+  /** the crafting grid — 9 cells, only the first craftSize² are active */
+  craft: (SlotItem | null)[] = Array(9).fill(null);
+  craftSize: 2 | 3 = 2;
+
+  /** active crafting cells for the current grid size */
+  get craftCells(): (SlotItem | null)[] {
+    const s = this.craftSize;
+    return this.craft.slice(0, s * s);
+  }
+
+  private bank(ref: SlotRef): (SlotItem | null)[] {
+    if (ref.isCraft) return this.craft;
+    return ref.isHotbar ? this.hotbar : this.mainInv;
+  }
+
+  /**
+   * Switch the crafting grid between the 2×2 pocket and the 3×3 table.
+   * When shrinking, cells that fall outside the smaller grid are pushed back
+   * into storage; if storage is full the switch is refused and returns false.
+   */
+  setCraftSize(size: 2 | 3): boolean {
+    if (size === this.craftSize) return true;
+    if (size === 2) {
+      const overflow = this.craft.slice(4, 9).filter((c): c is SlotItem => !!c);
+      for (const item of overflow) if (!this.addItem(item)) return false;
+      this.craft.splice(4, 5, null, null, null, null, null);
+    }
+    this.craftSize = size;
+    return true;
+  }
+
   /** Swap or move items between slots. */
   swapSlots(from: SlotRef, to: SlotRef) {
-    const arrFrom = from.isHotbar ? this.hotbar : this.mainInv;
-    const arrTo = to.isHotbar ? this.hotbar : this.mainInv;
+    const arrFrom = this.bank(from);
+    const arrTo = this.bank(to);
 
     const itemFrom = arrFrom[from.index];
     const itemTo = arrTo[to.index];
@@ -212,6 +249,30 @@ export class Inventory {
   }
 
   getItem(ref: SlotRef): SlotItem | null {
-    return ref.isHotbar ? this.hotbar[ref.index] : this.mainInv[ref.index];
+    const arr = this.bank(ref);
+    if (ref.isCraft && ref.index >= this.craftSize * this.craftSize) return null;
+    return arr[ref.index] ?? null;
+  }
+
+  /** would `item` fit without mutating anything? (used to gate crafting) */
+  canAdd(item: SlotItem): boolean {
+    const need = (key: (s: SlotItem) => string | null) => {
+      let count = item.kind === 'weapon' ? 1 : item.count;
+      let empties = 0;
+      for (const arr of [this.hotbar, this.mainInv]) {
+        for (const s of arr) {
+          if (!s) { empties++; continue; }
+          const k = key(s);
+          if (k && k === key(item) && s.kind !== 'weapon' && s.count < 64) {
+            count -= Math.min(64 - s.count, count);
+          }
+        }
+      }
+      if (item.kind === 'weapon') return empties > 0;
+      return count <= empties * 64;
+    };
+    if (item.kind === 'block') return need((s) => (s.kind === 'block' ? `b${s.blockId}` : null));
+    if (item.kind === 'food') return need((s) => (s.kind === 'food' ? `f${s.foodId}` : null));
+    return need(() => null);
   }
 }

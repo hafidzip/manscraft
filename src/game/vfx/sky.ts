@@ -90,8 +90,19 @@ export class Sky {
   fogNear = 44;
   fogFar: number;
   readonly skyColor = new THREE.Color();
+  /** world-space sun position (drives shadows, god rays, fog inscatter) */
+  readonly sunWorldPos = new THREE.Vector3(0, 120, 0);
+  /** world-space moon position (drives night directional light) */
+  readonly moonWorldPos = new THREE.Vector3(0, 120, 0);
+  /** current sun tint (drives fog inscatter colour) */
+  readonly sunColor = new THREE.Color(0xfff3d0);
+  /** current moon tint (cool blue directional night light) */
+  readonly moonColor = new THREE.Color(0x9fb8ff);
+  /** current sun elevation (sin of orbit angle) */
+  sunElev = 1;
 
-  private sun: THREE.DirectionalLight;
+  readonly sun: THREE.DirectionalLight;
+  readonly moon: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private sunSprite: THREE.Sprite;
   private moonSprite: THREE.Sprite;
@@ -105,17 +116,24 @@ export class Sky {
   private duskSky = DUSK_SKY_BASE.clone();
   private skyNight = NIGHT_SKY_BASE.clone();
   private tmp = new THREE.Color();
+  private tmpV = new THREE.Vector3();
 
   constructor(scene: THREE.Scene, skyHex?: number | null) {
     this.applyTheme(skyHex ?? null);
     this.fogFar = VIEW_DISTANCE * CHUNK_SIZE - 6;
     this.fog = new THREE.Fog(this.daySky.getHex(), this.fogNear, this.fogFar);
-    scene.fog = this.fog;
+    // No material-level fog: the DepthFogPass post pass fogs every surface
+    // identically. A THREE.Fog here would double-fog selective materials and
+    // reintroduce seams between terrain, water and foliage.
+    scene.fog = null;
     scene.background = this.skyColor;
 
     this.sun = new THREE.DirectionalLight(0xfff3d0, 1.1);
     scene.add(this.sun);
     scene.add(this.sun.target);
+    this.moon = new THREE.DirectionalLight(0x9fb8ff, 0);
+    scene.add(this.moon);
+    scene.add(this.moon.target);
     this.hemi = new THREE.HemisphereLight(0xbdd7ff, 0x8a6f4d, 0.7);
     scene.add(this.hemi);
 
@@ -204,12 +222,17 @@ export class Sky {
     this.time = (this.time + dt / DAY_LENGTH) % 1;
     const dir = this.sunDir();
     const elev = dir.y;
+    this.sunElev = elev;
 
-    this.dayFactor = THREE.MathUtils.smoothstep(elev, -0.08, 0.22);
+    // continuous day/dusk curves — no hard thresholds, so the sky, fog,
+    // bloom, flashlight and sun colour never snap at the end of day
+    this.dayFactor = THREE.MathUtils.smoothstep(elev, -0.12, 0.28);
     const day = this.dayFactor;
-    const dusk = Math.max(0, 1 - Math.abs(elev) * 4.5) * (elev > -0.12 ? 1 : 0) * 0.85;
+    const duskTent = Math.max(0, 1 - Math.abs(elev) * 4.2);
+    const duskGate = THREE.MathUtils.smoothstep(elev, -0.20, -0.04);
+    const dusk = duskTent * duskGate * 0.85;
 
-    // sky + fog color
+    // sky + fog color (scene.background IS this colour, refreshed each frame)
     this.skyColor.copy(this.skyNight).lerp(this.daySky, day);
     if (dusk > 0) this.skyColor.lerp(this.duskSky, dusk * 0.55);
     this.fog.color.copy(this.skyColor);
@@ -217,19 +240,32 @@ export class Sky {
     this.fog.far = this.fogFar;
 
     // lights
-    this.sun.color.setHex(0xfff3d0).lerp(this.tmp.setHex(0xff8844), Math.min(1, dusk * 1.4));
-    this.sun.intensity = 0.04 + day * 1.15;
-    this.hemi.intensity = 0.22 + day * 0.62;
+    const moonFade = 1 - THREE.MathUtils.smoothstep(elev, -0.02, 0.16);
+    const moonDir = this.tmpV.copy(dir).multiplyScalar(-1);
+    this.sunColor.setHex(0xfff3d0).lerp(this.tmp.setHex(0xff8844), Math.min(1, dusk * 1.4));
+    this.sun.color.copy(this.sunColor);
+    // Day = sun is the direct light. Night = moon is the direct light.
+    this.sun.intensity = day * 1.18;
+    this.moonColor.setHex(0x9fb8ff).lerp(this.tmp.setHex(0xc8d8ff), Math.min(1, moonFade * 0.35));
+    this.moon.color.copy(this.moonColor);
+    this.moon.intensity = moonFade * 0.42;
+    this.hemi.intensity = 0.18 + day * 0.66 + moonFade * 0.08;
     this.hemi.color.copy(this.daySky).lerp(this.tmp.setHex(0xbdd7ff), 0.25);
     this.sun.position.copy(camPos).addScaledVector(dir, 140);
     this.sun.target.position.copy(camPos);
     this.sun.target.updateMatrixWorld();
+    this.sunWorldPos.copy(this.sun.position);
+    this.moon.position.copy(camPos).addScaledVector(moonDir, 140);
+    this.moon.target.position.copy(camPos);
+    this.moon.target.updateMatrixWorld();
+    this.moonWorldPos.copy(this.moon.position);
 
-    // billboards follow the camera
+    // billboards follow the camera — opacity fades, never boolean visibility
     this.sunSprite.position.copy(camPos).addScaledVector(dir, 420);
-    this.sunSprite.visible = elev > -0.1;
-    this.moonSprite.position.copy(camPos).addScaledVector(dir, -400);
-    this.moonSprite.visible = elev < 0.15;
+    (this.sunSprite.material as THREE.SpriteMaterial).opacity =
+      THREE.MathUtils.smoothstep(elev, -0.14, 0.02);
+    this.moonSprite.position.copy(camPos).addScaledVector(moonDir, 400);
+    (this.moonSprite.material as THREE.SpriteMaterial).opacity = moonFade;
     this.stars.position.copy(camPos);
     this.stars.rotation.y += dt * 0.004;
     this.starMat.opacity = (1 - day) * 0.95;

@@ -6,13 +6,14 @@
 
 import { useEffect, useMemo, useState, type RefObject } from 'react';
 import {
-  Bomb, Crosshair as CrosshairIcon, Moon, Mountain, Rocket, Shield, Skull,
-  Sun, Swords, Volume2, VolumeX, X, Package, Apple,
+  Bomb, ChevronUp, Crosshair as CrosshairIcon, Hammer, Moon, Mountain,
+  Rocket, Shield, Skull, Sun, Swords, Volume2, VolumeX, X, Package, Apple, ArrowRight, Flame,
 } from 'lucide-react';
 import type { GameEngine, HotbarItem, HudStats } from '../game/engine';
+import { RECIPES, RECIPE_GROUPS, matchCraft, recipeIngredients, type Recipe, type RecipeGroupId } from '../game/crafting/recipes';
 import { B } from '../game/fps/World';
 import { buildAtlas, tileUV, T, drumstickTexture } from '../game/fps/textures';
-import type { SlotRef, SlotItem, FoodDef } from '../game/fps/Inventory';
+import type { SlotRef, SlotItem } from '../game/fps/Inventory';
 import { BLOCK_NAMES, FOODS } from '../game/fps/Inventory';
 
 export interface HudProps {
@@ -104,6 +105,9 @@ function blockTile(blockId: number): number {
     case B.ORE: return T.ORE;
     case B.COBBLE: return T.COBBLE;
     case B.WOOL: return T.TARGET_WOOL;
+    case B.CRAFTING_TABLE: return T.CRAFT_TOP;
+    case B.GLASS: return T.GLASS;
+    case B.FURNACE: return T.FURNACE;
     default: return T.STONE;
   }
 }
@@ -311,7 +315,20 @@ function LoadingScreen({ progress, label }: { progress: number; label: string })
 // ---------------------------------------------------------- app
 export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, onPlay, onCloseInventory, engineRef }: HudProps) {
   const playing = phase === 'ready' && locked;
-  const showMenu = phase === 'ready' && !locked && !stats?.inventoryOpen;
+
+  // The pause/title menu only appears after the "unlocked, no modal" state
+  // has settled for a beat. Pointer-lock release and modal flags land on
+  // React at slightly different times; without this delay, closing the
+  // inventory (or opening it before first deploy) flashes the title screen.
+  const unlockedIdle = phase === 'ready' && !locked
+    && !stats?.inventoryOpen && !stats?.craftingOpen && !stats?.furnaceOpen;
+  const [menuReady, setMenuReady] = useState(false);
+  useEffect(() => {
+    if (!unlockedIdle) { setMenuReady(false); return; }
+    const t = setTimeout(() => setMenuReady(true), 130);
+    return () => clearTimeout(t);
+  }, [unlockedIdle]);
+  const showMenu = unlockedIdle && menuReady;
   const game = () => engineRef.current;
 
   // inventory UI state
@@ -320,6 +337,15 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
   const [dragItem, setDragItem] = useState<{ item: SlotItem; from: SlotRef } | null>(null);
   const [, setInvSeq] = useState(0);
   const refreshInv = () => setInvSeq((s) => s + 1);
+
+  // console recipe-book selection (persists across open/close)
+  const [bookGroup, setBookGroup] = useState<RecipeGroupId>('building');
+  const [bookSel, setBookSel] = useState<string | null>(null);
+  const [bookFlash, setBookFlash] = useState(0);
+
+  /** slot identity across the three banks (hotbar / storage / craft grid) */
+  const sameRef = (a: SlotRef, b: SlotRef) =>
+    a.isHotbar === b.isHotbar && !!a.isCraft === !!b.isCraft && a.index === b.index;
 
   const commitSwap = (from: SlotRef, to: SlotRef) => {
     const g = game();
@@ -332,7 +358,7 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
   const handleSlotClick = (ref: SlotRef) => {
     const g = game();
     if (!g) return;
-    if (selectedSlot && selectedSlot.isHotbar === ref.isHotbar && selectedSlot.index === ref.index) {
+    if (selectedSlot && sameRef(selectedSlot, ref)) {
       setSelectedSlot(null);
       return;
     }
@@ -359,8 +385,8 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
 
   const slotProps = (ref: SlotRef) => {
     const item = game()?.inventory.getItem(ref) ?? null;
-    const isSel = !!selectedSlot && selectedSlot.isHotbar === ref.isHotbar && selectedSlot.index === ref.index;
-    const isHov = !!hoverSlot && hoverSlot.isHotbar === ref.isHotbar && hoverSlot.index === ref.index;
+    const isSel = !!selectedSlot && sameRef(selectedSlot, ref);
+    const isHov = !!hoverSlot && sameRef(hoverSlot, ref);
     return {
       draggable: !!item,
       onClick: () => handleSlotClick(ref),
@@ -378,12 +404,67 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
       onDragOver: (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; },
       onDrop: (e: React.DragEvent) => { e.preventDefault(); onSlotDrop(ref); },
       onMouseEnter: () => setHoverSlot(ref),
-      onMouseLeave: () => setHoverSlot((h) => (h && h.isHotbar === ref.isHotbar && h.index === ref.index) ? null : h),
+      onMouseLeave: () => setHoverSlot((h) => (h && sameRef(h, ref)) ? null : h),
       className: `mc-slot relative flex items-center justify-center cursor-pointer transition-all duration-75
         ${isSel ? 'mc-slot-active !outline-[#ffd23e] scale-110 z-10' : ''}
         ${isHov && item ? '!bg-[#5a6070]/90' : ''}
         ${dragItem && item ? 'opacity-40' : ''}`,
     };
+  };
+
+  /** click a recipe chip: pull ingredients from inventory into the grid */
+  const fillRecipe = (r: Recipe) => {
+    const g = game();
+    if (!g) return;
+    const inv = g.inventory;
+    if (r.grid === 3 && !inv.setCraftSize(3)) return;
+    const size = inv.craftSize;
+
+    // required block id per active cell (centered shaped patterns)
+    const need: (number | null)[] = Array(size * size).fill(null);
+    if (r.shaped) {
+      const off = Math.floor((size - r.shaped.length) / 2);
+      r.shaped.forEach((row, y) => row.forEach((ing, x) => {
+        if (ing) need[(y + off) * size + (x + off)] = ing.blockId;
+      }));
+    } else {
+      r.shapeless!.forEach((ing, i) => { need[i] = ing.blockId; });
+    }
+
+    // feasibility: enough of every ingredient across hotbar + storage?
+    const req = new Map<number, number>();
+    for (const id of need) if (id != null) req.set(id, (req.get(id) ?? 0) + 1);
+    const avail = new Map<number, number>();
+    for (const arr of [inv.hotbar, inv.mainInv]) for (const s of arr)
+      if (s && s.kind === 'block') avail.set(s.blockId, (avail.get(s.blockId) ?? 0) + s.count);
+    for (const [id, n] of req) if ((avail.get(id) ?? 0) < n) return;
+
+    // return whatever is in the grid first
+    for (let i = 0; i < size * size; i++) {
+      const it = inv.craft[i];
+      if (it) {
+        if (!inv.addItem(it)) { inv.craft[i] = it; return; } // no room — abort
+        inv.craft[i] = null;
+      }
+    }
+    // pull one of each required block into its cell
+    for (let i = 0; i < size * size; i++) {
+      const id = need[i];
+      if (id == null) continue;
+      for (const arr of [inv.hotbar, inv.mainInv]) {
+        for (let k = 0; k < arr.length; k++) {
+          const s = arr[k];
+          if (s && s.kind === 'block' && s.blockId === id && s.count > 0) {
+            s.count -= 1;
+            if (s.count <= 0) arr[k] = null;
+            inv.craft[i] = { kind: 'block', blockId: id, count: 1 };
+            break;
+          }
+        }
+        if (inv.craft[i]) break;
+      }
+    }
+    refreshInv();
   };
 
   // hitmarker flash
@@ -411,6 +492,18 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
 
       {/* damage feedback */}
       {(stats?.damageSeq ?? 0) > 0 && <div key={stats!.damageSeq} className="dmg-vignette z-30" />}
+
+      {/* directional hit marker: chevron rotates around the reticle to point
+          back at whoever just landed a shot, remounted on every new hit */}
+      {stats && stats.damageSeq > 0 && !stats.dead && (
+        <div
+          key={`dmg-dir-${stats.damageSeq}`}
+          className="dmg-dir"
+          style={{ transform: `rotate(${((stats.dmgAngle ?? 0) * 180) / Math.PI}deg)` }}
+        >
+          <ChevronUp className="dmg-dir-arrow" size={56} strokeWidth={3.5} />
+        </div>
+      )}
 
       {/* death scene */}
       {stats?.dead && (
@@ -568,103 +661,505 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
       )}
 
       {/* ============================== INVENTORY OVERLAY (TAB) ============================== */}
-      {phase === 'ready' && stats && stats.inventoryOpen && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm">
-          <div className="mc-panel p-6 flex flex-col items-center gap-5 max-w-xl w-full mx-4 relative">
-            <button
-              onClick={onCloseInventory}
-              className="absolute top-4 right-4 text-white/60 hover:text-white cursor-pointer px-font text-[10px]"
-            >
-              <X size={16} />
-            </button>
+      {phase === 'ready' && stats && stats.inventoryOpen && (() => {
+        const inv = game()?.inventory;
+        if (!inv) return null;
+        // Pocket 2×2 crafting grid, always kept at size 2 in inventory
+        const pocketSize = 2;
+        const pocketCells = inv.craft.slice(0, 4);
+        const pocketResult = matchCraft(pocketCells, pocketSize);
+        const pocketOutput = pocketResult?.output ?? null;
+        const takePocket = (n: number) => {
+          if (!inv) return;
+          // temporarily shrink to 2 so takeCraftResult sees 2×2
+          const prev = inv.craftSize;
+          inv.craftSize = 2;
+          if (game()?.takeCraftResult(n)) refreshInv();
+          inv.craftSize = prev;
+        };
+        const itemTip = hoverItem ?? (selItem ? selItem : dragItem?.item ?? null);
+        return (
+          <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm">
+            {/* Two-column layout: crafting on left, storage on right */}
+            <div className="flex gap-3 items-start max-h-[92vh] overflow-y-auto px-4 pb-4 pt-2">
 
-            <div className="flex items-center gap-3">
-              <Package size={18} className="text-[#ffd23e]" />
-              <h2 className="px-font text-[14px] text-white tracking-widest px-shadow">PLAYER INVENTORY</h2>
-            </div>
-
-            {/* Tooltip strip */}
-            <div className="w-full h-9 px-3 flex items-center mc-slot overflow-hidden">
-              {(() => {
-                const shown = hoverItem ?? (selItem ? selItem : dragItem?.item ?? null);
-                if (!shown) return <span className="px-font text-[8px] text-white/35">HOVER AN ITEM • DRAG TO MOVE • CLICK TO PICK UP & SWAP</span>;
-                return (
-                  <div className="flex items-center gap-2.5">
-                    {shown.kind === 'weapon' && <Swords size={12} className="text-[#ffd23e]" />}
-                    {shown.kind === 'block' && <Package size={12} className="text-[#8ab4ff]" />}
-                    {shown.kind === 'food' && <Apple size={12} className="text-[#ff8b4e]" />}
-                    <span className="px-font text-[9px] text-white">{itemName(shown)}</span>
-                    {(shown.kind === 'block' || shown.kind === 'food') && (
-                      <span className="px-font text-[8px] text-white/50">x{shown.count}</span>
-                    )}
-                    {shown.kind === 'food' && <span className="px-font text-[7px] text-[#6dc24a]">+{(FOODS[shown.foodId] as FoodDef | undefined)?.heal ?? 10} HP</span>}
+              {/* LEFT: Pocket crafting 2×2 */}
+              <div className="mc-panel p-4 flex flex-col gap-3 w-[220px] flex-shrink-0">
+                <div className="flex items-center gap-2 px-font text-[9px] text-[#ffd23e]">
+                  <Hammer size={12} /> CRAFTING
+                </div>
+                {/* 2×2 grid + arrow + output */}
+                <div className="flex items-center gap-3 justify-center">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[0,1,2,3].map((i) => {
+                      const ref: SlotRef = { isHotbar: false, index: i, isCraft: true };
+                      const p = slotProps(ref);
+                      return (
+                        <div key={i} draggable={p.draggable}
+                          className={`${p.className} w-[44px] h-[44px]`}
+                          onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
+                          onDragOver={p.onDragOver} onDrop={p.onDrop}
+                          onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
+                          <RenderSlotItem item={pocketCells[i] ?? null} hovered={!!hoverSlot && !!hoverSlot.isCraft && hoverSlot.index === i} />
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })()}
-            </div>
-
-            {/* Toggle Enemies Switch */}
-            <div className="mc-slot p-3 w-full flex items-center justify-between border-white/20">
-              <div className="flex items-center gap-2 px-font text-[9px] text-white">
-                <Shield size={14} className={stats.enemiesEnabled ? 'text-[#ff5347]' : 'text-[#6dc24a]'} />
-                HOSTILE AI:
-              </div>
-              <button
-                onClick={() => game()?.toggleEnemies(!stats.enemiesEnabled)}
-                className={`mc-btn px-4 py-1.5 text-[9px] cursor-pointer ${stats.enemiesEnabled ? '!bg-red-900' : '!bg-green-900'}`}
-              >
-                {stats.enemiesEnabled ? '▶ ENABLED' : '▷ DISABLED'}
-              </button>
-            </div>
-
-            {/* Main Inventory Grid (3x9 = 27 slots) */}
-            <div className="flex flex-col gap-1 w-full">
-              <div className="px-font text-[8px] text-white/50 tracking-wider">STORAGE (3x9)</div>
-              <div className="grid grid-cols-9 gap-1.5 w-full justify-items-center">
-                {(game()?.inventory.mainInv ?? Array(27).fill(null)).map((item, i) => {
-                  const ref: SlotRef = { isHotbar: false, index: i };
-                  const p = slotProps(ref);
-                  return (
-                    <div key={i} draggable={p.draggable}
-                      className={`${p.className} w-[46px] h-[46px]`}
-                      onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
-                      onDragOver={p.onDragOver} onDrop={p.onDrop}
-                      onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
-                      <RenderSlotItem item={item} hovered={!!hoverSlot && !hoverSlot.isHotbar && hoverSlot.index === i} />
+                  <ArrowRight size={18} className="text-white/40 flex-shrink-0" />
+                  <div className="flex flex-col items-center gap-1">
+                    <div
+                      onClick={() => takePocket(1)}
+                      title="Click to take 1"
+                      className={`mc-slot w-[48px] h-[48px] relative flex items-center justify-center cursor-pointer
+                        ${pocketOutput ? '!outline-[#6dc24a] hover:!bg-[#3f5a34]/80' : 'opacity-50'}`}
+                    >
+                      {pocketOutput && <RenderSlotItem item={pocketOutput.kind === 'weapon' ? pocketOutput : { ...pocketOutput, count: pocketOutput.count ?? 1 }} />}
                     </div>
-                  );
-                })}
+                  </div>
+                </div>
+                {/* pocket recipe hint */}
+                <div className="border-t border-white/10 pt-2 flex flex-col gap-1.5">
+                  <div className="px-font text-[7px] text-white/35">RECIPES (2×2)</div>
+                  <div className="flex flex-wrap gap-1">
+                    {RECIPES.filter(r => r.grid === 2).map((r) => {
+                      const pattern: (number | null)[] = [];
+                      const dim = r.shaped ? r.shaped.length : 1;
+                      const wid = r.shaped ? r.shaped[0].length : r.shapeless!.length;
+                      for (let y = 0; y < dim; y++) for (let x = 0; x < wid; x++)
+                        pattern.push(r.shaped ? (r.shaped[y][x]?.blockId ?? null) : r.shapeless![y * wid + x].blockId);
+                      return (
+                        <button key={r.id} onClick={() => fillRecipe(r)} title={r.name}
+                          className="mc-slot flex items-center gap-1 px-1 py-0.5 cursor-pointer hover:!bg-[#5a6070]/90">
+                          <div className="grid gap-[1px]" style={{ gridTemplateColumns: `repeat(${wid}, 8px)` }}>
+                            {pattern.map((id, i) => (
+                              <div key={i} className="w-[8px] h-[8px]">
+                                {id != null && <BlockIcon blockId={id} size={8} />}
+                              </div>
+                            ))}
+                          </div>
+                          <ArrowRight size={8} className="text-white/30" />
+                          <BlockIcon blockId={(r.output as { blockId?: number }).blockId ?? 1} size={14} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="px-font text-[6px] text-white/25 mt-1">RMB CRAFTING TABLE FOR 3×3</div>
+                </div>
               </div>
-            </div>
 
-            {/* Hotbar Slots (1x6) */}
-            <div className="flex flex-col gap-1 w-full">
-              <div className="px-font text-[8px] text-[#ffd23e] tracking-wider">HOTBAR (SLOTS 1-6)</div>
-              <div className="grid grid-cols-6 gap-2 w-full justify-items-center">
-                {(game()?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => {
-                  const ref: SlotRef = { isHotbar: true, index: i };
-                  const p = slotProps(ref);
-                  return (
-                    <div key={i} draggable={p.draggable}
-                      className={`${p.className} w-[58px] h-[52px] ${stats.slot === i ? '!outline-[#ffd23e]' : ''}`}
-                      onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
-                      onDragOver={p.onDragOver} onDrop={p.onDrop}
-                      onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
-                      <span className="absolute top-1 left-1 px-font text-[7px] text-white/40">{i + 1}</span>
-                      <RenderSlotItem item={item} hovered={!!hoverSlot && hoverSlot.isHotbar && hoverSlot.index === i} />
+              {/* RIGHT: Inventory */}
+              <div className="mc-panel p-4 flex flex-col gap-3 relative">
+                <button onClick={onCloseInventory}
+                  className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer">
+                  <X size={14} />
+                </button>
+                <div className="flex items-center gap-2 px-font text-[9px] text-[#ffd23e]">
+                  <Package size={12} /> INVENTORY
+                </div>
+                {/* tooltip strip */}
+                <div className="h-8 px-2 flex items-center mc-slot overflow-hidden">
+                  {itemTip ? (
+                    <div className="flex items-center gap-2">
+                      {itemTip.kind === 'weapon' && <Swords size={11} className="text-[#ffd23e]" />}
+                      {itemTip.kind === 'block' && <Package size={11} className="text-[#8ab4ff]" />}
+                      {itemTip.kind === 'food' && <Apple size={11} className="text-[#ff8b4e]" />}
+                      <span className="px-font text-[8px] text-white">{itemName(itemTip)}</span>
+                      {itemTip.kind !== 'weapon' && <span className="px-font text-[7px] text-white/50">×{itemTip.count}</span>}
                     </div>
-                  );
-                })}
+                  ) : <span className="px-font text-[7px] text-white/30">HOVER TO INSPECT · CLICK/DRAG TO MOVE</span>}
+                </div>
+                {/* 3×9 storage */}
+                <div className="flex flex-col gap-1">
+                  <div className="px-font text-[7px] text-white/40">STORAGE</div>
+                  <div className="grid grid-cols-9 gap-1.5">
+                    {(game()?.inventory.mainInv ?? Array(27).fill(null)).map((item, i) => {
+                      const ref: SlotRef = { isHotbar: false, index: i };
+                      const p = slotProps(ref);
+                      return (
+                        <div key={i} draggable={p.draggable}
+                          className={`${p.className} w-[44px] h-[44px]`}
+                          onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
+                          onDragOver={p.onDragOver} onDrop={p.onDrop}
+                          onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
+                          <RenderSlotItem item={item} hovered={!!hoverSlot && !hoverSlot.isHotbar && !hoverSlot.isCraft && hoverSlot.index === i} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {/* hotbar */}
+                <div className="flex flex-col gap-1 border-t border-white/10 pt-2">
+                  <div className="px-font text-[7px] text-[#ffd23e]">HOTBAR</div>
+                  <div className="grid grid-cols-6 gap-1.5">
+                    {(game()?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => {
+                      const ref: SlotRef = { isHotbar: true, index: i };
+                      const p = slotProps(ref);
+                      return (
+                        <div key={i} draggable={p.draggable}
+                          className={`${p.className} w-[44px] h-[44px] ${stats.slot === i ? '!outline-[#ffd23e]' : ''}`}
+                          onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
+                          onDragOver={p.onDragOver} onDrop={p.onDrop}
+                          onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
+                          <span className="absolute top-0.5 left-1 px-font text-[6px] text-white/35">{i+1}</span>
+                          <RenderSlotItem item={item} hovered={!!hoverSlot && hoverSlot.isHotbar && !hoverSlot.isCraft && hoverSlot.index === i} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {/* bottom row */}
+                <div className="flex items-center justify-between px-font text-[7px] text-white/35 border-t border-white/10 pt-2">
+                  <div className="flex items-center gap-3">
+                    <Shield size={11} className={stats.enemiesEnabled ? 'text-[#ff5347]' : 'text-[#6dc24a]'} />
+                    <button onClick={() => game()?.toggleEnemies(!stats.enemiesEnabled)}
+                      className="mc-btn px-2.5 py-1 text-[7px] cursor-pointer">
+                      AI: {stats.enemiesEnabled ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                  <div>TAB TO RESUME</div>
+                </div>
               </div>
-            </div>
-
-            <div className="flex items-center justify-between w-full px-font text-[8px] text-white/50 border-t border-white/10 pt-3">
-              <div>DRAG & DROP TO REARRANGE</div>
-              <div>PRESS TAB TO RESUME</div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
+
+      {/* ================= CRAFTING TABLE — legacy console recipe book ================= */}
+      {phase === 'ready' && stats && stats.craftingOpen && (() => {
+        const inv = game()?.inventory;
+        if (!inv) return null;
+        const activeGroup = RECIPE_GROUPS.find((g) => g.id === bookGroup) ?? RECIPE_GROUPS[0];
+        const list = RECIPES.filter((r) => r.group === activeGroup.id);
+        const sel: Recipe | null = list.find((r) => r.id === bookSel) ?? list[0] ?? null;
+
+        // how many of a block the player currently owns
+        const countOf = (id: number) => {
+          let n = 0;
+          for (const arr of [inv.hotbar, inv.mainInv])
+            for (const s of arr) if (s && s.kind === 'block' && s.blockId === id) n += s.count;
+          return n;
+        };
+        // ingredient requirement of the selected recipe
+        const needMap = new Map<number, number>();
+        if (sel) for (const ing of recipeIngredients(sel))
+          needMap.set(ing.blockId, (needMap.get(ing.blockId) ?? 0) + 1);
+        let maxCraft = sel ? 64 : 0;
+        for (const [id, n] of needMap) maxCraft = Math.min(maxCraft, Math.floor(countOf(id) / n));
+        const craftable = maxCraft > 0;
+
+        // 3×3 display grid for the selected recipe (patterns centered)
+        const gridCells: (number | null)[] = Array(9).fill(null);
+        if (sel?.shaped) {
+          const off = Math.floor((3 - sel.shaped.length) / 2);
+          sel.shaped.forEach((row, y) => row.forEach((ing, x) => {
+            if (ing) gridCells[(y + off) * 3 + (x + off)] = ing.blockId;
+          }));
+        } else if (sel?.shapeless) {
+          sel.shapeless.forEach((ing, i) => { gridCells[i] = ing.blockId; });
+        }
+
+        const doCraft = (e: React.MouseEvent) => {
+          if (!sel || !craftable) return;
+          const made = game()?.craftRecipe(sel.id, e.shiftKey ? maxCraft : 1) ?? 0;
+          if (made > 0) { setBookFlash(Date.now()); refreshInv(); }
+        };
+        const outBlock = sel ? ((sel.output as { blockId?: number }).blockId ?? 1) : 1;
+        const outCount = sel && sel.output.kind !== 'weapon' ? (sel.output.count ?? 1) : 1;
+
+        return (
+          <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === e.currentTarget) game()?.closeCraftingTable(); }}>
+            <div className="relative">
+
+              {/* ---- top category tabs ---- */}
+              <div className="flex gap-1 pl-16 relative z-0">
+                {RECIPE_GROUPS.map((g) => (
+                  <button
+                    key={g.id}
+                    title={g.label}
+                    onClick={() => { setBookGroup(g.id); setBookSel(null); }}
+                    className={`mc-book-tab w-[72px] h-[50px] flex items-center justify-center
+                      ${g.id === activeGroup.id ? 'mc-book-tab-active' : ''}`}
+                  >
+                    <BlockIcon blockId={g.icon} size={28} />
+                  </button>
+                ))}
+              </div>
+
+              {/* ---- panel + left rail ---- */}
+              <div className="flex relative">
+                {/* left vertical recipe rail */}
+                <div className="flex flex-col items-center gap-1 pr-1 -mr-[2px] z-10 self-center -translate-x-1">
+                  <div className="mc-book-rail w-[44px] h-[20px] flex items-center justify-center">
+                    <ChevronUp size={12} className="text-white/35" />
+                  </div>
+                  {list.map((r) => (
+                    <button
+                      key={r.id}
+                      title={r.name}
+                      onClick={() => setBookSel(r.id)}
+                      className={`mc-book-rail w-[50px] h-[50px] flex items-center justify-center
+                        ${sel?.id === r.id ? 'mc-book-rail-active mc-book-picked' : ''}`}
+                    >
+                      <BlockIcon blockId={(r.output as { blockId?: number }).blockId ?? 1} size={28} />
+                    </button>
+                  ))}
+                  <div className="mc-book-rail w-[44px] h-[20px] flex items-center justify-center">
+                    <ChevronUp size={12} className="text-white/35 rotate-180" />
+                  </div>
+                </div>
+
+                {/* main panel */}
+                <div className="mc-book px-5 pt-4 pb-4 w-[860px]">
+                  {/* group title */}
+                  <div className="flex items-center justify-center gap-2 mb-3">
+                    <Hammer size={13} className="text-[#ffd23e]" />
+                    <span className="px-font px-shadow text-[12px] text-white tracking-widest">
+                      {activeGroup.label.toUpperCase()}
+                    </span>
+                  </div>
+
+                  {/* horizontal recipe strip */}
+                  <div className="flex gap-1 justify-center mb-4">
+                    {list.map((r) => {
+                      const rNeeds = recipeIngredients(r);
+                      const reqMap = new Map<number, number>();
+                      for (const ing of rNeeds) reqMap.set(ing.blockId, (reqMap.get(ing.blockId) ?? 0) + 1);
+                      let can = 64;
+                      for (const [id, n] of reqMap) can = Math.min(can, Math.floor(countOf(id) / n));
+                      return (
+                        <button
+                          key={r.id}
+                          title={r.name}
+                          onClick={() => setBookSel(r.id)}
+                          className={`mc-book-slot mc-book-slot-hoverable w-[46px] h-[46px] flex items-center justify-center cursor-pointer
+                            ${sel?.id === r.id ? 'mc-book-picked' : ''} ${can <= 0 ? 'opacity-45' : ''}`}
+                        >
+                          <BlockIcon blockId={(r.output as { blockId?: number }).blockId ?? 1} size={28} />
+                        </button>
+                      );
+                    })}
+                    {Array.from({ length: Math.max(0, 11 - list.length) }).map((_, i) => (
+                      <div key={`e${i}`} className="mc-book-slot w-[46px] h-[46px] opacity-60" />
+                    ))}
+                  </div>
+
+                  {/* bottom: recipe detail + inventory */}
+                  <div className="flex gap-4">
+                    {/* recipe detail */}
+                    <div className="mc-book-slot flex-1 p-3">
+                      <div className="px-font px-shadow-sm text-center text-[9px] text-[#ffd23e] tracking-wider mb-3">
+                        {sel ? sel.name.toUpperCase() : '—'}
+                      </div>
+                      <div className="flex items-center justify-center gap-5">
+                        {/* 3×3 pattern */}
+                        <div className="grid grid-cols-3 gap-[3px]">
+                          {gridCells.map((id, i) => (
+                            <div key={i}
+                              className={`mc-book-slot w-[46px] h-[46px] flex items-center justify-center
+                                ${id != null && !craftable ? 'mc-book-slot-missing' : ''}`}>
+                              {id != null && <BlockIcon blockId={id} size={28} />}
+                            </div>
+                          ))}
+                        </div>
+                        {/* arrow */}
+                        <ArrowRight size={26} className="text-white/45 flex-shrink-0" />
+                        {/* output */}
+                        <button
+                          key={bookFlash}
+                          onClick={doCraft}
+                          title={craftable ? 'Click: craft 1 · Shift+Click: craft all' : 'Missing ingredients'}
+                          className={`mc-book-slot w-[60px] h-[60px] flex items-center justify-center relative
+                            ${craftable
+                              ? 'cursor-pointer craft-pop !outline-[#6dc24a] hover:!bg-[#3f5a34]/80'
+                              : 'mc-book-slot-missing cursor-not-allowed'}`}
+                        >
+                          <BlockIcon blockId={outBlock} size={34} />
+                          {outCount > 1 && (
+                            <span className="px-font px-shadow absolute bottom-0.5 right-1 text-[8px] text-white">
+                              {outCount}
+                            </span>
+                          )}
+                          {craftable && maxCraft < 64 && (
+                            <span className="px-font px-shadow-sm absolute top-0.5 left-1 text-[7px] text-[#ffd23e]">
+                              ×{maxCraft}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                      {/* ingredient tally */}
+                      <div className="flex items-center justify-center gap-3 mt-3 pt-2 border-t border-white/10">
+                        {[...needMap.entries()].map(([id, n]) => {
+                          const have = countOf(id);
+                          const ok = have >= n;
+                          return (
+                            <div key={id} className="flex items-center gap-1.5">
+                              <BlockIcon blockId={id} size={16} />
+                              <span className={`px-font text-[7px] ${ok ? 'text-[#6dc24a]' : 'text-[#ff5347]'}`}>
+                                {have}/{n}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* inventory */}
+                    <div className="mc-book-slot w-[430px] p-3">
+                      <div className="flex items-center justify-center gap-2 mb-3">
+                        <Package size={11} className="text-[#8ab4ff]" />
+                        <span className="px-font px-shadow-sm text-[9px] text-white/80 tracking-wider">INVENTORY</span>
+                      </div>
+                      <div className="grid grid-cols-9 gap-[3px] mb-2">
+                        {(inv.mainInv).map((item, i) => (
+                          <div key={i} className="mc-book-slot w-[40px] h-[40px] flex items-center justify-center">
+                            {item && <RenderSlotItem item={item} />}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
+                        {inv.hotbar.map((item, i) => (
+                          <div key={i} className={`mc-book-slot w-[40px] h-[40px] flex items-center justify-center ${stats.slot === i ? 'mc-book-picked' : ''}`}>
+                            {item && <RenderSlotItem item={item} />}
+                          </div>
+                        ))}
+                        {Array.from({ length: 3 }).map((_, i) => (
+                          <div key={`h${i}`} className="mc-book-slot w-[40px] h-[40px] opacity-60" />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* ---- bottom key hints ---- */}
+              <div className="flex items-center gap-4 mt-3 pl-2 px-font px-shadow-sm text-[7px] text-white/55">
+                <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
+                <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> CRAFT</span>
+                <span className="flex items-center gap-1.5"><span className="mc-book-key">SHIFT</span> CRAFT ALL</span>
+                <span className="flex items-center gap-1.5"><span className="mc-book-key">TAB</span> INVENTORY</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ================= FURNACE (RMB a placed furnace) ================= */}
+      {phase === 'ready' && stats && stats.furnaceOpen && (() => {
+        const g = game();
+        const inv = g?.inventory;
+        const fur = g?.openFurnace;
+        if (!g || !inv || !fur) return null;
+
+        const burn = stats.furnaceBurn ?? 0;
+        const cook = stats.furnaceCook ?? 0;
+        const move = (slot: 'input' | 'fuel' | 'output') => (e: React.MouseEvent) => {
+          g.furnaceTransfer(slot, e.shiftKey);
+          refreshInv();
+        };
+        const held = inv.hotbar[stats.slot];
+        const heldName = held ? itemName(held) : 'nothing';
+
+        return (
+          <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === e.currentTarget) g.closeFurnace(); }}>
+            <div className="mc-book px-6 pt-4 pb-4 w-[520px] relative">
+              <button onClick={() => g.closeFurnace()}
+                className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer">
+                <X size={14} />
+              </button>
+
+              {/* title */}
+              <div className="flex items-center justify-center gap-2 mb-4">
+                <Flame size={13} className={burn > 0 ? 'text-[#ff8b4e]' : 'text-white/40'} />
+                <span className="px-font px-shadow text-[12px] text-white tracking-widest">FURNACE</span>
+              </div>
+
+              {/* smelting row: input over fuel, flame gauge, arrow, output */}
+              <div className="flex items-center justify-center gap-4 mb-4">
+                <div className="flex flex-col items-center gap-2">
+                  {/* input */}
+                  <button onClick={move('input')} title="Click: take/put 1 · Shift: whole stack"
+                    className="mc-book-slot mc-book-slot-hoverable w-[52px] h-[52px] flex items-center justify-center cursor-pointer">
+                    <RenderSlotItem item={fur.input} />
+                  </button>
+                  {/* flame gauge */}
+                  <div className="relative w-[26px] h-[26px]">
+                    <Flame size={26} className="absolute inset-0 text-white/12" strokeWidth={2} />
+                    <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(${(1 - burn) * 100}% 0 0 0)` }}>
+                      <Flame size={26} className="text-[#ff8b4e]" strokeWidth={2}
+                        style={{ filter: burn > 0 ? 'drop-shadow(0 0 5px rgba(255,139,78,0.85))' : 'none' }} />
+                    </div>
+                  </div>
+                  {/* fuel */}
+                  <button onClick={move('fuel')} title="Fuel: planks, logs, leaves, cactus"
+                    className="mc-book-slot mc-book-slot-hoverable w-[52px] h-[52px] flex items-center justify-center cursor-pointer">
+                    <RenderSlotItem item={fur.fuel} />
+                  </button>
+                </div>
+
+                {/* progress arrow */}
+                <div className="relative w-[62px] h-[22px] flex items-center">
+                  <div className="absolute inset-0 flex items-center">
+                    <ArrowRight size={30} className="text-white/15" strokeWidth={2.5} />
+                  </div>
+                  <div className="absolute inset-0 flex items-center overflow-hidden"
+                    style={{ clipPath: `inset(0 ${(1 - cook) * 100}% 0 0)` }}>
+                    <ArrowRight size={30} className="text-[#6dc24a]" strokeWidth={2.5} />
+                  </div>
+                </div>
+
+                {/* output */}
+                <button onClick={move('output')} title="Click: take 1 · Shift: take all"
+                  className={`mc-book-slot w-[62px] h-[62px] flex items-center justify-center relative
+                    ${fur.output ? 'cursor-pointer !outline-[#6dc24a] hover:!bg-[#3f5a34]/80' : 'opacity-60'}`}>
+                  <RenderSlotItem item={fur.output} />
+                </button>
+              </div>
+
+              {/* held-item hint */}
+              <div className="mc-book-slot px-3 py-2 mb-3 flex items-center justify-center gap-2">
+                <span className="px-font text-[7px] text-white/40">HOLDING</span>
+                {held && <BlockIcon blockId={held.kind === 'block' ? held.blockId : 1} size={14} />}
+                <span className="px-font text-[8px] text-white">{heldName.toUpperCase()}</span>
+                <span className="px-font text-[7px] text-white/40">— CLICK A SLOT TO INSERT</span>
+              </div>
+
+              {/* inventory reference */}
+              <div className="mc-book-slot p-3">
+                <div className="flex items-center justify-center gap-2 mb-2">
+                  <Package size={11} className="text-[#8ab4ff]" />
+                  <span className="px-font px-shadow-sm text-[9px] text-white/80 tracking-wider">INVENTORY</span>
+                </div>
+                <div className="grid grid-cols-9 gap-[3px] mb-2">
+                  {inv.mainInv.map((item, i) => (
+                    <div key={i} className="mc-book-slot w-[46px] h-[40px] flex items-center justify-center">
+                      {item && <RenderSlotItem item={item} />}
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
+                  {inv.hotbar.map((item, i) => (
+                    <div key={i} className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${stats.slot === i ? 'mc-book-picked' : ''}`}>
+                      {item && <RenderSlotItem item={item} />}
+                    </div>
+                  ))}
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={`f${i}`} className="mc-book-slot w-[46px] h-[40px] opacity-60" />
+                  ))}
+                </div>
+              </div>
+
+              {/* key hints */}
+              <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">
+                <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
+                <span className="flex items-center gap-1.5"><span className="mc-book-key">1-6</span> PICK FUEL</span>
+                <span className="flex items-center gap-1.5"><span className="mc-book-key">SHIFT</span> WHOLE STACK</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {phase === 'loading' && <LoadingScreen progress={progress} label={label} />}
 
