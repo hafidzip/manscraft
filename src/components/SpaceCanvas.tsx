@@ -9,31 +9,48 @@
 import { useEffect, useRef, useState } from 'react';
 import { SpaceScene, type HudState } from '../game/space/scene';
 import type { PlanetHome } from '../game/space/theme';
+import { session } from '../game/session';
 
 interface SpaceCanvasProps {
   home?: PlanetHome | null;
-  onExit: (home: PlanetHome) => void;
+  onExit: (home: PlanetHome, snapshot?: string | null) => void;
+  /** Fired once the scene is live — the parent uses it to drop the transition overlay. */
+  onReady?: () => void;
 }
 
-export function SpaceCanvas({ home, onExit }: SpaceCanvasProps) {
+export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<SpaceScene | null>(null);
   const [hud, setHud] = useState<HudState | null>(null);
   const [locked, setLocked] = useState(false);
+  const [hasLockedOnce, setHasLockedOnce] = useState(false);
 
-  // keep latest callback/home without re-creating the scene
+  /** Cold start = the app's first boot; warm = any later space entry. */
+  const [coldStart] = useState(() => !session.booted);
+
+  // keep latest callbacks/home without re-creating the scene
   const exitRef = useRef(onExit);
   exitRef.current = onExit;
+  const readyRef = useRef(onReady);
+  readyRef.current = onReady;
   const homeRef = useRef(home);
   homeRef.current = home;
+  /** last rendered frame, grabbed right before handing off to the planet */
+  const snapRef = useRef<HTMLCanvasElement | null>(null);
+
+  const grabSnapshot = (): string | null => {
+    const snap = snapRef.current ?? sceneRef.current?.getSnapshot() ?? null;
+    return snap ? snap.toDataURL('image/jpeg', 0.82) : null;
+  };
 
   // resolves the home to hand back on LAND: dispose() computes the exit
   // planet (locked -> nearest -> last-locked) and fires onExit; deep space
   // falls back to the entry home.
   const exit = () => {
     const s = sceneRef.current;
+    snapRef.current = s?.getSnapshot() ?? null;
     if (s) s.dispose();
-    else if (homeRef.current) exitRef.current(homeRef.current);
+    else if (homeRef.current) exitRef.current(homeRef.current, grabSnapshot());
   };
 
   useEffect(() => {
@@ -43,18 +60,36 @@ export function SpaceCanvas({ home, onExit }: SpaceCanvasProps) {
       canvas,
       homeRef.current ? { star: homeRef.current.star, planet: homeRef.current.planet } : undefined,
     );
-    scene.onHud = (h) => setHud(h);
+    let readySent = false;
+    scene.onHud = (h) => {
+      setHud(h);
+      if (!readySent) {
+        readySent = true;
+        readyRef.current?.(); // first live frame — parent drops the overlay
+      }
+    };
     scene.onExit = (sx) => {
-      exitRef.current({ star: sx.star, planet: sx.planet ?? homeRef.current!.planet });
+      exitRef.current(
+        { star: sx.star, planet: sx.planet ?? homeRef.current!.planet },
+        grabSnapshot(),
+      );
     };
     // landed on a planet (F-descend or auto-land): exit into its voxel world
     scene.onDescend = (planet) => {
-      exitRef.current({ star: scene.getHomeStar(), planet });
+      snapRef.current = scene.getSnapshot();
+      exitRef.current({ star: scene.getHomeStar(), planet }, grabSnapshot());
     };
     sceneRef.current = scene;
     scene.start();
 
-    const onLock = () => setLocked(document.pointerLockElement === canvas);
+    const onLock = () => {
+      const l = document.pointerLockElement === canvas;
+      setLocked(l);
+      if (l) {
+        setHasLockedOnce(true);
+        session.booted = true;
+      }
+    };
     document.addEventListener('pointerlockchange', onLock);
     const onKey = (e: KeyboardEvent) => {
       if (e.code === 'Escape' && document.pointerLockElement !== canvas) exit();
@@ -67,6 +102,37 @@ export function SpaceCanvas({ home, onExit }: SpaceCanvasProps) {
       sceneRef.current = null;
     };
   }, []);
+
+  /**
+   * Warm re-entry: silently try to recapture the pointer (the descend/exit
+   * gesture's transient activation usually still covers it). If the browser
+   * refuses, the slim "take flight control" chip appears shortly after.
+   */
+  const [live, setLive] = useState(false);
+  useEffect(() => { if (hud) setLive(true); }, [hud]);
+  const autoLockTried = useRef(false);
+  useEffect(() => {
+    if (!live || coldStart || locked || autoLockTried.current) return;
+    autoLockTried.current = true;
+    const t = window.setTimeout(() => {
+      const c = canvasRef.current;
+      if (!c || document.pointerLockElement === c) return;
+      try {
+        const p = c.requestPointerLock() as unknown as Promise<void> | undefined;
+        if (p && typeof p.catch === 'function') p.catch(() => undefined);
+      } catch { /* the slim prompt covers this case */ }
+    }, 120);
+    return () => window.clearTimeout(t);
+  }, [live, coldStart, locked]);
+
+  // slim resume chip for warm entries (delayed so the auto-lock wins the race)
+  const wantPrompt = live && !locked && !coldStart && !hasLockedOnce;
+  const [promptReady, setPromptReady] = useState(false);
+  useEffect(() => {
+    if (!wantPrompt) { setPromptReady(false); return; }
+    const t = setTimeout(() => setPromptReady(true), 450);
+    return () => clearTimeout(t);
+  }, [wantPrompt]);
 
   const target = hud?.target ?? null;
   const distStr = (d: number) =>
@@ -185,8 +251,8 @@ export function SpaceCanvas({ home, onExit }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== ENTRY / PAUSE ============================== */}
-      {!locked && (
+      {/* ============================== COLD-START TITLE (once per session) ============================== */}
+      {!locked && coldStart && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
           style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.75), rgba(3,4,12,0.92))' }}>
           <div className="px-font text-[10px] text-[#9fd4ff] tracking-[0.35em] px-shadow-sm">// OPEN SPACE</div>
@@ -212,6 +278,44 @@ export function SpaceCanvas({ home, onExit }: SpaceCanvasProps) {
             onClick={exit}
           >
             ⬅ RETURN TO PLANET
+          </button>
+        </div>
+      )}
+
+      {/* ============================== WARM PAUSE (after ESC mid-flight) ============================== */}
+      {!locked && !coldStart && hasLockedOnce && (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
+          style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.62), rgba(3,4,12,0.86))' }}>
+          <div className="px-font text-[9px] text-[#9fd4ff] tracking-[0.35em] px-shadow-sm">// FLIGHT SUSPENDED</div>
+          <h2 className="px-font px-shadow text-[20px] text-white tracking-[0.14em] mt-2">PAUSED</h2>
+          <button
+            className="mc-btn pointer-events-auto mt-7 px-9 py-3.5 text-[11px] tracking-widest cursor-pointer"
+            onClick={() => canvasRef.current?.requestPointerLock()}
+          >
+            ▶ RESUME FLIGHT
+          </button>
+          <button
+            className="pointer-events-auto mt-4 px-font px-shadow-sm text-[8px] text-white/50 hover:text-white cursor-pointer tracking-widest"
+            onClick={exit}
+          >
+            ⬅ RETURN TO PLANET
+          </button>
+        </div>
+      )}
+
+      {/* ============================== WARM ENTRY: slim resume chip ============================== */}
+      {wantPrompt && promptReady && (
+        <div className="absolute inset-x-0 bottom-[16%] z-40 flex justify-center pointer-events-none overlay-in">
+          <button
+            onClick={() => canvasRef.current?.requestPointerLock()}
+            className="pointer-events-auto mc-panel group flex flex-col items-center gap-2.5 px-8 py-5 cursor-pointer transition-transform duration-100 hover:scale-[1.03] active:translate-y-[2px]"
+          >
+            <span className="px-font px-shadow text-[11px] tracking-[0.22em] text-white group-hover:text-[#9fd4ff]">
+              CLICK TO TAKE FLIGHT CONTROL
+            </span>
+            <span className="px-font px-shadow-sm text-[8px] tracking-[0.18em] text-[#9fd4ff] px-blink">
+              ◉ ORBIT STABLE — SYSTEMS LIVE
+            </span>
           </button>
         </div>
       )}

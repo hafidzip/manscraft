@@ -2,17 +2,26 @@ import { useEffect, useRef, useState } from 'react';
 import { GameEngine, type HotbarItem, type HudStats } from '../game/engine';
 import { themeFromPlanet, homeFromTheme, type PlanetHome } from '../game/space/theme';
 import { homeStar, homePlanet } from '../game/space/galaxy';
+import { session } from '../game/session';
 import { HUD } from './HUD';
 import { Minimap } from './Minimap';
 import { Inventory } from '../game/fps/Inventory';
 
 interface GameCanvasProps {
   home?: PlanetHome | null;
-  onEnterSpace?: (home: PlanetHome) => void;
+  onEnterSpace?: (home: PlanetHome, snapshot?: string | null) => void;
   persistentInventory?: Inventory | null;
+  /** Camp IDs that were cleared on a previous visit (cross-planet persistence). */
+  initialClearedCamps?: number[];
+  /** Called on unmount with the current cleared camp IDs so the parent can store them. */
+  onSaveClearedCamps?: (campIds: number[]) => void;
+  /** Fired once the world is ready — the parent uses it to drop the transition overlay. */
+  onReady?: () => void;
 }
 
-export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanvasProps) {
+export function GameCanvas({
+  home, onEnterSpace, persistentInventory, initialClearedCamps, onSaveClearedCamps, onReady,
+}: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
 
@@ -25,6 +34,19 @@ export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanv
   const [items, setItems] = useState<HotbarItem[]>([]);
   const [stats, setStats] = useState<HudStats | null>(null);
   const [seed, setSeed] = useState(0);
+
+  /**
+   * Cold start = the very first boot of the session. Everything after that
+   * (space → planet descents, planet hops) is a warm re-entry: shortened
+   * preload, no title screen, silent pointer-lock recapture.
+   */
+  const [coldStart] = useState(() => !session.booted);
+
+  // Keep stable refs to the latest callbacks for the mount-once effect closure
+  const saveRef = useRef(onSaveClearedCamps);
+  saveRef.current = onSaveClearedCamps;
+  const readyRef = useRef(onReady);
+  readyRef.current = onReady;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -42,10 +64,14 @@ export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanv
           setItems(it);
           setSeed(sd);
           setPhase('ready');
+          readyRef.current?.();
         },
         onLock: (l) => {
           setLocked(l);
-          if (l) setHasPlayed(true);
+          if (l) {
+            setHasPlayed(true);
+            session.booted = true;
+          }
         },
         onSelect: setSelected,
         onStats: setStats,
@@ -56,11 +82,16 @@ export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanv
             homeFromTheme(theme as never) ??
             home ??
             { star: homeStar(), planet: homePlanet() };
-          onEnterSpace?.(h);
+          // grab the last rendered frame so the app can hold it on screen
+          // while the space scene boots — no black loading cut
+          const snap = engineRef.current?.getSnapshot() ?? null;
+          onEnterSpace?.(h, snap ? snap.toDataURL('image/jpeg', 0.82) : null);
         },
       },
       home ? themeFromPlanet(home.planet, home.star) : undefined,
       persistentInventory ?? undefined,
+      initialClearedCamps,
+      !coldStart, // warm re-entry: fast preload, stream the rest during play
     );
     engineRef.current = engine;
     engine.init().then(() => {
@@ -69,10 +100,30 @@ export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanv
 
     return () => {
       cancelled = true;
+      // Persist cleared camp state before disposing
+      const cleared = engine.getClearedCampIds();
+      saveRef.current?.(cleared);
       engine.dispose();
       engineRef.current = null;
     };
   }, []);
+
+  /**
+   * Warm re-entry: the player just left space via a key/click gesture, so the
+   * browser's transient activation usually still covers a silent pointer-lock
+   * recapture. When it lands, the player drops straight into control with no
+   * screen in between; when the browser refuses, the slim resume chip in the
+   * HUD takes over (it appears ~450 ms after ready — after this attempt).
+   */
+  const autoLockTried = useRef(false);
+  useEffect(() => {
+    if (phase !== 'ready' || coldStart || locked || autoLockTried.current) return;
+    autoLockTried.current = true;
+    const t = window.setTimeout(() => {
+      engineRef.current?.requestLock();
+    }, 120);
+    return () => window.clearTimeout(t);
+  }, [phase, coldStart, locked]);
 
   const play = () => engineRef.current?.requestLock();
   const closeInventory = () => engineRef.current?.toggleInventory(false);
@@ -88,6 +139,7 @@ export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanv
         phase={phase}
         locked={locked}
         hasPlayed={hasPlayed}
+        coldStart={coldStart}
         progress={progress}
         label={label}
         selected={selected}

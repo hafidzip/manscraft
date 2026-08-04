@@ -334,3 +334,61 @@ canvas {
   100% { opacity: 1; transform: translateY(0) scale(1); letter-spacing: 0.08em; }
 }
 .title-in { animation: title-in 0.7s steps(10) both; }
+
+/* ============ WARP BRIDGE — held-frame scene transition ============ */
+/* The outgoing scene's last frame stays on screen while the next scene
+   boots: a scanline shimmer keeps the frozen frame feeling live, a bright
+   band sweeps down it, and the whole layer cross-fades out on ready. */
+
+/* faint CRT scanlines + breathing flicker + vignette */
+.warp-grid {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at center, transparent 52%, rgba(0, 0, 0, 0.45) 100%);
+  animation: warp-flicker 0.8s steps(3) infinite;
+}
+@keyframes warp-flicker {
+  0% { opacity: 0.82; }
+  50% { opacity: 1; }
+  100% { opacity: 0.88; }
+}
+
+/* luminous band sweeping top -> bottom (screen-blended over the frame) */
+.warp-sweep { overflow: hidden; mix-blend-mode: screen; }
+.warp-sweep::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: -180px;
+  height: 150px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(159, 212, 255, 0.14) 32%,
+    rgba(255, 255, 255, 0.34) 50%,
+    rgba(159, 212, 255, 0.14) 68%,
+    transparent 100%
+  );
+  animation: warp-sweep-move 1.05s steps(16) infinite;
+}
+@keyframes warp-sweep-move {
+  to { transform: translateY(calc(100vh + 360px)); }
+}
+
+/* indeterminate status bar */
+.warp-bar {
+  width: 34%;
+  animation: warp-bar-slide 0.95s steps(12) infinite;
+  box-shadow: 0 0 10px currentColor;
+}
+@keyframes warp-bar-slide {
+  0% { transform: translateX(-130%); }
+  100% { transform: translateX(330%); }
+}
+
+/* cross-fade out once the incoming scene is live */
+.warp-exit { animation: warp-out 0.7s steps(9) forwards; }
+@keyframes warp-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}

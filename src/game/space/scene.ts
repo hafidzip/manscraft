@@ -273,6 +273,10 @@ export class SpaceScene {
   private clock = new THREE.Clock();
   private raf = 0;
 
+  /** rolling snapshot of the last rendered frame (seamless scene handoff) */
+  private snapCanvas: HTMLCanvasElement | null = null;
+  private snapT = 0;
+
   onHud?: (s: HudState) => void;
 
   constructor(private canvas: HTMLCanvasElement, entry?: SpaceEntry) {
@@ -788,6 +792,34 @@ export class SpaceScene {
     return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
   }
 
+  /**
+   * Blit the just-rendered frame into a small offscreen canvas every ~250 ms
+   * (same task as the render, so the WebGL bitmap is guaranteed valid). The
+   * app layer grabs this on descend/exit so the last frame stays on screen
+   * while the voxel world boots — no black loading cut.
+   */
+  private captureSnapshot(dt: number): void {
+    this.snapT -= dt;
+    if (this.snapT > 0) return;
+    this.snapT = 0.25;
+    const src = this.canvas;
+    if (!src.width || !src.height) return;
+    if (!this.snapCanvas) this.snapCanvas = document.createElement('canvas');
+    const scale = Math.min(1, 1150 / src.width);
+    const w = Math.max(2, Math.round(src.width * scale));
+    const h = Math.max(2, Math.round(src.height * scale));
+    if (this.snapCanvas.width !== w || this.snapCanvas.height !== h) {
+      this.snapCanvas.width = w;
+      this.snapCanvas.height = h;
+    }
+    this.snapCanvas.getContext('2d')?.drawImage(src, 0, 0, w, h);
+  }
+
+  /** The last captured frame, for the seamless space → planet handoff. */
+  getSnapshot(): HTMLCanvasElement | null {
+    return this.snapCanvas;
+  }
+
   start() {
     this.clock.start();
     this.loop();
@@ -1093,6 +1125,9 @@ export class SpaceScene {
     });
 
     this.renderer.render(this.scene, this.camera);
+
+    // keep a fresh frame grab ready for the seamless planet handoff
+    this.captureSnapshot(dt);
   };
 
   /**

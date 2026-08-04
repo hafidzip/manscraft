@@ -294,6 +294,9 @@ export class GameEngine {
   private prevVelY = 0;
   private wasInWater = false;
   private disposed = false;
+  /** rolling snapshot of the last rendered frame (seamless scene handoff) */
+  private snapCanvas: HTMLCanvasElement | null = null;
+  private snapT = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -301,6 +304,14 @@ export class GameEngine {
     theme?: PlanetTheme | null,
     /** Optional persistent inventory (survives planet hops when provided) */
     persistentInventory?: Inventory,
+    /** Camp IDs that were cleared on a previous visit (cross-planet persistence) */
+    private initialClearedCamps?: number[],
+    /**
+     * Warm re-entry (planet hop from space): preload only a tight ring of
+     * chunks and stream the rest in during play, so the descent feels instant
+     * instead of showing a loading cut.
+     */
+    private fastStart = false,
   ) {
     this.theme = theme ?? null;
     // Use provided inventory or create fresh one
@@ -553,12 +564,16 @@ export class GameEngine {
     }
 
     // ---- budgeted world preload with progress ----
-    const total = World.cellsInRadius(C.VIEW_DISTANCE);
+    // Warm re-entries only preload a tight 3-chunk ring (≈instant) and let the
+    // main loop stream the rest in while the player is already controlling the
+    // ship — the transition overlay covers any horizon pop-in.
+    const preloadRadius = this.fastStart ? 3 : C.VIEW_DISTANCE;
+    const total = World.cellsInRadius(preloadRadius);
     let loaded = 0;
     let labelIdx = -1;
     while (true) {
-      loaded += this.world.update(this.player.pos.x, this.player.pos.z, 32);
-      if (!this.world.pendingWork) break;
+      loaded += this.world.update(this.player.pos.x, this.player.pos.z, this.fastStart ? 48 : 32);
+      if (this.fastStart ? loaded >= total : !this.world.pendingWork) break;
       const p = Math.min(0.99, loaded / total);
       const idx = Math.min(LOAD_LABELS.length - 1, Math.floor(p * LOAD_LABELS.length));
       if (idx !== labelIdx) {
@@ -586,6 +601,10 @@ export class GameEngine {
       onPlayerHit: (dmg, from) => this.damagePlayer(dmg, from),
       onEnemyKilled: () => { this.kills++; },
     }, this.camps);
+    // Restore cleared camp state from a previous visit to this planet
+    if (this.initialClearedCamps?.length) {
+      this.enemies.markCampsCleared(this.initialClearedCamps);
+    }
     this.enemies.addScene(this.scene);
     this.heldBlock = new HeldBlockTool(this.scene, this.camera, new THREE.MeshLambertMaterial({ map: this.textures.atlas }));
     this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
@@ -636,6 +655,35 @@ export class GameEngine {
 
   private nextFrame(): Promise<void> {
     return new Promise((r) => requestAnimationFrame(() => r()));
+  }
+
+  /**
+   * Blit the just-rendered frame into a small offscreen canvas every ~250 ms
+   * (same task as the render, so the WebGL bitmap is guaranteed valid — no
+   * preserveDrawingBuffer needed). The app layer grabs this when the ship
+   * breaks atmosphere so the last frame stays on screen while the space scene
+   * boots: that's what makes the handoff feel like one continuous shot.
+   */
+  private captureSnapshot(dt: number): void {
+    this.snapT -= dt;
+    if (this.snapT > 0) return;
+    this.snapT = 0.25;
+    const src = this.canvas;
+    if (!src.width || !src.height) return;
+    if (!this.snapCanvas) this.snapCanvas = document.createElement('canvas');
+    const scale = Math.min(1, 1150 / src.width);
+    const w = Math.max(2, Math.round(src.width * scale));
+    const h = Math.max(2, Math.round(src.height * scale));
+    if (this.snapCanvas.width !== w || this.snapCanvas.height !== h) {
+      this.snapCanvas.width = w;
+      this.snapCanvas.height = h;
+    }
+    this.snapCanvas.getContext('2d')?.drawImage(src, 0, 0, w, h);
+  }
+
+  /** The last captured frame, for the seamless planet → space handoff. */
+  getSnapshot(): HTMLCanvasElement | null {
+    return this.snapCanvas;
   }
 
   // ------------------------------------------------------- unified hotbar
@@ -1403,6 +1451,9 @@ export class GameEngine {
 
     if (this.composer) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
+
+    // keep a fresh frame grab ready for the seamless space handoff
+    this.captureSnapshot(dt);
   };
 
   private tickMenuCamera(dt: number): void {
@@ -2171,6 +2222,8 @@ export class GameEngine {
     if (useEnemy) {
       const eh = enemyHit!;
       eh.enemy.takeDamage(weaponId === 'sniper' ? 50 : weaponId === 'bazooka' ? 999 : 12, eh.point, eh.headshot);
+      // Alert the entire squad when any member is shot
+      this.enemies.alertSquadOf(eh.enemy);
       this.hitSeq++;
       if (eh.headshot) this.fpsAudio.headshot(); else this.fpsAudio.enemyHit();
     } else if (useTarget) {
@@ -2194,6 +2247,8 @@ export class GameEngine {
   private handleExplosion(pos: THREE.Vector3): void {
     const dist = pos.distanceTo(this.player.pos);
     this.enemies.damageInRadius(pos, 3.4, 120);
+    // Alert entire squads of any camp that had a member in the blast
+    this.enemies.alertCampsInRadius(pos, 3.4);
 
     // A blast carves ~100 voxels. Spawning an un-pooled item entity for every
     // one of them stalls the frame (and buries the player in pickups), so the
@@ -2328,6 +2383,11 @@ export class GameEngine {
       z: c.site.cz,
       cleared: c.cleared,
     }));
+  }
+
+  /** Return the IDs of camps that have been cleared (for cross-planet persistence). */
+  getClearedCampIds(): number[] {
+    return this.enemies.getClearedCampIds();
   }
 
   dispose(): void {

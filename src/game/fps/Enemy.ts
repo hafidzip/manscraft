@@ -1359,6 +1359,25 @@ export class EnemyManager {
     }
 
     this.respawnTick(dt);
+
+    // ---- camp proximity aggro: player entering a camp radius triggers squad
+    for (const camp of this.camps) {
+      if (camp.cleared || camp.squad.length === 0) continue;
+      const cdx = wrapDelta(ppx - camp.site.cx, WORLD_SIZE);
+      const cdz = wrapDelta(ppz - camp.site.cz, WORLD_SIZE);
+      const dist = Math.hypot(cdx, cdz);
+      if (dist <= camp.site.radius) {
+        const pImg = new THREE.Vector3(
+          camp.site.cx + cdx,
+          this.player.pos.y,
+          camp.site.cz + cdz,
+        );
+        for (const e of camp.squad) {
+          if (e.alive) e.investigate(pImg.clone());
+        }
+      }
+    }
+
     let cleared = 0;
     for (const c of this.camps) if (c.cleared) cleared++;
     this.campsCleared = cleared;
@@ -1466,7 +1485,12 @@ export class EnemyManager {
     else camp.respawnTimer = 2;         // hostile terrain: retry fast, don't flag cleared
   }
 
-  /** per-camp: trickle dead members back, or repopulate a wiped camp */
+  /**
+   * Per-camp tick. Dead enemies are NEVER respawned — once a squad member
+   * dies they stay dead for the rest of the session. Cleared camps remain
+   * permanently cleared and are persisted across planet visits.
+   * Only the initial spawn (first time player approaches) still runs.
+   */
   respawnTick(dt: number): void {
     const ppx = this.player.pos.x;
     const ppz = this.player.pos.z;
@@ -1478,37 +1502,22 @@ export class EnemyManager {
       const cdz = wrapDelta(camp.site.cz - ppz, WORLD_SIZE);
       if (cdx * cdx + cdz * cdz > SIM_RADIUS * SIM_RADIUS) continue;
 
+      // Prune dead members from the squad roster (they are still in this.enemies
+      // until their death animation finishes, so rendering/physics still runs).
       for (let i = camp.squad.length - 1; i >= 0; i--) if (!camp.squad[i].alive) camp.squad.splice(i, 1);
 
-      // first approach: bring the whole squad up at once
-      if (!camp.spawnedEver && camp.squad.length === 0) {
+      // First approach: bring the whole squad up at once (initial spawn only).
+      if (!camp.spawnedEver && !camp.cleared && camp.squad.length === 0) {
         camp.respawnTimer -= dt;
         if (camp.respawnTimer <= 0) this.spawnCamp(camp);
         continue;
       }
 
+      // Mark camp as permanently cleared when the full squad is wiped.
       if (!camp.cleared && camp.spawnedEver && camp.squad.length === 0) {
         camp.cleared = true;
-        camp.respawnTimer = CAMP_REPOPULATE_DELAY;
-        continue;
       }
-      if (!camp.cleared && camp.squad.length >= camp.squadSize) {
-        camp.respawnTimer = CAMP_MEMBER_RESPAWN;
-        continue;
-      }
-      camp.respawnTimer -= dt;
-      if (camp.respawnTimer > 0) continue;
-
-      if (camp.cleared) {
-        camp.cleared = false;
-        camp.squad.length = 0;
-        this.spawnCamp(camp);
-      } else if (!this.spawnMember(camp, camp.squad.length, true)) {
-        camp.respawnTimer = 3;          // player too close / no footing: try again shortly
-      } else {
-        camp.spawnedEver = true;
-        camp.respawnTimer = CAMP_MEMBER_RESPAWN;
-      }
+      // No respawning of individual members or repopulation of cleared camps.
     }
   }
 
@@ -1560,6 +1569,53 @@ export class EnemyManager {
     }
   }
 
+  /**
+   * Alert every squad member of the camp that contains `hitEnemy`.
+   * Called when a squad member takes damage — the whole squad aggros.
+   */
+  alertSquadOf(hitEnemy: Enemy) {
+    const pp = this.player.pos;
+    for (const camp of this.camps) {
+      if (!camp.squad.includes(hitEnemy)) continue;
+      for (const e of camp.squad) {
+        if (e.alive) {
+          const dx = wrapDelta(pp.x - e.pos.x, WORLD_SIZE);
+          const dz = wrapDelta(pp.z - e.pos.z, WORLD_SIZE);
+          e.investigate(new THREE.Vector3(e.pos.x + dx, pp.y, e.pos.z + dz));
+        }
+      }
+      break;
+    }
+  }
+
+  /**
+   * After an area-damage event (explosion), alert every camp whose squad had
+   * at least one member damaged inside the radius.
+   */
+  alertCampsInRadius(pos: THREE.Vector3, radius: number) {
+    const r2 = (radius + 0.6) * (radius + 0.6);
+    for (const camp of this.camps) {
+      let hit = false;
+      for (const e of camp.squad) {
+        if (!e.alive) continue;
+        const dx = wrapDelta(pos.x - e.pos.x, WORLD_SIZE);
+        const dz = wrapDelta(pos.z - e.pos.z, WORLD_SIZE);
+        const dy = pos.y - (e.pos.y + 1);
+        if (dx * dx + dy * dy + dz * dz < r2) { hit = true; break; }
+      }
+      if (hit) {
+        const pp = this.player.pos;
+        for (const e of camp.squad) {
+          if (e.alive) {
+            const edx = wrapDelta(pp.x - e.pos.x, WORLD_SIZE);
+            const edz = wrapDelta(pp.z - e.pos.z, WORLD_SIZE);
+            e.investigate(new THREE.Vector3(e.pos.x + edx, pp.y, e.pos.z + edz));
+          }
+        }
+      }
+    }
+  }
+
   notifyWorldChanged(pos: THREE.Vector3, radius = 26) {
     const r2 = radius * radius;
     for (const e of this.enemies) {
@@ -1587,17 +1643,26 @@ export class EnemyManager {
     for (const e of this.enemies) if (!e.group.parent) scene.add(e.group);
   }
 
-  /** Instantly remove every enemy, then re-arm camps to repopulate next tick. */
+  /**
+   * Remove all enemy meshes. Cleared camp state is PRESERVED — once a camp
+   * is cleared it stays cleared permanently, even across player deaths.
+   */
   clearAll() {
     for (const e of this.enemies) if (e.group.parent) e.group.parent.remove(e.group);
     this.enemies = [];
     for (const c of this.camps) {
       c.squad.length = 0;
-      c.cleared = false;
-      c.spawnedEver = false;
-      c.respawnTimer = CAMP_MEMBER_RESPAWN;
+      // Preserve cleared state — cleared camps stay cleared.
+      // Only non-cleared, never-spawned camps get re-armed for first approach.
+      if (!c.cleared) {
+        c.spawnedEver = false;
+        c.respawnTimer = CAMP_MEMBER_RESPAWN;
+      }
     }
-    this.campsCleared = 0;
+    // recalculate cleared count from preserved state
+    let cleared = 0;
+    for (const c of this.camps) if (c.cleared) cleared++;
+    this.campsCleared = cleared;
     this.primed = false;
   }
 
@@ -1614,5 +1679,27 @@ export class EnemyManager {
 
   assignCampToEnemy(e: Enemy, build: CampBuild): void {
     e.assignCamp(build);
+  }
+
+  // ---- persistence: survive planet hops -----------------------------------
+
+  /** Return the IDs of camps that have been cleared (for cross-visit persistence). */
+  getClearedCampIds(): number[] {
+    return this.camps.filter((c) => c.cleared).map((c) => c.site.id);
+  }
+
+  /** Mark specific camps as already cleared (restored from a previous visit). */
+  markCampsCleared(ids: number[]): void {
+    if (!ids.length) return;
+    const set = new Set(ids);
+    for (const c of this.camps) {
+      if (set.has(c.site.id)) {
+        c.cleared = true;
+        c.spawnedEver = true; // prevent initial spawn
+      }
+    }
+    let cleared = 0;
+    for (const c of this.camps) if (c.cleared) cleared++;
+    this.campsCleared = cleared;
   }
 }
