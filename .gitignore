@@ -2,3 +2,4 @@ node_modules
 dist
 comparison.txt
 bun.lock
+package-lock.json
