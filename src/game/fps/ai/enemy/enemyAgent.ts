@@ -263,9 +263,16 @@ export class Enemy {
     const pitch = Math.atan2(aim.y, Math.hypot(aim.x, aim.z) || 1);
     this.aimPitch = THREE.MathUtils.clamp(pitch, -0.38, 0.38);
     if (hasLos) {
-      const armPitch = Math.PI / 2 + this.aimPitch * 0.8;
-      this.armL.rotation.set(armPitch + 0.05 - this.weaponKick * 0.12, 0, 0.13);
-      this.armR.rotation.set(armPitch - 0.06 - this.weaponKick * 0.18, 0, -0.13);
+      // Arms pivot at the shoulder and hang along -Y by default. The weapon
+      // rig is built along +Z (muzzle at +0.86, grip near +0.3), so the hand
+      // must swing to +Z to grip it — that's a NEGATIVE rotation.x (right-hand
+      // rule: rotating -Y around X by -π/2 lands on +Z). Positive aimPitch
+      // means aiming up, which requires a more-negative arm pitch to lift the
+      // hand. Recoil (weaponKick) pushes the arms back toward the body, i.e.
+      // rotation.x toward 0 from -π/2.
+      const armPitch = -Math.PI / 2 - this.aimPitch * 0.8;
+      this.armL.rotation.set(armPitch - 0.05 + this.weaponKick * 0.12, 0, 0.13);
+      this.armR.rotation.set(armPitch + 0.06 + this.weaponKick * 0.18, 0, -0.13);
     } else {
       this.armL.rotation.set(sw * 0.8, 0, 0); this.armR.rotation.set(-sw * 0.8, 0, 0);
     }

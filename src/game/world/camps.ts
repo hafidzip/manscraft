@@ -217,6 +217,25 @@ function buildFire(world: World, ox: number, oz: number): { x: number; y: number
 
 export function buildCamp(world: World, site: CampSite, seed: number): CampBuild {
   const rng = mulberry32(((seed ^ BUILD_SALT) + site.id * 0x9e3779b1 + site.cx * 73856093 + site.cz * 19349663) >>> 0);
+
+  // A single camp scatters a fence ring, tents, campfires, crates and
+  // watchposts — each is many individual place() calls, and place() ends up
+  // in World.setBlock(). Without batching, every single block edit
+  // triggered a full chunk remesh (voxel scan + greedy meshing over
+  // 16 x 80 x 16), so one camp could remesh the same handful of chunks
+  // dozens of times, and 5 camps at world-gen froze the main thread for
+  // seconds. Batch the whole build: edits only flip voxel data + mark
+  // chunks dirty, and the streaming loop remeshes each touched chunk once
+  // while spreading the cost across the loading-screen frame budget.
+  world.beginBatch();
+  try {
+    return buildCampUnbatched(world, site, rng);
+  } finally {
+    world.endBatch();
+  }
+}
+
+function buildCampUnbatched(world: World, site: CampSite, rng: () => number): CampBuild {
   const { cx, cz, radius: r } = site;
   const fires: CampBuild['fires'] = [];
   const posts: CampBuild['posts'] = [];
