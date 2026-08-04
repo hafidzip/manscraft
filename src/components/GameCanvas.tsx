@@ -128,8 +128,11 @@ export function GameCanvas({
   const play = () => engineRef.current?.requestLock();
   const closeInventory = () => engineRef.current?.toggleInventory(false);
 
+  /** any modal that releases pointer lock should show a normal cursor */
+  const modalOpen = stats?.inventoryOpen || stats?.craftingOpen || stats?.furnaceOpen || stats?.shopOpen;
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-black">
+    <div className={`relative h-screen w-screen overflow-hidden bg-black ${modalOpen ? 'cursor-default' : ''}`}>
       <canvas
         ref={canvasRef}
         className={`block h-full w-full touch-none ${stats?.dead ? 'death-grade' : 'alive-grade'}`}

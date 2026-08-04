@@ -114,6 +114,22 @@ export class WeaponSystem {
     return { ammo: this.ammo[this.currentId], mag: this.def.magSize };
   }
 
+  /** Top every weapon's reserve up to its magazine size. (Merchant service.) */
+  refillAllAmmo(): void {
+    for (const id of Object.keys(this.ammo)) {
+      const mag = WEAPONS[id]?.magSize;
+      if (mag) this.ammo[id] = Math.max(this.ammo[id], mag);
+    }
+    this.refreshHud();
+  }
+
+  /** Grant extra rounds for one weapon (bazooka warheads, …). */
+  giveAmmo(id: string, amount: number): void {
+    if (this.ammo[id] === undefined) return;
+    this.ammo[id] += amount;
+    this.refreshHud();
+  }
+
   /** unified engine HUD: reload progress 0..1 (0 when not reloading) */
   get reloadProgress(): number {
     if (this.state === 'reload' && this.timeline) {

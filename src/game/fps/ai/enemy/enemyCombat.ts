@@ -64,7 +64,7 @@ export function fireEnemyShot(
     const worldHit = enemy.deps.world.raycast(muzzle, dir, 200);
     const endPoint = worldHit ? worldHit.point : end;
     enemy.deps.effects.tracer(muzzle, endPoint);
-    if (worldHit) enemy.deps.effects.impact(worldHit.point, worldHit.normal, worldHit.block);
+    if (worldHit) enemy.deps.effects.impact(worldHit.point, worldHit.normal, worldHit.block, worldHit);
   }
 }
 

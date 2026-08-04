@@ -97,6 +97,28 @@ export class AudioSynth {
     this.tone(3136, 0.1, 'sine', 0.07);
   }
 
+  /** A coin hitting the purse: bright metallic double-ping, slightly randomised. */
+  coin() {
+    const f = 2100 + Math.random() * 500;
+    this.tone(f, 0.07, 'square', 0.1, f * 0.82);
+    this.tone(f * 1.5, 0.12, 'triangle', 0.16, f * 1.18, 0.05);
+    this.tone(f * 2.25, 0.09, 'sine', 0.06, f * 2, 0.1);
+  }
+
+  /** Cash-register chime for a completed purchase. */
+  purchase() {
+    this.tone(880, 0.09, 'square', 0.12);
+    this.tone(1175, 0.09, 'square', 0.12, undefined, 0.07);
+    this.tone(1760, 0.2, 'triangle', 0.16, undefined, 0.14);
+    this.noise(0.04, 'highpass', 4200, 1, 0.05, undefined);
+  }
+
+  /** Dull thud for "can't afford that". */
+  deny() {
+    this.tone(220, 0.09, 'square', 0.16, 140);
+    this.tone(160, 0.12, 'square', 0.12, 90, 0.08);
+  }
+
   step(alt: boolean) {
     this.noise(0.05, 'lowpass', 480, 1, 0.1);
     this.tone(alt ? 96 : 84, 0.05, 'sine', 0.05);

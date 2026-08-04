@@ -14,6 +14,41 @@ interface Particle {
 
 interface CasE { mesh: THREE.Mesh; vel: THREE.Vector3; rotVel: THREE.Vector3; life: number; grounded: boolean }
 
+/** A pooled decal keeps its own material so opacity is never shared. */
+interface PooledDecal { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial }
+
+interface Decal extends PooledDecal {
+  /** seconds of life remaining */
+  life: number;
+  /** seconds since spawn (drives the pop-in) */
+  age: number;
+  /** rendered size in world units */
+  size: number;
+  /** voxel the decal is stuck to, in *world* (not render) space */
+  bx: number; by: number; bz: number;
+  /** outward face normal, rounded to the voxel axis */
+  nx: number; ny: number; nz: number;
+  /** which axis the face lies on (0=x,1=y,2=z) and its sign */
+  axis: number; sign: number;
+  /** true once the surface vanished / went out of range: fast fade-out */
+  dying: boolean;
+}
+
+/** Hard cap so a long firefight can never tank the frame rate. */
+const MAX_DECALS = 140;
+/** Decals further than this from the player are recycled. */
+const DECAL_CULL_DIST = 72;
+/** Normal lifetime, and the tail of it spent fading. */
+const DECAL_LIFE = 28;
+const DECAL_FADE = 3.5;
+/** Fade used when the block a decal sits on is destroyed or covered. */
+const DECAL_DEATH_FADE = 0.16;
+
+const DECAL_FORWARD = new THREE.Vector3(0, 0, 1);
+const tmpQuatV = new THREE.Vector3();
+const tmpColor = new THREE.Color();
+const WHITE = new THREE.Color(0xffffff);
+
 export class Effects {
   private scene: THREE.Scene;
   private world: WorldLike;
@@ -31,9 +66,12 @@ export class Effects {
   private tracerPool: THREE.Mesh[] = [];
   private tracerMat = new THREE.MeshBasicMaterial({ color: '#ffe9a8', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
 
-  private decals: { mesh: THREE.Mesh; life: number }[] = [];
-  private decalPool: THREE.Mesh[] = [];
-  private decalMat: THREE.MeshBasicMaterial;
+  private decals: Decal[] = [];
+  private decalPool: PooledDecal[] = [];
+  /** Unit quad shared by every decal — only the mesh scale differs. */
+  private decalGeo = new THREE.PlaneGeometry(1, 1);
+  private holeTexes: THREE.Texture[] = [];
+  private decalSeq = 0;
 
   private smokes: { sprite: THREE.Sprite; vel: THREE.Vector3; life: number; max: number; grow: number }[] = [];
   private smokePool: THREE.Sprite[] = [];
@@ -57,7 +95,8 @@ export class Effects {
     this.playerPos = playerPos;
     this.onExplode = onExplode;
     this.flashTex = muzzleTexture();
-    this.decalMat = new THREE.MeshBasicMaterial({ map: holeTexture(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
+    // Several procedural variants keep a peppered wall from looking stamped.
+    this.holeTexes = [holeTexture(3), holeTexture(17), holeTexture(41), holeTexture(88), holeTexture(131)];
     this.smokeMatBase = new THREE.SpriteMaterial({ map: smokeTexture(), transparent: true, opacity: 0.55, depthWrite: false });
     this.flashLight = new THREE.PointLight(0xffc36b, 0, 9, 2);
     scene.add(this.flashLight);
@@ -147,7 +186,11 @@ export class Effects {
   }
 
   // ------------------------------------------------------------ impact burst
-  impact(point: THREE.Vector3, normal: THREE.Vector3, blockId: number) {
+  /**
+   * `voxel` is the world-space block coordinate from the ray hit. Passing it
+   * lets the bullet hole stay bound to that block so it disappears with it.
+   */
+  impact(point: THREE.Vector3, normal: THREE.Vector3, blockId: number, voxel?: { x: number; y: number; z: number }) {
     const color = BLOCK_COLORS[blockId] ?? 0x888888;
     const n = 5 + Math.floor(Math.random() * 4);
     for (let i = 0; i < n; i++) {
@@ -158,7 +201,7 @@ export class Effects {
       );
     }
     this.puff(point, normal, 0.35, 0.5);
-    this.decal(point, normal);
+    this.decal(point, normal, blockId, voxel);
   }
 
   private particleMaterial(color: number): THREE.MeshBasicMaterial {
@@ -201,20 +244,144 @@ export class Effects {
     });
   }
 
-  decal(point: THREE.Vector3, normal: THREE.Vector3) {
-    if (this.decals.length > 90) {
-      const old = this.decals.shift()!;
-      this.scene.remove(old.mesh);
-      this.decalPool.push(old.mesh);
+  /**
+   * Stick a bullet hole onto a voxel face.
+   *
+   * `voxel` is the block that was hit *in world coordinates*. It is kept
+   * separate from `point` because enemies render their hits through a
+   * wrap-around `vis()` transform, so the render-space position and the
+   * world-space voxel can differ by whole world widths.
+   *
+   * The decal is snapped flush onto the exact face plane and clamped so it can
+   * never hang over the edge of the block into thin air, then it is tracked
+   * every frame: the moment the block is mined, blown up, or covered by a
+   * newly placed block, the hole fades out instead of floating in the void.
+   */
+  decal(point: THREE.Vector3, normal: THREE.Vector3, blockId: number = B.STONE, voxel?: { x: number; y: number; z: number }) {
+    // --- resolve the face axis. Voxel normals are axis aligned; pick the
+    // dominant component so a slightly denormalised input still works.
+    const ax = Math.abs(normal.x), ay = Math.abs(normal.y), az = Math.abs(normal.z);
+    if (ax + ay + az < 1e-4) return;                       // degenerate normal
+    const axis = ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+    const comp = axis === 0 ? normal.x : axis === 1 ? normal.y : normal.z;
+    const sign = comp >= 0 ? 1 : -1;
+    const nx = axis === 0 ? sign : 0;
+    const ny = axis === 1 ? sign : 0;
+    const nz = axis === 2 ? sign : 0;
+
+    // --- the voxel in render space (used for geometry) ...
+    const rx = Math.floor(point.x - nx * 0.5);
+    const ry = Math.floor(point.y - ny * 0.5);
+    const rz = Math.floor(point.z - nz * 0.5);
+    // ... and in world space (used to query whether the block still exists)
+    const bx = voxel ? voxel.x : rx;
+    const by = voxel ? voxel.y : ry;
+    const bz = voxel ? voxel.z : rz;
+
+    // Never place a hole on something that is already gone (a stale hit from
+    // the same frame the block was destroyed) — this was the main cause of
+    // holes hanging in mid-air.
+    if (by >= 0 && this.world.get(bx, by, bz) === B.AIR) return;
+
+    const size = 0.125 + Math.random() * 0.055;
+    const half = size * 0.5;
+
+    // Keep the quad inside the face: clamp the two tangential axes to the
+    // block bounds shrunk by half the decal, so it never overhangs into air.
+    const fit = (v: number, lo: number) => {
+      const min = lo + half + 0.004, max = lo + 1 - half - 0.004;
+      return max <= min ? lo + 0.5 : Math.min(max, Math.max(min, v));
+    };
+    // Stagger the depth offset so overlapping holes cannot z-fight/flicker.
+    const off = 0.011 + (this.decalSeq++ % 5) * 0.0013;
+
+    const px = axis === 0 ? rx + (sign > 0 ? 1 : 0) + nx * off : fit(point.x, rx);
+    const py = axis === 1 ? ry + (sign > 0 ? 1 : 0) + ny * off : fit(point.y, ry);
+    const pz = axis === 2 ? rz + (sign > 0 ? 1 : 0) + nz * off : fit(point.z, rz);
+
+    // --- merge near-duplicates instead of stacking coplanar quads
+    for (const d of this.decals) {
+      if (d.axis !== axis || d.sign !== sign || d.dying) continue;
+      if (Math.abs(d.mesh.position.x - px) > 0.05) continue;
+      if (Math.abs(d.mesh.position.y - py) > 0.05) continue;
+      if (Math.abs(d.mesh.position.z - pz) > 0.05) continue;
+      d.life = DECAL_LIFE;
+      d.age = 0;
+      d.size = Math.min(0.2, d.size * 1.06);
+      return;
     }
-    let m = this.decalPool.pop();
-    if (!m) m = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), this.decalMat);
-    m.position.copy(point).addScaledVector(normal, 0.012);
-    m.lookAt(tmpV.copy(point).add(normal));
-    m.rotateZ(Math.random() * Math.PI * 2);
-    m.visible = true;
-    this.scene.add(m);
-    this.decals.push({ mesh: m, life: 24 });
+
+    // --- recycle the oldest once we hit the cap
+    while (this.decals.length >= MAX_DECALS) this.retireDecal(0);
+
+    let e = this.decalPool.pop();
+    if (!e) {
+      const mat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      const mesh = new THREE.Mesh(this.decalGeo, mat);
+      mesh.renderOrder = 6;
+      mesh.matrixAutoUpdate = true;
+      e = { mesh, mat };
+    }
+
+    // pick a random variant + tint it toward the block colour so the dust ring
+    // reads as pulverised sand / stone / wood rather than generic grey
+    e.mat.map = this.holeTexes[(Math.random() * this.holeTexes.length) | 0];
+    tmpColor.set(BLOCK_COLORS[blockId] ?? 0xffffff).lerp(WHITE, 0.45);
+    e.mat.color.copy(tmpColor);
+    e.mat.opacity = 1;
+    e.mat.needsUpdate = true;
+
+    e.mesh.position.set(px, py, pz);
+    // setFromUnitVectors instead of lookAt(): lookAt() is degenerate for floor
+    // and ceiling hits (normal parallel to up), which made those decals render
+    // edge-on i.e. invisible.
+    e.mesh.quaternion.setFromUnitVectors(DECAL_FORWARD, tmpQuatV.set(nx, ny, nz));
+    e.mesh.rotateZ(Math.random() * Math.PI * 2);
+    e.mesh.scale.set(size, size, 1);
+    e.mesh.visible = true;
+    this.scene.add(e.mesh);
+
+    this.decals.push({
+      mesh: e.mesh, mat: e.mat,
+      life: DECAL_LIFE, age: 0, size,
+      bx, by, bz, nx, ny, nz, axis, sign,
+      dying: false,
+    });
+  }
+
+  private retireDecal(i: number) {
+    const d = this.decals[i];
+    this.scene.remove(d.mesh);
+    d.mesh.visible = false;
+    d.mat.opacity = 1;
+    this.decalPool.push({ mesh: d.mesh, mat: d.mat });
+    this.decals.splice(i, 1);
+  }
+
+  /** Drop every bullet hole (used when the world is rebuilt / player respawns). */
+  clearDecals() {
+    for (let i = this.decals.length - 1; i >= 0; i--) this.retireDecal(i);
+  }
+
+  /**
+   * Called when a region of blocks is destroyed so holes on them vanish on the
+   * same frame rather than a tick later.
+   */
+  decalsRemovedAt(x: number, y: number, z: number, radius = 0) {
+    const r2 = (radius + 0.5) * (radius + 0.5);
+    for (const d of this.decals) {
+      const dx = d.bx - x, dy = d.by - y, dz = d.bz - z;
+      if (dx * dx + dy * dy + dz * dz <= r2) d.dying = true;
+    }
   }
 
   // ------------------------------------------------------------ rocket + explosion
@@ -373,17 +540,43 @@ export class Effects {
       s.sprite.material.opacity = 0.5 * f;
     }
 
-    // decals
+    // ---------------------------------------------------------------- decals
+    // Every hole is validated against the voxel grid each frame, so a hole can
+    // never outlive the surface it was shot into. Each decal owns its material,
+    // so fading one no longer fades (or hides) all the others.
     for (let i = this.decals.length - 1; i >= 0; i--) {
       const d = this.decals[i];
-      d.life -= dt;
-      if (d.life <= 0) {
-        this.scene.remove(d.mesh);
-        this.decalPool.push(d.mesh);
-        this.decals.splice(i, 1);
-      } else if (d.life < 2) {
-        (d.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, d.life / 2);
+      d.age += dt;
+
+      if (!d.dying) {
+        // 1) the block itself was mined / exploded away
+        //    (y < 0 is the implicit bedrock plane, which always exists)
+        const gone = d.by >= 0 && this.world.get(d.bx, d.by, d.bz) === B.AIR;
+        // 2) the face got covered by a newly placed block — the hole would be
+        //    buried inside geometry and z-fight, so retire it
+        const buried = this.world.get(d.bx + d.nx, d.by + d.ny, d.bz + d.nz) !== B.AIR;
+        // 3) too far away to matter; free the slot for holes near the player
+        const far = d.mesh.position.distanceToSquared(this.playerPos) > DECAL_CULL_DIST * DECAL_CULL_DIST;
+        if (gone || buried || far) {
+          d.dying = true;
+          d.life = Math.min(d.life, DECAL_DEATH_FADE);
+        }
       }
+
+      d.life -= dt;
+      if (d.life <= 0) { this.retireDecal(i); continue; }
+
+      // fade: fast when the surface vanished, slow at end of natural life
+      const fade = d.dying
+        ? d.life / DECAL_DEATH_FADE
+        : Math.min(1, d.life / DECAL_FADE);
+      d.mat.opacity = Math.max(0, Math.min(1, fade));
+
+      // brief punch-in so a fresh hole reads as an event, and shrink away as
+      // it dies so it never just blinks out
+      const pop = d.age < 0.07 ? 1 + (1 - d.age / 0.07) * 0.55 : 1;
+      const s = d.size * pop * (d.dying ? 0.75 + 0.25 * fade : 1);
+      d.mesh.scale.set(s, s, 1);
     }
 
     // rocket flight

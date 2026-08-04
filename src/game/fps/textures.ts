@@ -294,20 +294,89 @@ export function muzzleTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/** Bullet-hole decal. */
-export function holeTexture(): THREE.CanvasTexture {
-  const { c, g } = mkCanvas(16, 16);
-  const rand = mulberry32(9);
-  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-    const dx = x - 8, dy = y - 8;
-    const d = Math.sqrt(dx * dx + dy * dy);
-    if (d < 2.5) { g.fillStyle = 'rgba(10,10,10,0.96)'; g.fillRect(x, y, 1, 1); }
-    else if (d < 4.6 && rand() > 0.35) { g.fillStyle = 'rgba(24,22,20,0.8)'; g.fillRect(x, y, 1, 1); }
-    else if (d < 6.5 && rand() > 0.78) { g.fillStyle = 'rgba(40,36,32,0.5)'; g.fillRect(x, y, 1, 1); }
+/**
+ * Bullet-hole decal. `seed` picks one of several procedural variants so a wall
+ * peppered with shots does not look like the same stamp repeated.
+ *
+ * The sprite is built as: a near-black punched core, a crunchy crater ring of
+ * pulverised material, a few radial cracks, and a faint bright dust rim so the
+ * hole still reads against dark *and* light blocks. Everything is drawn on a
+ * 32px grid and sampled with NearestFilter to stay in the voxel art style.
+ */
+export function holeTexture(seed = 9): THREE.CanvasTexture {
+  const S = 32, R = S / 2;
+  const { c, g } = mkCanvas(S, S);
+  const rand = mulberry32(seed * 2654435761 % 2147483647 || 9);
+
+  // Per-variant shape: slightly elliptical + wobbly so no two holes match.
+  const squash = 0.82 + rand() * 0.36;
+  const tilt = rand() * Math.PI;
+  const cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+  const coreR = 3.1 + rand() * 1.1;
+  const craterR = coreR + 2.2 + rand() * 1.4;
+  const dustR = craterR + 2.6 + rand() * 1.8;
+
+  // wobble the outline with a couple of low-frequency harmonics
+  const h1 = rand() * Math.PI * 2, h2 = rand() * Math.PI * 2;
+  const wob = (a: number) => 1 + Math.sin(a * 3 + h1) * 0.12 + Math.sin(a * 5 + h2) * 0.07;
+
+  const px = (x: number, y: number, style: string) => { g.fillStyle = style; g.fillRect(x, y, 1, 1); };
+
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const dx = x - R + 0.5, dy = y - R + 0.5;
+      // rotate + squash into the ellipse frame
+      const rx = dx * cosT + dy * sinT;
+      const ry = (-dx * sinT + dy * cosT) / squash;
+      const d = Math.sqrt(rx * rx + ry * ry);
+      const a = Math.atan2(ry, rx);
+      const w = wob(a);
+
+      if (d < coreR * w) {
+        // punched-through core, darkest dead centre
+        const k = d / (coreR * w);
+        const v = Math.round(4 + k * 14);
+        px(x, y, `rgba(${v},${v - 1},${v - 2},${(0.99 - k * 0.12).toFixed(3)})`);
+      } else if (d < craterR * w) {
+        // fractured crater lip — dithered so it keeps the pixel look
+        const k = (d - coreR * w) / (craterR * w - coreR * w);
+        if (rand() > 0.12 + k * 0.55) {
+          const v = Math.round(26 + k * 34);
+          px(x, y, `rgba(${v},${v - 3},${v - 6},${(0.85 - k * 0.35).toFixed(3)})`);
+        }
+      } else if (d < dustR * w) {
+        // pale dust halo (multiplied by the block tint at runtime)
+        const k = (d - craterR * w) / (dustR * w - craterR * w);
+        if (rand() > 0.55 + k * 0.4) {
+          const v = Math.round(150 - k * 60);
+          px(x, y, `rgba(${v},${v - 6},${v - 14},${(0.3 - k * 0.24).toFixed(3)})`);
+        }
+      }
+    }
   }
+
+  // radial cracks spidering out of the crater
+  const cracks = 2 + Math.floor(rand() * 3);
+  for (let i = 0; i < cracks; i++) {
+    let a = rand() * Math.PI * 2;
+    let r = coreR * 0.9;
+    const len = craterR + rand() * 5;
+    while (r < len) {
+      a += (rand() - 0.5) * 0.7;
+      r += 0.75;
+      const x = Math.round(R + Math.cos(a) * r), y = Math.round(R + Math.sin(a) * r * squash);
+      if (x < 0 || y < 0 || x >= S || y >= S) break;
+      px(x, y, `rgba(20,18,16,${(0.72 * (1 - r / (len + 2))).toFixed(3)})`);
+    }
+  }
+
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 4;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
   return tex;
 }
 

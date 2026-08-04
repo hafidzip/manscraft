@@ -36,8 +36,10 @@ import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { EnemyManager } from './fps/Enemy';
+import { Enemy, EnemyManager } from './fps/Enemy';
 import { Effects } from './fps/effects';
+import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE } from './fps/shop';
+import { session, saveCoins } from './session';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
@@ -120,6 +122,16 @@ export interface HudStats {
   session: number;
   switchAt: number;
   spread: number;
+  // ---- merchant economy ----
+  coins: number;
+  /** increments on every coin gain/spend — HUD uses it to pulse the purse */
+  coinSeq: number;
+  /** signed amount of the most recent purse change (+kill loot, −purchase) */
+  lastCoinGain: number;
+  /** an idle merchant is close enough to trade */
+  nearMerchant: boolean;
+  shopOpen: boolean;
+  shopMerchantName: string | null;
 }
 
 export interface EngineEvents {
@@ -249,6 +261,15 @@ export class GameEngine {
   private dead = false;
   private deadTimer = 0;
   private kills = 0;
+  // ---- merchant economy ----
+  private coins = 0;
+  /** bumped on every gain/spend so the HUD coin chip can pulse */
+  private coinSeq = 0;
+  private lastCoinGain = 0;
+  private nearMerchant = false;
+  private nearMerchantEnemy: Enemy | null = null;
+  /** the merchant whose shop UI is currently open (null = closed) */
+  private shopEnemy: Enemy | null = null;
   private time = 0;
   private spaceExited = false;
 
@@ -591,13 +612,26 @@ export class GameEngine {
       audio: this.fpsAudio,
       camera: this.camera,
       onPlayerHit: (dmg, from) => this.damagePlayer(dmg, from),
-      onEnemyKilled: () => { this.kills++; },
+      onEnemyKilled: (e) => { this.kills++; this.rewardCoins(e); },
     }, this.camps);
     // Restore cleared camp state from a previous visit to this planet
     if (this.initialClearedCamps?.length) {
       this.enemies.markCampsCleared(this.initialClearedCamps);
     }
     this.enemies.addScene(this.scene);
+
+    // ---- coin purse: persists across planet hops (session) and reloads ----
+    if (!Number.isFinite(session.coins)) {
+      session.coins = STARTING_COINS;
+      saveCoins(session.coins);
+    }
+    this.coins = session.coins;
+    // a travelling merchant sets up stall near the landing point so trading
+    // is discoverable before the player ever finds an enemy camp
+    {
+      const sp = this.player.pos;
+      this.enemies.spawnWanderingMerchant(sp.x + 7, sp.z + 5, sp.y);
+    }
     this.heldBlock = new HeldBlockTool(this.scene, this.camera, new THREE.MeshLambertMaterial({ map: this.textures.atlas }));
     this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
 
@@ -841,6 +875,122 @@ export class GameEngine {
     this.openFurnaceKey = null;
     this.requestLock();
     this.events.onStats(this.buildStats());
+  }
+
+  // ------------------------------------------------------------------ shop
+  /** Pay out the coin bounty for a kill (HUD pulses via coinSeq). */
+  private rewardCoins(e: Enemy): void {
+    const gain = COIN_REWARDS[e.cfg.id] ?? 12;
+    this.coins += gain;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = gain;
+    this.fpsAudio.coin();
+  }
+
+  /** Nearest idle merchant within haggling distance (torus-aware). */
+  private updateMerchantProximity(): void {
+    if (this.dead || this.piloting) {
+      this.nearMerchant = false;
+      this.nearMerchantEnemy = null;
+      return;
+    }
+    const p = this.player.pos;
+    let best: Enemy | null = null;
+    let bestD = TRADE_DISTANCE;
+    for (const e of this.enemies.enemies) {
+      // trading is only on the table while the merchant is ALIVE and IDLE
+      if (!e.alive || e.cfg.id !== 'merchant' || e.state !== 'idle' || e.alerted) continue;
+      const dx = C.wrapDelta(e.pos.x - p.x, C.WORLD_SIZE);
+      const dz = C.wrapDelta(e.pos.z - p.z, C.WORLD_SIZE);
+      if (Math.abs(e.pos.y - p.y) > 3) continue;
+      const d = Math.hypot(dx, dz);
+      if (d < bestD) { best = e; bestD = d; }
+    }
+    this.nearMerchantEnemy = best;
+    this.nearMerchant = !!best;
+    if (best) best.tradeFaceT = 0.4;   // greet the customer
+  }
+
+  /** Keep an open shop honest: it slams shut if the deal goes sour. */
+  private updateShop(): void {
+    const m = this.shopEnemy;
+    if (!m) return;
+    const p = this.player.pos;
+    const dx = C.wrapDelta(m.pos.x - p.x, C.WORLD_SIZE);
+    const dz = C.wrapDelta(m.pos.z - p.z, C.WORLD_SIZE);
+    const stale =
+      !m.alive || m.state !== 'idle' || m.alerted ||
+      this.dead || this.piloting ||
+      Math.hypot(dx, dz) > TRADE_DISTANCE * 1.6;
+    if (stale) this.closeShop();
+  }
+
+  private openShop(): void {
+    const m = this.nearMerchantEnemy;
+    if (!m || this.shopEnemy) return;
+    this.shopEnemy = m;
+    m.tradeFaceT = 1e5;               // hold eye contact for the whole visit
+    this.inventoryOpen = false;
+    this.craftingOpen = false;
+    if (this.openFurnaceKey) this.openFurnaceKey = null;
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  closeShop(): void {
+    if (!this.shopEnemy) return;
+    this.shopEnemy.tradeFaceT = 0;
+    this.shopEnemy = null;
+    this.requestLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  /** HUD → engine: buy from the open merchant. Returns true on success. */
+  buyShopItem(id: string): boolean {
+    const item = SHOP_ITEMS.find((i) => i.id === id);
+    const m = this.shopEnemy;
+    if (!item || !m || !m.alive || m.state !== 'idle') return false;
+    if (this.coins < item.price) { this.fpsAudio.deny(); return false; }
+
+    const inv = this.inventory;
+    switch (item.id) {
+      case 'ammo':
+        this.weapons.refillAllAmmo();
+        break;
+      case 'medkit':
+        this.hp = this.maxHp;
+        break;
+      case 'vitality':
+        this.maxHp += 20;
+        this.hp = Math.min(this.maxHp, this.hp + 20);
+        break;
+      case 'rations': {
+        const goods = { kind: 'food', foodId: 'chicken-drum', count: 4 } as const;
+        if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
+        inv.addItem(goods);
+        break;
+      }
+      case 'cobble': {
+        const goods = { kind: 'block', blockId: B.COBBLE, count: 32 } as const;
+        if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
+        inv.addItem(goods);
+        break;
+      }
+      case 'rockets':
+        this.weapons.giveAmmo('bazooka', 2);
+        break;
+      default:
+        return false;
+    }
+
+    this.coins -= item.price;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = -item.price;
+    this.fpsAudio.purchase();
+    this.events.onStats(this.buildStats());
+    return true;
   }
 
   /**
@@ -1099,9 +1249,14 @@ export class GameEngine {
     if (e.code === 'Tab') {
       e.preventDefault();
       // Close whichever station is open; otherwise toggle inventory
+      if (this.shopEnemy) { this.closeShop(); return; }
       if (this.openFurnaceKey) { this.closeFurnace(); return; }
       if (this.craftingOpen) { this.closeCraftingTable(); return; }
       this.toggleInventory();
+      return;
+    }
+    if (e.code === 'Escape' && this.shopEnemy) {
+      this.closeShop();
       return;
     }
     if (e.code === 'Escape' && this.openFurnaceKey) {
@@ -1130,6 +1285,7 @@ export class GameEngine {
         break;
       case 'KeyE':
         if (this.piloting) this.exitShip();
+        else if (this.nearMerchantEnemy) this.openShop();   // haggle first
         else if (this.ship && this.ship.distanceTo(this.player.eye()) < 6) this.boardShip();
         break;
       default:
@@ -1282,6 +1438,9 @@ export class GameEngine {
     // walks away or has the UI open
     this.updateFurnaces(dt);
     if (this.openFurnaceKey) this.events.onStats(this.buildStats());
+    // merchant proximity prompt + shop staleness guard
+    this.updateMerchantProximity();
+    this.updateShop();
     this.particles.update(dt);
     this.sky.update(dt, this.camera.position);
     const moonAsKey = this.sky.dayFactor < 0.32;
@@ -2211,7 +2370,7 @@ export class GameEngine {
       this.fx.puff(targetHit!.point, dir.clone().negate(), 0.25, 0.5, '#ffffff');
       this.targetsHit++;
     } else if (worldHit) {
-      this.fx.impact(worldHit.point, worldHit.normal, worldHit.block);
+      this.fx.impact(worldHit.point, worldHit.normal, worldHit.block, worldHit);
       if ((worldHit.block === B.STONE || worldHit.block === B.GRAVEL) && Math.random() < 0.3) {
         this.fpsAudio.ricochet();
       }
@@ -2345,6 +2504,12 @@ export class GameEngine {
       spread:
         7 + this.weapons.bloomPx * 26 +
         Math.min(1, this.player.speedSmooth / 6) * 9 * (1 - this.weapons.adsT * 0.9),
+      coins: this.coins,
+      coinSeq: this.coinSeq,
+      lastCoinGain: this.lastCoinGain,
+      nearMerchant: this.nearMerchant,
+      shopOpen: !!this.shopEnemy,
+      shopMerchantName: this.shopEnemy ? this.shopEnemy.cfg.name : null,
     };
   }
 

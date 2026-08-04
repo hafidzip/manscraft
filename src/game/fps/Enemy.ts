@@ -48,6 +48,12 @@ export interface EnemyConfig {
   seed: number;
   /** 'patrol' = walks the camp waypoint loop, 'idle' = holds station at its post */
   behavior: EnemyBehavior;
+  /**
+   * Peaceful agents never fight back: getting shot does not alert them, they
+   * never draw their weapon and never enter combat states. Used by the
+   * MERCHANT trader, who just wants to run a stall in peace.
+   */
+  peaceful?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +95,17 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
     preferredRange: 14, attackCooldown: 2.1, burst: 6, burstDelay: 0.13,
     accuracy: 0.8, damage: 10, skin: '#b9825a', shirt: '#2f3a4a', pants: '#23262c', seed: 55,
     behavior: 'idle',
+  },
+  /**
+   * The travelling trader. Holds station at a camp (idle behavior), never
+   * fights, and opens a shop for the player while idle. Distinctive straw hat
+   * + supply pack + floating coin marker make it readable from across camp.
+   */
+  merchant: {
+    id: 'merchant', name: 'MERCHANT', hp: 60, speed: 3.4, sightRange: 0, attackRange: 0,
+    preferredRange: 0, attackCooldown: 99, burst: 0, burstDelay: 1,
+    accuracy: 0, damage: 0, skin: '#c98f5f', shirt: '#8a5a2e', pants: '#46403a', seed: 77,
+    behavior: 'idle', peaceful: true,
   },
 };
 
@@ -250,6 +267,19 @@ export class Enemy {
   private returning = false;
   private dwellT = 0;
 
+  // ---- calm-heading model (kills the idle rotation spam) -------------------
+  // While dwelling with no goal, passive agents hold a settled heading
+  // instead of snapping toward the player every frame. Idle guards re-pick
+  // that heading on a slow timer ("looking around"), patrol guards keep the
+  // direction they were last walking.
+  private idleFaceYaw = 0;
+  private idleScanT = 1.2 + Math.random() * 2.5;
+  private lastMoveYaw = 0;
+  /** >0 while a player is close enough to trade: the merchant faces them */
+  tradeFaceT = 0;
+  /** spinning coin marker above merchants' heads */
+  private coinBadge: THREE.Group | null = null;
+
   private deps: EnemyDeps;
 
   constructor(preset: string, pos: THREE.Vector3, deps: EnemyDeps, overrides: Partial<EnemyConfig> = {}) {
@@ -259,6 +289,7 @@ export class Enemy {
     this.pos.copy(pos);
     this.lastX = pos.x; this.lastZ = pos.z;
     this.yaw = Math.random() * Math.PI * 2;
+    this.idleFaceYaw = this.yaw;
     this.build();
     this.group.position.copy(pos);
     this.deps.effects.puff(tmpV.set(pos.x, pos.y + 0.3, pos.z), tmpV2.set(0, 1, 0), 0.5, 0.7, '#b8b0a2');
@@ -355,6 +386,37 @@ export class Enemy {
     this.hpBar.add(bg, this.hpFill);
     this.group.add(this.hpBar);
 
+    // ------------------------------------------------------------ merchant
+    // Straw hat + supply pack + a spinning coin marker instead of the threat
+    // bar — a trader should read as "shop" from fifty blocks away.
+    if (c.peaceful) {
+      this.hpBar.visible = false;
+      const strawMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#d8b345', 12, 12, c.seed + 3) });
+      const bandMat = new THREE.MeshLambertMaterial({ color: '#a33b2e' });
+      const packMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#7a5a34', 10, 10, c.seed + 4) });
+      const crateMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#8a6a3f', 8, 8, c.seed + 5) });
+      box(this.bodyRoot, 0.62, 0.05, 0.62, 0, 1.56, 0, strawMat);        // hat brim
+      box(this.bodyRoot, 0.34, 0.16, 0.34, 0, 1.66, 0, strawMat);        // hat crown
+      box(this.bodyRoot, 0.36, 0.045, 0.36, 0, 1.6, 0, bandMat);         // hat band
+      box(this.bodyRoot, 0.4, 0.5, 0.22, 0, 1.08, -0.24, packMat);       // supply pack
+      box(this.bodyRoot, 0.3, 0.22, 0.24, 0, 1.42, -0.25, crateMat);     // crate on top
+      box(this.bodyRoot, 0.42, 0.05, 0.06, 0, 1.22, -0.1, MATS.black);   // pack strap
+      // the rifle rig stays, but a peaceful trader never draws it
+
+      const badge = new THREE.Group();
+      badge.position.set(0, 2.24, 0);
+      const coinMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#f2c14e', 6, 6, c.seed + 6) });
+      const rimMat = new THREE.MeshLambertMaterial({ color: '#b8860b' });
+      const coin = new THREE.Group();
+      const face = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.045), coinMat);
+      const rim = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.02), rimMat);
+      rim.position.z = -0.014;
+      coin.add(rim, face);
+      badge.add(coin);
+      this.coinBadge = badge;
+      this.group.add(badge);
+    }
+
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) { m.frustumCulled = true; m.castShadow = true; }
@@ -368,8 +430,9 @@ export class Enemy {
   takeDamage(amount: number, point: THREE.Vector3, headshot: boolean) {
     if (!this.alive) return;
     // Getting shot is the provocation. Even if the manager somehow misses the
-    // squad broadcast, the victim itself always fights back.
-    this.alert(point);
+    // squad broadcast, the victim itself always fights back — unless it is a
+    // peaceful trader, who simply has no fight in them.
+    if (!this.cfg.peaceful) this.alert(point);
     this.hp -= headshot ? amount * 2 : amount;
     this.flashT = 0.09;
     // knockback away from the hit
@@ -389,6 +452,7 @@ export class Enemy {
     this.state = 'dead';
     this.stateT = 0;
     this.hpFill.visible = false;
+    if (this.coinBadge) this.coinBadge.visible = false;
     this.deps.audio.enemyDie();
     for (let i = 0; i < 14; i++) {
       tmpV.set((Math.random() - 0.5) * 5, Math.random() * 5 + 1, (Math.random() - 0.5) * 5);
@@ -467,6 +531,11 @@ export class Enemy {
   /** ground distance from this enemy to a point */
   private planarDist(x: number, z: number): number {
     return Math.hypot(x - this.pos.x, z - this.pos.z);
+  }
+
+  /** public variant (manager uses it to keep wandering merchants apart) */
+  distToXZ(x: number, z: number): number {
+    return this.planarDist(x, z);
   }
 
   /** waypoint loop; returns the point to steer toward, or null = stand and idle */
@@ -632,26 +701,73 @@ export class Enemy {
       this.idleGoalPt = null;
     }
 
-    // ---- facing: look at the player when visible, patrol goal, else along the path
-    let faceX = toPlayer.x, faceZ = toPlayer.z;
-    if ((this.state === 'patrol' || this.state === 'idle') && patrolSteerGoal) {
+    // ---- facing -------------------------------------------------------------
+    // Combat agents track their target. Passive agents face whatever they are
+    // walking toward — and while standing still they HOLD a calm heading:
+    // idle guards slowly look around on a timer, patrol guards keep the
+    // direction they were last marching. The old code re-aimed every passive
+    // guard at the player each frame, which is what made idle enemies spin
+    // and twitch in place.
+    const hSpeed = Math.hypot(this.vel.x, this.vel.z);
+    if (hSpeed > 0.55) this.lastMoveYaw = Math.atan2(this.vel.x, this.vel.z);
+    const passiveStance = this.state === 'patrol' || this.state === 'idle';
+
+    let faceX = 0, faceZ = 0, haveFace = false;
+    if (passiveStance && this.tradeFaceT > 0) {
+      // a customer is at the stall: the merchant turns to greet them
+      this.tradeFaceT -= dt;
+      faceX = toPlayer.x; faceZ = toPlayer.z; haveFace = true;
+    } else if (passiveStance && patrolSteerGoal) {
       faceX = patrolSteerGoal.x - this.pos.x;
       faceZ = patrolSteerGoal.z - this.pos.z;
-    } else if (!hasLos && this.pathIdx < this.path.length) {
-      const wp = this.path[this.pathIdx];
-      faceX = wp.x - this.pos.x;
-      faceZ = wp.z - this.pos.z;
+      haveFace = true;
+    } else if (!passiveStance) {
+      if (hasLos) { faceX = toPlayer.x; faceZ = toPlayer.z; haveFace = true; }
+      else if (this.pathIdx < this.path.length) {
+        const wp = this.path[this.pathIdx];
+        faceX = wp.x - this.pos.x; faceZ = wp.z - this.pos.z; haveFace = true;
+      }
     }
-    // While moving without a clear shot, face where we are actually walking —
-    // otherwise the model moon-walks around obstacles while staring ahead.
-    if (!hasLos && (Math.abs(this.vel.x) + Math.abs(this.vel.z)) > 0.8) {
-      faceX = this.vel.x; faceZ = this.vel.z;
+    if (!haveFace && hSpeed > 0.8) {
+      // moving without a goal (shoved, sliding): face the actual motion so the
+      // model never moon-walks
+      faceX = this.vel.x; faceZ = this.vel.z; haveFace = true;
     }
+    if (!haveFace) {
+      // standing still: hold a settled heading
+      if (this.state === 'idle') {
+        this.idleScanT -= dt;
+        if (this.idleScanT <= 0) {
+          this.idleScanT = 2.6 + Math.random() * 3.6;
+          // mostly small glances around the current facing, occasionally a
+          // full look over the shoulder — like a real guard scanning a post
+          this.idleFaceYaw += Math.random() < 0.22
+            ? Math.PI * (0.6 + Math.random() * 0.9) * (Math.random() < 0.5 ? -1 : 1)
+            : (Math.random() - 0.5) * 1.7;
+        }
+      } else {
+        // patrol dwell between waypoints: keep staring down the route
+        this.idleFaceYaw = this.lastMoveYaw;
+      }
+      faceX = Math.sin(this.idleFaceYaw);
+      faceZ = Math.cos(this.idleFaceYaw);
+    } else if (passiveStance) {
+      // remember where we were heading so stopping doesn't jerk the body
+      this.idleFaceYaw = Math.atan2(faceX, faceZ);
+    }
+
     const targetYaw = Math.atan2(faceX, faceZ);
     let dy = targetYaw - this.yaw;
     while (dy > Math.PI) dy -= Math.PI * 2;
     while (dy < -Math.PI) dy += Math.PI * 2;
-    this.yaw += dy * Math.min(1, dt * 8);
+    // clamped turn rate + dead zone instead of an exponential snap: idle
+    // guards turn slowly and deliberately, combat tracking stays sharp, and
+    // nobody ever whips 180° in a single frame
+    const turnRate = this.state === 'chase' || this.state === 'attack' ? 10
+      : this.state === 'patrol' ? 5.5 : 2.3;
+    if (Math.abs(dy) > 0.012) {
+      this.yaw += Math.sign(dy) * Math.min(Math.abs(dy), turnRate * dt);
+    }
 
     // ---- steering (world space)
     // LOD: agents the player can't scrutinise re-solve their context map far
@@ -1011,6 +1127,12 @@ export class Enemy {
       this.pos.y,
       this.pos.z + Math.round((camPos.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE,
     );
+    // merchant coin marker: slow spin + lazy bob, readable from across camp
+    if (this.coinBadge) {
+      this.coinBadge.rotation.y += dt * 2.6;
+      this.coinBadge.position.y = 2.24 + Math.sin(this.stateT * 2.1) * 0.055;
+    }
+
     this.group.rotation.y = this.yaw;
     const f = Math.max(0, this.hp / c.hp);
     // health bar only exists once damaged — skip the billboard matrix work
@@ -1071,7 +1193,9 @@ export class Enemy {
       const worldHit = this.deps.world.raycast(muzzle, dir, 200);
       const endPoint = worldHit ? worldHit.point : end;
       this.deps.effects.tracer(vis(muzzle), vis(endPoint));
-      if (worldHit) this.deps.effects.impact(vis(worldHit.point), worldHit.normal, worldHit.block);
+      // `vis()` shifts the point into wrap-around render space, but the decal
+      // must still track the real voxel — pass the hit's world coords too.
+      if (worldHit) this.deps.effects.impact(vis(worldHit.point), worldHit.normal, worldHit.block, worldHit);
     }
   }
 
@@ -1629,6 +1753,39 @@ export class EnemyManager {
     for (let i = camp.squad.length; i < camp.squadSize; i++) this.spawnMember(camp, i, false);
     if (camp.squad.length) { camp.spawnedEver = true; camp.respawnTimer = CAMP_MEMBER_RESPAWN; }
     else camp.respawnTimer = 2;         // hostile terrain: retry fast, don't flag cleared
+    this.spawnMerchantAt(camp);
+  }
+
+  /**
+   * Every camp gets one MERCHANT trader, standing at a post (idle behavior).
+   * The merchant is deliberately NOT part of `camp.squad`: killing it never
+   * counts toward clearing the camp, and the camp's aggro broadcasts never
+   * drag it into combat. Like squad members, a dead trader stays dead.
+   */
+  private spawnMerchantAt(camp: CampState): void {
+    const p = this.campSpawnPos(camp, Math.floor(camp.squadSize * 0.5));
+    if (!p) return;
+    const e = new Enemy('merchant', p, this.deps, { behavior: 'idle' });
+    e.assignCamp(camp.build);
+    this.enemies.push(e);
+    this.attach(e);
+  }
+
+  /**
+   * Drop a travelling merchant on standable ground near a point (used by the
+   * engine to seed one close to the player spawn so trading is discoverable).
+   */
+  spawnWanderingMerchant(x: number, z: number, hintY: number): void {
+    // never stack two traders on the same column
+    for (const e of this.enemies) {
+      if (e.alive && e.cfg.id === 'merchant' && e.distToXZ(x, z) < 14) return;
+    }
+    const p = this.standablePos(x, z, hintY);
+    if (!p) return;
+    const e = new Enemy('merchant', p, this.deps, { behavior: 'idle' });
+    e.home = { x: p.x, z: p.z };   // the stall IS the post
+    this.enemies.push(e);
+    this.attach(e);
   }
 
   /**
