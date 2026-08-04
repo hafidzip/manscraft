@@ -2244,6 +2244,10 @@ export class GameEngine {
       this.spawnDroppedWeapon();
       this.fpsAudio.playerDie();
       this.player.startDeath(img);
+      // Player is down: every squad drops combat and is teleported back to
+      // their own camp. They also go into a brief cooldown so they don't
+      // immediately re-engage the freshly respawned player at the spawn pad.
+      this.enemies.onPlayerDeath(6);
       const head = this.camera.position.clone();
       for (let i = 0; i < 16; i++) {
         this.fx.spawnParticle(

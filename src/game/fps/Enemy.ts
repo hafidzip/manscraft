@@ -190,6 +190,8 @@ export class Enemy {
   private muzzle = new THREE.Object3D();
 
   pos = new THREE.Vector3();
+  /** Original camp/post spawn. Player death always returns this enemy here. */
+  readonly respawnPoint = new THREE.Vector3();
   vel = new THREE.Vector3();
   yaw = 0;
   hp: number;
@@ -267,6 +269,14 @@ export class Enemy {
   private returning = false;
   private dwellT = 0;
 
+  /**
+   * Squad-wide cooldown. While > 0 this agent is forbidden from shooting OR
+   * chasing the player — it just stands down at its post. Set by the manager
+   * when the player dies (everyone stops fighting, returns to camp).
+   * The timer is in seconds, ticks down every update.
+   */
+  cooldownUntil = 0;
+
   // ---- calm-heading model (kills the idle rotation spam) -------------------
   // While dwelling with no goal, passive agents hold a settled heading
   // instead of snapping toward the player every frame. Idle guards re-pick
@@ -287,6 +297,7 @@ export class Enemy {
     this.cfg = { ...ENEMY_PRESETS[preset], ...overrides };
     this.hp = this.cfg.hp;
     this.pos.copy(pos);
+    this.respawnPoint.copy(pos);
     this.lastX = pos.x; this.lastZ = pos.z;
     this.yaw = Math.random() * Math.PI * 2;
     this.idleFaceYaw = this.yaw;
@@ -505,6 +516,44 @@ export class Enemy {
     this.invalidatePath();
   }
 
+  /**
+   * Squad-wide stand-down used when the player dies. Beyond clearing aggro
+   * (the regular `standDown()` does that too), this:
+   *   1. flips on a per-enemy `cooldownUntil` so the squad never re-engages
+   *      while the death sequence is playing, even if the player respawns
+   *      right next to them on the way out.
+   *   2. snaps the agent back to its own camp post (its `home`) so nobody is
+   *      left standing where the firefight happened.
+   *   3. forces state to the configured passive stance ('patrol' / 'idle').
+   */
+  standDownToCamp(cooldownSec = 0, teleport?: THREE.Vector3) {
+    this.cooldownUntil = Math.max(this.cooldownUntil, cooldownSec);
+    this.alerted = false;
+    this.alertT = 0;
+    this.weaponDrawT = 0;
+    this.hasTarget = false;
+    this.lastKnown.set(0, 0, 0);
+    this.searchT = 0;
+    this.burstLeft = 0;
+    this.cooldown = Math.max(this.cooldown, this.cfg.attackCooldown);
+    this.invalidatePath();
+    this.returning = false;
+    this.leashT = 0;
+    this.dwellT = 0;
+    this.state = this.cfg.behavior;
+    if (teleport) {
+      this.pos.copy(teleport);
+      this.vel.set(0, 0, 0);
+      this.lastX = teleport.x; this.lastZ = teleport.z;
+      const cam = this.deps.camera.position;
+      this.group.position.set(
+        teleport.x + Math.round((cam.x - teleport.x) / WORLD_SIZE) * WORLD_SIZE,
+        teleport.y,
+        teleport.z + Math.round((cam.z - teleport.z) / WORLD_SIZE) * WORLD_SIZE,
+      );
+    }
+  }
+
   /** Debug/AI helper: is this agent currently following a route? */
   get navigating(): boolean { return this.pathIdx < this.path.length; }
 
@@ -688,8 +737,14 @@ export class Enemy {
     }
 
     // ── passive stance vs combat arbitration ──
+    // `cooldownUntil` is the squad-wide truce set when the player dies: while
+    // it is positive the agent is forbidden from chasing/attacking even if it
+    // is technically still "alerted". It still walks its patrol / holds its
+    // post as if nothing had happened.
+    this.cooldownUntil = Math.max(0, this.cooldownUntil - dt);
+    const inCooldown = this.cooldownUntil > 0;
     let patrolSteerGoal: { x: number; z: number } | null = null;
-    const passive = !this.alerted || (!hasLos && (!this.hasTarget || this.searchT > 6));
+    const passive = inCooldown || !this.alerted || (!hasLos && (!this.hasTarget || this.searchT > 6));
     if (passive) {
       if (this.searchT > 6) { this.hasTarget = false; this.lastKnown.set(0, 0, 0); }
       // back to whatever this guard does for a living: walk the loop, or stand post
@@ -1042,7 +1097,7 @@ export class Enemy {
     // Tracers can't pile up because the FX pool advances in tickPilot as well.
     // `alerted` is the hard gate: an unprovoked guard never pulls the trigger,
     // no matter how close the player walks or how clear the shot is.
-    if (this.alerted && this.state !== 'patrol' && this.state !== 'idle' && hasLos && inFireRange) {
+    if (this.alerted && this.state !== 'patrol' && this.state !== 'idle' && hasLos && inFireRange && this.cooldownUntil <= 0) {
       this.state = 'attack';
       if (this.burstLeft > 0) {
         this.burstTimer -= dt;
@@ -1056,7 +1111,7 @@ export class Enemy {
         this.burstTimer = 0;
         this.cooldown = c.attackCooldown * (0.8 + Math.random() * 0.5);
       }
-    } else if (this.state === 'attack') this.state = this.alerted ? 'chase' : this.cfg.behavior;
+    } else if (this.state === 'attack') this.state = (this.alerted && this.cooldownUntil <= 0) ? 'chase' : this.cfg.behavior;
 
     // ---- animate
     const moving = hs > 0.4;
@@ -2018,5 +2073,49 @@ export class EnemyManager {
     let cleared = 0;
     for (const c of this.camps) if (c.cleared) cleared++;
     this.campsCleared = cleared;
+  }
+
+  // ---- player death: every squad stands down -----------------------------
+  /**
+   * Called by the engine when the player dies. Behaviour contract:
+   *   - Every living enemy (camps AND wandering merchants) drops combat.
+   *   - They stop chasing, stop shooting, and stop holding the player as a
+   *     target. State snaps back to their configured passive stance.
+   *   - Each enemy teleports to a standable position INSIDE ITS OWN CAMP /
+   *     own post, so the firefight is left empty and the squads regroup.
+   *   - A squad-wide cooldown prevents anyone from re-engaging the moment
+   *     the player respawns at the spawn point (which is often next to a
+   *     camp). The cooldown is measured in seconds.
+   *
+   * Dead enemies are ignored — they have no state to reset and are about to
+   * be pruned from the squad roster by `respawnTick`.
+   */
+  onPlayerDeath(cooldownSec = 6): void {
+    // Build a camp lookup so each squad member can use only its own camp.
+    const siteBySquad: Map<Enemy, CampState> = new Map();
+    for (const camp of this.camps) {
+      for (const m of camp.squad) {
+        if (m.alive) siteBySquad.set(m, camp);
+      }
+    }
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      const camp = siteBySquad.get(e) ?? null;
+
+      // Prefer the enemy's exact original post. If that column was modified,
+      // use another valid post in its own camp. Never use the player spawn.
+      let target = this.standablePos(
+        e.respawnPoint.x,
+        e.respawnPoint.z,
+        e.respawnPoint.y,
+      );
+      if (!target && camp) {
+        const slot = Math.max(0, camp.squad.indexOf(e));
+        target = this.campSpawnPos(camp, slot);
+      }
+      if (!target) target = e.respawnPoint.clone();
+
+      e.standDownToCamp(cooldownSec, target);
+    }
   }
 }
