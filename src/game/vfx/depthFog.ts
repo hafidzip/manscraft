@@ -111,25 +111,28 @@ const FRAG = /* glsl */ `
     }
     float fogAmt = 1.0 - exp(-max(optical, 0.0));
 
-    // ---- world-edge guard ---------------------------------------------
-    // Height fog decays with altitude, so at flight height the exponential
-    // term alone is far too weak and the torus cutoff (last meshed chunk at
-    // the view radius) becomes a visible hard edge. This distance term is
-    // altitude-independent: it ramps to full fog just inside the render
-    // radius so terrain always melts into the sky colour, never a cliff.
+    // ---- world-edge / horizon dissolve --------------------------------
+    // Height fog thins with altitude, so at flight height the exponential
+    // term alone leaves hard silhouettes against the sky. This pure
+    // horizontal-distance ramp forces full fog just inside the mesh radius
+    // at ANY altitude, melting the last chunks into the sky colour.
     float horizDist = length(wp.xz - uCamPos.xz);
     float farFog = smoothstep(uFarFogStart, uFarFogEnd, horizDist);
-    fogAmt = max(fogAmt, farFog);
+    // Also use radial 3D distance so elevated ridges dissolve the same way.
+    float radialFog = smoothstep(uFarFogStart * 0.92, uFarFogEnd, dist);
+    fogAmt = max(fogAmt, max(farFog, radialFog));
+    fogAmt = clamp(fogAmt, 0.0, 1.0);
 
-    // forward scattering: looking toward the sun picks up its warm colour
+    // forward scattering: looking toward the sun picks up its warm colour,
+    // but ONLY while fog is partial. As fogAmt → 1 the colour MUST equal
+    // uFogColor exactly (engine keeps that == sky background), otherwise
+    // distant silhouettes never dissolve into the sky.
     float sunDot = max(dot(rayDir, normalize(uFogSunDir)), 0.0);
     float mie    = pow(sunDot, 6.0) * 0.7 + pow(sunDot, 2.0) * 0.22;
-    vec3 scatter = mix(uFogColor, uFogSunColor, clamp(mie * uFogInscatter, 0.0, 1.0));
-    // ...but converge back to the sky colour as fog saturates, so the
-    // horizon always dissolves cleanly into the background
-    scatter = mix(scatter, uFogColor, smoothstep(0.55, 0.95, fogAmt) * 0.6);
+    float scatterAmt = clamp(mie * uFogInscatter * (1.0 - fogAmt), 0.0, 1.0);
+    vec3 scatter = mix(uFogColor, uFogSunColor, scatterAmt);
 
-    gl_FragColor = vec4(mix(base.rgb, scatter, clamp(fogAmt, 0.0, 1.0)), base.a);
+    gl_FragColor = vec4(mix(base.rgb, scatter, fogAmt), base.a);
   }
 `;
 

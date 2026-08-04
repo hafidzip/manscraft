@@ -6,7 +6,7 @@ import { canStand, snapToGround } from '../../Pathfinder';
 import { CAMP_CONFIG } from '../../camps';
 import { Enemy } from './enemyAgent';
 import {
-  pathBudget, type EnemyPlayer, type EnemyDeps, type EnemyHit,
+  pathBudget, type EnemyPlayer, type EnemyDeps, type EnemyHit, ENEMY_PRESETS,
 } from './enemyTypes';
 
 const tmpV = new THREE.Vector3();
@@ -163,7 +163,15 @@ export class EnemyManager {
     const p = this.campSpawnPos(camp, slot);
     if (!p) return false;
     if (guardPlayer && p.distanceTo(this.player.pos) < RESPAWN_SAFE_DIST) return false;
-    const e = new Enemy(camp.roster[slot % camp.roster.length], p, this.deps);
+    // Randomly assign behavior: 60% patrol, 40% idle (unless overridden by preset)
+    const presetId = camp.roster[slot % camp.roster.length];
+    const baseCfg = { ...ENEMY_PRESETS[presetId] };
+    // Override behavior based on slot position for variety (first enemy usually patrols)
+    if (baseCfg.behavior === 'patrol') {
+      // Mix it up: even slots more likely to patrol, odd slots more likely to idle
+      baseCfg.behavior = slot % 2 === 0 ? 'patrol' : (Math.random() < 0.5 ? 'patrol' : 'idle');
+    }
+    const e = new Enemy(presetId, p, this.deps, { behavior: baseCfg.behavior });
     e.assignCamp(camp.build);
     this.enemies.push(e);
     this.attach(e);

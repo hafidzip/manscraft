@@ -10,9 +10,10 @@ import { Effects } from './effects';
 import { AudioSynth } from './audio';
 import { box, MATS } from './models';
 import { faceTexture, pixelTexture } from './textures';
-import { findPath, canStand, snapToGround } from './Pathfinder';
+import { findPath } from './Pathfinder';
 import type { CampBuild, CampSite } from '../world/camps';
 import { Biome } from '../world/biomes';
+import { B, isWaterId } from '../world/blocks';
 import { mulberry32 } from '../core/noise';
 import { CAMP_CONFIG } from './camps';
 
@@ -23,7 +24,10 @@ import { CAMP_CONFIG } from './camps';
  */
 const pathBudget = { tokens: 0 };
 
-export type EnemyState = 'spawn' | 'patrol' | 'chase' | 'attack' | 'dead';
+export type EnemyState = 'spawn' | 'idle' | 'patrol' | 'chase' | 'attack' | 'dead';
+
+/** Passive stance a camp member holds until its squad is provoked. */
+export type EnemyBehavior = 'patrol' | 'idle';
 
 export interface EnemyConfig {
   id: string;
@@ -42,6 +46,8 @@ export interface EnemyConfig {
   shirt: string;
   pants: string;
   seed: number;
+  /** 'patrol' = walks the camp waypoint loop, 'idle' = holds station at its post */
+  behavior: EnemyBehavior;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,16 +76,19 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
     id: 'grunt', name: 'GRUNT', hp: 40, speed: 4.6, sightRange: 9999, attackRange: 26,
     preferredRange: 10, attackCooldown: 1.6, burst: 3, burstDelay: 0.16,
     accuracy: 0.72, damage: 7, skin: '#c98f5f', shirt: '#4a5d3a', pants: '#3a3f4a', seed: 12,
+    behavior: 'patrol',
   },
   runner: {
     id: 'runner', name: 'RUNNER', hp: 26, speed: 6.2, sightRange: 9999, attackRange: 20,
     preferredRange: 6, attackCooldown: 1.1, burst: 4, burstDelay: 0.11,
     accuracy: 0.6, damage: 5, skin: '#a9764b', shirt: '#7a3030', pants: '#2c2c30', seed: 31,
+    behavior: 'patrol',
   },
   heavy: {
     id: 'heavy', name: 'HEAVY', hp: 90, speed: 3.6, sightRange: 9999, attackRange: 34,
     preferredRange: 14, attackCooldown: 2.1, burst: 6, burstDelay: 0.13,
     accuracy: 0.8, damage: 10, skin: '#b9825a', shirt: '#2f3a4a', pants: '#23262c', seed: 55,
+    behavior: 'idle',
   },
 };
 
@@ -156,6 +165,8 @@ export class Enemy {
   private armL = new THREE.Group();
   private armR = new THREE.Group();
   private weapon = new THREE.Group();
+  /** >0 while the rifle is unslung; decays after the last clear shot */
+  private weaponDrawT = 0;
   private bolt = new THREE.Group();
   private hpFill!: THREE.Mesh;
   private hpBar!: THREE.Group;
@@ -188,6 +199,16 @@ export class Enemy {
   private pathGoal = new THREE.Vector3();
   private lastKnown = new THREE.Vector3();
   private hasTarget = false;
+  /**
+   * Squad aggro latch. An enemy is completely passive until this flips true —
+   * seeing the player is NOT enough. Only `alert()` (squad member shot, blast,
+   * or an explicit order) provokes a camp.
+   */
+  alerted = false;
+  /** seconds of calm before an alerted squad member stands down again */
+  private alertT = 0;
+  /** wander target while holding station in the 'idle' stance */
+  private idleGoalPt: { x: number; z: number } | null = null;
   private searchT = 0;
   private grounded = false;
   private jumpCd = 0;
@@ -296,6 +317,8 @@ export class Enemy {
     // Dedicated SMG rig. It is parented to the torso rather than a wrist so
     // both arms can visibly support it and recoil as a single firing pose.
     this.weapon.position.set(0, 1.16, 0.32);
+    // stowed until the guard is provoked (see the draw/stow block in update)
+    this.weapon.visible = false;
     this.bodyRoot.add(this.weapon);
     box(this.weapon, 0.14, 0.115, 0.42, 0, 0, 0.12, MATS.gun);        // receiver
     box(this.weapon, 0.15, 0.028, 0.39, 0, 0.07, 0.12, MATS.black);    // top rail
@@ -344,6 +367,9 @@ export class Enemy {
   // ------------------------------------------------------------ damage
   takeDamage(amount: number, point: THREE.Vector3, headshot: boolean) {
     if (!this.alive) return;
+    // Getting shot is the provocation. Even if the manager somehow misses the
+    // squad broadcast, the victim itself always fights back.
+    this.alert(point);
     this.hp -= headshot ? amount * 2 : amount;
     this.flashT = 0.09;
     // knockback away from the hit
@@ -383,11 +409,35 @@ export class Enemy {
     this.repathT = 0;
   }
 
+  /**
+   * Provoke this agent: the squad has been attacked. This is the ONLY way an
+   * enemy leaves its passive stance — proximity and line of sight alone never
+   * trigger combat.
+   */
+  alert(pos: THREE.Vector3) {
+    this.alerted = true;
+    this.alertT = 0;
+    this.investigate(pos);
+  }
+
   /** Give the agent a destination it hasn't directly seen (sound, orders…). */
   investigate(pos: THREE.Vector3) {
     this.lastKnown.copy(pos);
     this.hasTarget = true;
     this.searchT = 0;
+    this.invalidatePath();
+  }
+
+  /** Squad calmed down: drop back to the passive patrol/idle stance. */
+  standDown() {
+    this.alerted = false;
+    this.alertT = 0;
+    this.weaponDrawT = 0;   // sling the rifle again
+    this.hasTarget = false;
+    this.lastKnown.set(0, 0, 0);
+    this.searchT = 0;
+    this.returning = true;
+    this.burstLeft = 0;
     this.invalidatePath();
   }
 
@@ -407,7 +457,11 @@ export class Enemy {
     this.patrolIdx = best;
     this.returning = false;
     this.leashT = 0;
-    if (this.state === 'spawn') this.state = 'patrol';
+    // an idle guard treats its nearest post as the station it holds
+    if (this.cfg.behavior === 'idle' && this.patrolPoints.length) {
+      this.home = { ...this.patrolPoints[best] };
+    }
+    if (this.state === 'spawn') this.state = this.cfg.behavior;
   }
 
   /** ground distance from this enemy to a point */
@@ -432,6 +486,32 @@ export class Enemy {
     return wp;
   }
 
+  /**
+   * 'idle' stance: hold station at the assigned post. The guard mostly stands
+   * still, shuffling a couple of blocks now and then so the camp still looks
+   * alive without anybody actually going on a round.
+   */
+  private idleGoal(dt: number): { x: number; z: number } | null {
+    const post = this.home;
+    if (!post) return null;
+    const away = this.planarDist(post.x, post.z);
+    // drifted off station (knockback, crowd shoving): walk back
+    if (away > 4.5) { this.idleGoalPt = post; return post; }
+    if (this.idleGoalPt) {
+      if (this.planarDist(this.idleGoalPt.x, this.idleGoalPt.z) < 0.9) {
+        this.idleGoalPt = null;
+        this.dwellT = 2.5 + Math.random() * 4;
+      }
+      return this.idleGoalPt;
+    }
+    if (this.dwellT > 0) { this.dwellT -= dt; return null; }
+    // pick a new loitering spot inside a tight radius around the post
+    const a = Math.random() * Math.PI * 2;
+    const r = 0.8 + Math.random() * 2.2;
+    this.idleGoalPt = { x: post.x + Math.cos(a) * r, z: post.z + Math.sin(a) * r };
+    return this.idleGoalPt;
+  }
+
   // ------------------------------------------------------------ update
   update(dt: number, player: EnemyPlayer) {
     const c = this.cfg;
@@ -450,7 +530,7 @@ export class Enemy {
       this.group.position.x = this.pos.x + Math.round((camS.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE;
       this.group.position.z = this.pos.z + Math.round((camS.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE;
       this.group.position.y = this.pos.y + Math.min(1, this.stateT / 0.5) * 0 - (1 - Math.min(1, this.stateT / 0.5)) * 1.2;
-      if (this.stateT > 0.5) { this.state = this.patrolPoints.length ? 'patrol' : 'chase'; this.group.position.y = this.pos.y; }
+      if (this.stateT > 0.5) { this.state = this.cfg.behavior; this.group.position.y = this.pos.y; }
       return true;
     }
 
@@ -500,17 +580,31 @@ export class Enemy {
     }
 
     // ---- target memory
-    let hasLos = this.hasLos;  // let so leash can suppress it
-    if (hasLos) {
+    //
+    // PASSIVE UNTIL PROVOKED. Line of sight no longer creates a target on its
+    // own: walking past a camp, or standing right next to one, is not a
+    // hostile act. Sight only REFRESHES the target of an already-alerted
+    // agent, so a squad that has been shot can actually track the shooter.
+    let hasLos = this.hasLos;  // let so leash/aggro can suppress it
+    if (!this.alerted) {
+      // not provoked — no target, no memory, no combat
+      hasLos = false;
+      this.hasTarget = false;
+      this.searchT = 0;
+    } else if (this.hasLos) {
       this.lastKnown.copy(pp);
       this.hasTarget = true;
       this.searchT = 0;
+      this.alertT = 0;
     } else {
       this.searchT += dt;
+      this.alertT += dt;
+      // lost them for long enough: the whole thing was a false alarm
+      if (this.alertT > 12) { this.standDown(); hasLos = false; }
     }
 
     // ── leash: player dragged us too far from camp ──
-    if (this.home && this.state !== 'dead') {
+    if (this.home) {
       const pd = Math.hypot(pp.x - this.home.x, pp.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
         this.leashT += dt;
@@ -524,21 +618,23 @@ export class Enemy {
       }
     }
 
-    // ── patrol vs combat arbitration ──
+    // ── passive stance vs combat arbitration ──
     let patrolSteerGoal: { x: number; z: number } | null = null;
-    const idle = !hasLos && (!this.hasTarget || this.searchT > 6);
-    if (idle && this.state !== 'dead' && (this.patrolPoints.length > 0 || this.returning)) {
+    const passive = !this.alerted || (!hasLos && (!this.hasTarget || this.searchT > 6));
+    if (passive) {
       if (this.searchT > 6) { this.hasTarget = false; this.lastKnown.set(0, 0, 0); }
-      this.state = 'patrol';
-      patrolSteerGoal = this.patrolGoal(dt);
-    } else if (hasLos && this.state === 'patrol') {
+      // back to whatever this guard does for a living: walk the loop, or stand post
+      this.state = this.cfg.behavior;
+      patrolSteerGoal = this.cfg.behavior === 'idle' ? this.idleGoal(dt) : this.patrolGoal(dt);
+    } else if (hasLos && (this.state === 'patrol' || this.state === 'idle')) {
       this.state = 'chase';
       this.returning = false; this.dwellT = 0; this.leashT = 0;
+      this.idleGoalPt = null;
     }
 
     // ---- facing: look at the player when visible, patrol goal, else along the path
     let faceX = toPlayer.x, faceZ = toPlayer.z;
-    if (this.state === 'patrol' && patrolSteerGoal) {
+    if ((this.state === 'patrol' || this.state === 'idle') && patrolSteerGoal) {
       faceX = patrolSteerGoal.x - this.pos.x;
       faceZ = patrolSteerGoal.z - this.pos.z;
     } else if (!hasLos && this.pathIdx < this.path.length) {
@@ -571,18 +667,23 @@ export class Enemy {
 
     const inCombatRange = hasLos && dist < c.preferredRange * 1.15;
 
-    if (this.state === 'patrol') {
-      // ---- patrol steering: walk toward the current waypoint at reduced speed
+    if (this.state === 'patrol' || this.state === 'idle') {
+      // ---- passive steering: stroll to the waypoint / loiter spot. Idle
+      // guards move slower still — they are standing a post, not marching.
       if (patrolSteerGoal) {
         const pdx = patrolSteerGoal.x - this.pos.x;
         const pdz = patrolSteerGoal.z - this.pos.z;
         this.steerContext(pdx, pdz, steerOut);
-        wx = steerOut.x * CAMP_CONFIG.patrolSpeedFactor;
-        wz = steerOut.z * CAMP_CONFIG.patrolSpeedFactor;
+        const paceF = this.state === 'idle'
+          ? CAMP_CONFIG.patrolSpeedFactor * 0.55
+          : CAMP_CONFIG.patrolSpeedFactor;
+        wx = steerOut.x * paceF;
+        wz = steerOut.z * paceF;
         if (steerOut.jump) wantJump = true;
-        // fully boxed in on patrol: turn around at the next waypoint
+        // fully boxed in: give up on this goal and pick the next one
         if (steerOut.x === 0 && steerOut.z === 0) {
-          this.patrolIdx = (this.patrolIdx + 1) % Math.max(1, this.patrolPoints.length);
+          if (this.state === 'idle') { this.idleGoalPt = null; this.dwellT = 2; }
+          else this.patrolIdx = (this.patrolIdx + 1) % Math.max(1, this.patrolPoints.length);
         }
       } else {
         // dwelling: damp velocity, idle arm sway
@@ -796,7 +897,7 @@ export class Enemy {
         this.lastSteerIdx = -1;
         this.strafeDir = -this.strafeDir;
         this.directBlockT = 1.1;
-        if (hasLos) { this.lastKnown.copy(pp); this.hasTarget = true; this.searchT = 0; }
+        if (this.alerted && hasLos) { this.lastKnown.copy(pp); this.hasTarget = true; this.searchT = 0; }
         this.stuckTimer = 0;
         this.repathT = 0;
         this.path.length = 0;
@@ -823,7 +924,9 @@ export class Enemy {
     // Camps keep shooting at a piloting player too — the ship is invulnerable
     // (damagePlayer ignores hits in flight) but the firefight reads correctly.
     // Tracers can't pile up because the FX pool advances in tickPilot as well.
-    if (this.state !== 'patrol' && hasLos && inFireRange) {
+    // `alerted` is the hard gate: an unprovoked guard never pulls the trigger,
+    // no matter how close the player walks or how clear the shot is.
+    if (this.alerted && this.state !== 'patrol' && this.state !== 'idle' && hasLos && inFireRange) {
       this.state = 'attack';
       if (this.burstLeft > 0) {
         this.burstTimer -= dt;
@@ -837,7 +940,7 @@ export class Enemy {
         this.burstTimer = 0;
         this.cooldown = c.attackCooldown * (0.8 + Math.random() * 0.5);
       }
-    } else if (this.state === 'attack') this.state = this.patrolPoints.length ? 'patrol' : 'chase';
+    } else if (this.state === 'attack') this.state = this.alerted ? 'chase' : this.cfg.behavior;
 
     // ---- animate
     const moving = hs > 0.4;
@@ -853,20 +956,41 @@ export class Enemy {
     const horiz = Math.hypot(aim.x, aim.z);
     const pitch = Math.atan2(aim.y, horiz || 1);
     this.aimPitch = THREE.MathUtils.clamp(pitch, -0.38, 0.38);
-    const combatPose = hasLos;
-    if (combatPose) {
-      const armPitch = Math.PI / 2 + this.aimPitch * 0.8;
-      this.armL.rotation.set(armPitch + 0.05 - this.weaponKick * 0.12, 0, 0.13);
-      this.armR.rotation.set(armPitch - 0.06 - this.weaponKick * 0.18, 0, -0.13);
+
+    // ---- weapon stow / draw
+    // A guard on his round has nothing in his hands: the rifle is only
+    // unslung for an actual fight. `weaponDrawT` holds the gun out for a
+    // beat after the last clear shot so a brief LOS break (a tree, a corner)
+    // doesn't pop the model in and out every few frames.
+    const combatPose = this.alerted && hasLos;
+    if (combatPose) this.weaponDrawT = 1.2;
+    else this.weaponDrawT = Math.max(0, this.weaponDrawT - dt);
+    const armed = this.weaponDrawT > 0;
+    this.weapon.visible = armed;
+
+    if (armed) {
+      // Arms pivot at the shoulder and hang along -Y at rest. The weapon rig
+      // is built along +Z (muzzle at +0.86), and the body's forward is +Z
+      // (yaw = atan2(faceX, faceZ)), so the hands must swing to +Z. Rotating
+      // -Y about +X by θ lands on (0, -cosθ, -sinθ): reaching +Z needs
+      // θ = -π/2, NOT +π/2 (which throws both arms out behind the back).
+      // Positive aimPitch = aiming up, which needs a more-negative arm pitch.
+      // Recoil pushes the arms back toward the body, i.e. rotation.x toward 0.
+      const armPitch = -Math.PI / 2 - this.aimPitch * 0.8;
+      this.armL.rotation.set(armPitch - 0.05 + this.weaponKick * 0.12, 0, 0.13);
+      this.armR.rotation.set(armPitch + 0.06 + this.weaponKick * 0.18, 0, -0.13);
     } else {
+      // slung: normal walking arm swing, opposite the legs
       this.armL.rotation.set(sw * 0.8, 0, 0);
       this.armR.rotation.set(-sw * 0.8, 0, 0);
     }
 
     // Weapon recoil includes a short rearward push, muzzle rise and bolt cycle.
-    this.weapon.position.set(0, 1.16 - this.weaponKick * 0.014, 0.32 - this.weaponKick * 0.085);
-    this.weapon.rotation.set(-this.aimPitch - this.weaponKick * 0.13, 0, Math.sin(this.walkPhase) * 0.015 * this.speedN);
-    this.bolt.position.z = 0.02 - this.weaponKick * 0.1;
+    if (armed) {
+      this.weapon.position.set(0, 1.16 - this.weaponKick * 0.014, 0.32 - this.weaponKick * 0.085);
+      this.weapon.rotation.set(-this.aimPitch - this.weaponKick * 0.13, 0, Math.sin(this.walkPhase) * 0.015 * this.speedN);
+      this.bolt.position.z = 0.02 - this.weaponKick * 0.1;
+    }
 
     this.bodyRoot.position.y = Math.abs(Math.sin(this.walkPhase)) * 0.03 * this.speedN;
 
@@ -1390,23 +1514,39 @@ export class EnemyManager {
     if (parent && !e.group.parent) parent.add(e.group);
   }
 
-  /** nearest standable block column, biased to camp ground so nobody spawns on a tent roof */
+  private isValidGroundPos(w: WorldLike, fx: number, y: number, fz: number, hintY: number): boolean {
+    if (y < 1 || y >= WORLD_HEIGHT - 2) return false;
+    // Must be on/near camp ground elevation (never on tree canopy or deep underground)
+    if (Math.abs(y - hintY) > 3) return false;
+    // Feet space (y) and head space (y+1) must be non-solid
+    if (w.solid(fx, y, fz) || w.solid(fx, y + 1, fz)) return false;
+    // Floor below feet (y-1) must be solid
+    if (!w.solid(fx, y - 1, fz)) return false;
+
+    // Floor block must be real ground — NOT leaves, NOT water, NOT air
+    const floorId = w.get(fx, y - 1, fz);
+    if (floorId === B.LEAVES || isWaterId(floorId) || floorId === B.AIR) return false;
+    // Reject tree logs or watchpost pillars elevated above ground
+    if (floorId === B.LOG && y > hintY + 1) return false;
+    return true;
+  }
+
+  /** nearest standable block column on actual ground near camp level */
   private standablePos(x: number, z: number, hintY: number): THREE.Vector3 | null {
     const w = this.deps.world;
     const fx = ((Math.floor(x) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
     const fz = ((Math.floor(z) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
-    const top = w.highestY(fx, fz);
 
-    // highestY can point at a flower/tall-grass voxel, which is not a floor.
-    // Search from the real column top down first, then use the normal snapper
-    // as a bounded fallback. This makes every valid camp column spawnable.
-    for (let y = Math.min(WORLD_HEIGHT - 2, top + 1); y >= 1; y--) {
-      if (canStand(w, fx, y, fz)) return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
-      if (top - y > 18) break;
+    // Search around camp ground height (hintY + 3 down to hintY - 3)
+    const minY = Math.max(1, Math.floor(hintY) - 3);
+    const maxY = Math.min(WORLD_HEIGHT - 2, Math.floor(hintY) + 3);
+
+    for (let y = maxY; y >= minY; y--) {
+      if (this.isValidGroundPos(w, fx, y, fz, hintY)) {
+        return new THREE.Vector3(fx + 0.5, y, fz + 0.5);
+      }
     }
-    const baseY = Math.max(1, Math.min(hintY + 4, WORLD_HEIGHT - 2));
-    const snapped = snapToGround(w, fx, baseY, fz, 24);
-    return snapped >= 0 ? new THREE.Vector3(fx + 0.5, snapped, fz + 0.5) : null;
+    return null;
   }
 
   /** watchposts first, then the patrol ring, then a fallback inner circle */
@@ -1452,15 +1592,11 @@ export class EnemyManager {
     if (!p) {
       const s = camp.site;
       const w = this.deps.world;
-      const fy = w.highestY(
-        ((Math.floor(s.cx) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE,
-        ((Math.floor(s.cz) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE,
-      );
-      p = new THREE.Vector3(
-        ((Math.floor(s.cx) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE + 0.5,
-        fy + 1,
-        ((Math.floor(s.cz) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE + 0.5,
-      );
+      const cx = ((Math.floor(s.cx) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+      const cz = ((Math.floor(s.cz) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+      let y = Math.floor(s.y) + 1;
+      if (w.solid(cx, y, cz)) y++;
+      p = new THREE.Vector3(cx + 0.5, y, cz + 0.5);
     }
     if (guardPlayer) {
       // minimum-image distance: the player may be many world-lengths away
@@ -1470,7 +1606,17 @@ export class EnemyManager {
       const gdy = this.player.pos.y - p.y;
       if (gdx * gdx + gdy * gdy + gdz * gdz < RESPAWN_SAFE_DIST * RESPAWN_SAFE_DIST) return false;
     }
-    const e = new Enemy(camp.roster[slot % camp.roster.length], p, this.deps);
+    // Split the garrison between walkers and sentries so a camp reads as a
+    // camp: roughly half the squad walks the perimeter, the rest hold posts.
+    // Deterministic per camp+slot so a given outpost always looks the same.
+    const presetId = camp.roster[slot % camp.roster.length];
+    const bRng = mulberry32(
+      ((camp.site.id * 0x27d4eb2d) ^ (slot * 0x9e3779b1) ^ 0x5bf03635) >>> 0
+    );
+    // heavies are weapon platforms — they hold station far more often
+    const idleChance = presetId === 'heavy' ? 0.75 : slot === 0 ? 0.15 : 0.45;
+    const behavior: EnemyBehavior = bRng() < idleChance ? 'idle' : 'patrol';
+    const e = new Enemy(presetId, p, this.deps, { behavior });
     e.assignCamp(camp.build);          // patrol route + leash (Task 3)
     this.enemies.push(e);
     this.attach(e);
@@ -1554,11 +1700,19 @@ export class EnemyManager {
     return tca - Math.sqrt(r * r - d2);
   }
 
-  /** Alert nearby enemies to a sound (gunshot, explosion, etc.). */
+  /**
+   * A noise was made nearby (gunshot, explosion…).
+   *
+   * This deliberately does NOT provoke anybody. Firing your rifle in the woods
+   * is not an attack on a camp, and routing it through `alert()` was what made
+   * every garrison in earshot open up the moment the player squeezed a trigger
+   * anywhere near them. Sound only sharpens squads that are ALREADY fighting,
+   * giving them a fresh position to converge on.
+   */
   alertNearby(soundPos: THREE.Vector3, hearRange = 45) {
     const r2 = hearRange * hearRange;
     for (const e of this.enemies) {
-      if (!e.alive) continue;
+      if (!e.alive || !e.alerted) continue;
       const dx = wrapDelta(soundPos.x - e.pos.x, WORLD_SIZE);
       const dz = wrapDelta(soundPos.z - e.pos.z, WORLD_SIZE);
       const dy = soundPos.y - e.pos.y;
@@ -1570,8 +1724,9 @@ export class EnemyManager {
   }
 
   /**
-   * Alert every squad member of the camp that contains `hitEnemy`.
-   * Called when a squad member takes damage — the whole squad aggros.
+   * Provoke every member of the camp that contains `hitEnemy` — and ONLY that
+   * camp. Squads are independent: shooting up one outpost leaves the next one
+   * over completely unaware.
    */
   alertSquadOf(hitEnemy: Enemy) {
     const pp = this.player.pos;
@@ -1581,11 +1736,16 @@ export class EnemyManager {
         if (e.alive) {
           const dx = wrapDelta(pp.x - e.pos.x, WORLD_SIZE);
           const dz = wrapDelta(pp.z - e.pos.z, WORLD_SIZE);
-          e.investigate(new THREE.Vector3(e.pos.x + dx, pp.y, e.pos.z + dz));
+          e.alert(new THREE.Vector3(e.pos.x + dx, pp.y, e.pos.z + dz));
         }
       }
-      break;
+      return;
     }
+    // Not a camp member (lone spawn): it still defends itself.
+    hitEnemy.alert(hitEnemy.pos.clone().add(new THREE.Vector3(
+      wrapDelta(pp.x - hitEnemy.pos.x, WORLD_SIZE), 0,
+      wrapDelta(pp.z - hitEnemy.pos.z, WORLD_SIZE),
+    )));
   }
 
   /**
@@ -1609,7 +1769,7 @@ export class EnemyManager {
           if (e.alive) {
             const edx = wrapDelta(pp.x - e.pos.x, WORLD_SIZE);
             const edz = wrapDelta(pp.z - e.pos.z, WORLD_SIZE);
-            e.investigate(new THREE.Vector3(e.pos.x + edx, pp.y, e.pos.z + edz));
+            e.alert(new THREE.Vector3(e.pos.x + edx, pp.y, e.pos.z + edz));
           }
         }
       }

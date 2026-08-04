@@ -57,6 +57,29 @@ export function getAtlas(): THREE.CanvasTexture {
   return atlasTex;
 }
 
+// ── cached data-URL helpers ─────────────────────────────────────────────
+// `HTMLCanvasElement.toDataURL()` on the 128×224 atlas takes a few ms, and
+// BlockIcon/DrumstickIcon each call it per mount. The inventory renders 80+
+// icons at once, so the original code rebuilt + re-encoded the atlas on every
+// menu open — a noticeable 2–3 s freeze. Build once, share everywhere.
+let atlasDataUrlCache: string | null = null;
+export function atlasDataUrl(): string {
+  if (atlasDataUrlCache) return atlasDataUrlCache;
+  const tex = getAtlas();
+  const c = (tex.image as HTMLCanvasElement);
+  atlasDataUrlCache = c.toDataURL();
+  return atlasDataUrlCache;
+}
+
+let drumstickDataUrlCache: string | null = null;
+export function drumstickDataUrl(): string {
+  if (drumstickDataUrlCache) return drumstickDataUrlCache;
+  const { c } = mkCanvas(16, 16);
+  paintDrumstick(c.getContext('2d')!);
+  drumstickDataUrlCache = c.toDataURL();
+  return drumstickDataUrlCache;
+}
+
 export function buildAtlas(): THREE.CanvasTexture {
   const { c, g } = mkCanvas(ATLAS_COLS * TILE, ATLAS_ROWS * TILE);
   const tile = (idx: number, fn: (ox: number, oy: number) => void) => {

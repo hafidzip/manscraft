@@ -4,7 +4,7 @@
  * readout and ship prompt are layered on top for the unified game.
  */
 
-import { useEffect, useMemo, useState, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import {
   Bomb, ChevronUp, Crosshair as CrosshairIcon, Hammer, Moon, Mountain,
   Rocket, Shield, Skull, Sun, Swords, Volume2, VolumeX, X, Package, Apple, ArrowRight, Flame,
@@ -13,7 +13,7 @@ import type { GameEngine, HotbarItem, HudStats } from '../game/engine';
 import { RECIPES, RECIPE_GROUPS, matchCraft, recipeIngredients, type Recipe, type RecipeGroupId } from '../game/crafting/recipes';
 import { smeltResult, isFuel } from '../game/crafting/smelting';
 import { B } from '../game/fps/World';
-import { buildAtlas, tileUV, T, drumstickTexture } from '../game/fps/textures';
+import { tileUV, T, atlasDataUrl, drumstickDataUrl } from '../game/fps/textures';
 import type { SlotRef, SlotItem } from '../game/fps/Inventory';
 import { BLOCK_NAMES, FOODS } from '../game/fps/Inventory';
 
@@ -129,7 +129,10 @@ function blockTile(blockId: number): number {
 }
 
 function BlockIcon({ blockId, size = 22 }: { blockId: number; size?: number }) {
-  const url = useMemo(() => buildAtlas().image.toDataURL(), []);
+  // Atlas is built + encoded once at module scope (see atlasDataUrl in textures.ts).
+  // The previous `useMemo(() => buildAtlas().image.toDataURL(), [])` rebuilt the
+  // entire 128×224 procedural atlas per icon mount — freezing the menu open.
+  const url = atlasDataUrl();
   const [u0, v0, u1, v1] = tileUV(blockTile(blockId));
   const tu0 = Math.min(u0, u1), tu1 = Math.max(u0, u1);
   const tv0 = Math.min(v0, v1), tv1 = Math.max(v0, v1);
@@ -151,7 +154,8 @@ function BlockIcon({ blockId, size = 22 }: { blockId: number; size?: number }) {
 }
 
 function DrumstickIcon({ size = 26 }: { size?: number }) {
-  const url = useMemo(() => drumstickTexture().image.toDataURL(), []);
+  // Cached at module scope — see drumstickDataUrl in textures.ts.
+  const url = drumstickDataUrl();
   return (
     <img src={url} width={size} height={size} alt="Chicken Drum"
       style={{ imageRendering: 'pixelated', filter: 'drop-shadow(1px 1px 0 rgba(0,0,0,0.6))' }}

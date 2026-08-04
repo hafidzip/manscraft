@@ -138,6 +138,24 @@ export class Enemy {
     return wp;
   }
 
+  private idleGoal(dt: number): { x: number; z: number } | null {
+    // Idle enemies stay near their assigned post/home
+    if (this.returning && this.home) {
+      const distFromHome = Math.hypot(this.home.x - this.pos.x, this.home.z - this.pos.z);
+      if (distFromHome > 3) return this.home;
+      this.returning = false;
+    }
+    if (this.dwellT > 0) { this.dwellT -= dt; return null; }
+    // Small wander radius for idle enemies
+    if (this.home && Math.random() < 0.3) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 2 + Math.random() * 3;
+      return { x: this.home.x + Math.cos(angle) * dist, z: this.home.z + Math.sin(angle) * dist };
+    }
+    this.dwellT = 1.5 + Math.random() * 2;
+    return null;
+  }
+
   update(dt: number, player: EnemyPlayer): boolean {
     const c = this.cfg;
     this.stateT += dt;
@@ -147,7 +165,7 @@ export class Enemy {
       return this.stateT < 2.2;
     }
     if (this.state === 'spawn') {
-      if (this.stateT > 0.5) { this.state = this.patrolPoints.length ? 'patrol' : 'chase'; this.group.position.y = this.pos.y; }
+      if (this.stateT > 0.5) { this.state = c.behavior; this.group.position.y = this.pos.y; }
       return true;
     }
 
@@ -161,9 +179,11 @@ export class Enemy {
     if (this.losTimer <= 0) { this.losTimer = 0.2; this.hasLos = checkEnemyLos(this.pos, player, this.deps.world); }
 
     let hasLos = this.hasLos;
-    if (hasLos) { this.lastKnown.copy(player.pos); this.hasTarget = true; this.searchT = 0; } else this.searchT += dt;
+    // REMOVED: No longer auto-target on LOS - only attack when squad is alerted via investigate()
+    // if (hasLos) { this.lastKnown.copy(player.pos); this.hasTarget = true; this.searchT = 0; }
+    if (this.hasTarget && hasLos) { this.lastKnown.copy(player.pos); this.searchT = 0; } else if (this.hasTarget) this.searchT += dt;
 
-    if (this.home && this.state !== 'dead') {
+    if (this.home) {
       const pd = Math.hypot(player.pos.x - this.home.x, player.pos.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
         this.leashT += dt;
@@ -175,16 +195,31 @@ export class Enemy {
     }
 
     let patrolSteerGoal: { x: number; z: number } | null = null;
-    const idle = !hasLos && (!this.hasTarget || this.searchT > 6);
-    if (idle && this.state !== 'dead' && (this.patrolPoints.length > 0 || this.returning)) {
-      if (this.searchT > 6) { this.hasTarget = false; this.lastKnown.set(0, 0, 0); }
-      this.state = 'patrol'; patrolSteerGoal = this.patrolGoal(dt);
-    } else if (hasLos && this.state === 'patrol') {
+    // Behavior-based state logic: only engage when hasTarget is true (squad alerted)
+    const shouldEngage = this.hasTarget && this.searchT <= 6;
+    const shouldReturn = !this.hasTarget || this.searchT > 6;
+    
+    if (shouldReturn && (this.state === 'chase' || this.state === 'attack')) {
+      // Return to normal behavior when target lost
+      this.returning = true;
+      this.state = c.behavior; // 'patrol' or 'idle'
+    }
+    
+    if (!shouldEngage) {
+      // Normal behavior: patrol or idle based on config
+      this.state = c.behavior;
+      if (c.behavior === 'patrol') {
+        patrolSteerGoal = this.patrolGoal(dt);
+      } else {
+        patrolSteerGoal = this.idleGoal(dt);
+      }
+    } else if (hasLos && shouldEngage) {
+      // Squad alerted and can see player - engage!
       this.state = 'chase'; this.returning = false; this.dwellT = 0; this.leashT = 0;
     }
 
     let faceX = toPlayer.x, faceZ = toPlayer.z;
-    if (this.state === 'patrol' && patrolSteerGoal) {
+    if ((this.state === 'patrol' || this.state === 'idle') && patrolSteerGoal) {
       faceX = patrolSteerGoal.x - this.pos.x; faceZ = patrolSteerGoal.z - this.pos.z;
     } else if (!hasLos && this.pathIdx < this.path.length) {
       const wp = this.path[this.pathIdx]; faceX = wp.x - this.pos.x; faceZ = wp.z - this.pos.z;
@@ -198,7 +233,7 @@ export class Enemy {
     let wx = 0, wz = 0; let wantJump = false;
     const inCombatRange = hasLos && dist < c.preferredRange * 1.15;
 
-    if (this.state === 'patrol') {
+    if (this.state === 'patrol' || this.state === 'idle') {
       if (patrolSteerGoal) {
         const pdx = patrolSteerGoal.x - this.pos.x, pdz = patrolSteerGoal.z - this.pos.z;
         const pd = Math.hypot(pdx, pdz) || 1;
@@ -250,7 +285,7 @@ export class Enemy {
       } else if (this.cooldown <= 0) {
         this.burstLeft = c.burst; this.burstTimer = 0; this.cooldown = c.attackCooldown * (0.8 + Math.random() * 0.5);
       }
-    } else if (this.state === 'attack') this.state = this.patrolPoints.length ? 'patrol' : 'chase';
+    } else if (this.state === 'attack') this.state = c.behavior;
 
     const moving = hs > 0.4;
     this.speedN += ((moving ? Math.min(1, hs / 4) : 0) - this.speedN) * Math.min(1, dt * 8);

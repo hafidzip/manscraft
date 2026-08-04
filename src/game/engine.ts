@@ -40,7 +40,7 @@ import { EnemyManager } from './fps/Enemy';
 import { Effects } from './fps/effects';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
-import { WEAPONS, WEAPON_ORDER, buildBody, MATS, box } from './fps/models';
+import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
 import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
 import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
 import {
@@ -48,7 +48,7 @@ import {
   type FurnaceState,
 } from './crafting/smelting';
 import { ItemDropManager } from './fps/ItemDrop';
-import { buildExtrudedItem, paintDrumstick, targetTexture } from './fps/textures';
+import { buildExtrudedItem, paintDrumstick } from './fps/textures';
 import { Spring1 } from './fps/anim';
 import type { BodyRig } from './fps/models';
 
@@ -144,14 +144,6 @@ const LOAD_LABELS = [
 ];
 
 const UNDERWATER_FOG = new THREE.Color(0x0a2a5e);
-
-/**
- * Colour of the night mist. Deliberately a hair above black: pure black fog
- * hides everything and reads as a rendering bug, while anything lighter turns
- * the screen into the grey milk the old night had. This value keeps silhouettes
- * barely legible against the murk.
- */
-const NIGHT_MIST = new THREE.Color(0x0a0e16);
 
 const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
@@ -634,8 +626,6 @@ export class GameEngine {
     });
     this.scene.add(this.bodyGroup);
 
-    this.buildTargets();
-
     this.addListeners();
 
     const items: HotbarItem[] = [];
@@ -1040,50 +1030,6 @@ export class GameEngine {
 
   // ------------------------------------------------------------ practice range
 
-  /** Shooting-range targets near spawn (wobble boards, from the voxel-fps). */
-  private buildTargets(): void {
-    const tex = targetTexture();
-    const cx = this.spawn.x - 0.5;
-    const cz = this.spawn.z - 0.5;
-    const spots: [number, number, number][] = [ // dx, dz, scale
-      [-5, -16, 1], [0, -17.5, 1], [5, -16, 1],
-      [-9, -26, 1.15], [3, -29, 1.15],
-      [-2, -40, 1.3], [12, -34, 1.3],
-      [-14, -34, 1.3],
-    ];
-    for (const [dx, dz, s] of spots) {
-      const x = Math.floor(cx + dx), z = Math.floor(cz + dz);
-      const gy = this.world.gen.heightAt(x, z) + 1;
-      const group = new THREE.Group();
-      group.position.set(x + 0.5, gy, z + 0.5);
-      // post
-      box(group, 0.14, 1.7, 0.14, 0, 0.85, 0, MATS.wood);
-      // board (raycastable)
-      const boardMat = new THREE.MeshLambertMaterial({ map: tex });
-      const woolMat = new THREE.MeshLambertMaterial({ map: MATS.skin.map });
-      const board = new THREE.Mesh(
-        new THREE.BoxGeometry(0.95 * s, 1.25 * s, 0.12),
-        [woolMat, woolMat, woolMat, woolMat, boardMat, boardMat]
-      );
-      board.position.y = 1.75 + s * 0.4;
-      group.add(board);
-      // cap
-      box(group, 0.2, 0.1, 0.2, 0, 1.72, 0, MATS.wood);
-      group.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.castShadow = true;
-          child.receiveShadow = true;
-        }
-      });
-      this.scene.add(group);
-      this.targets.push({
-        group, board, boardMat,
-        wobbleX: new Spring1(140, 6), wobbleZ: new Spring1(140, 6),
-        flash: 0,
-      });
-    }
-  }
-
   private hitTarget(t: Target, dir: THREE.Vector3) {
     t.wobbleX.impulse(THREE.MathUtils.clamp(-dir.y * 30, -8, 8) + THREE.MathUtils.randFloatSpread(4));
     t.wobbleZ.impulse(THREE.MathUtils.randFloatSpread(9));
@@ -1308,8 +1254,14 @@ export class GameEngine {
     let streamX = this.player.pos.x;
     let streamZ = this.player.pos.z;
     if (this.piloting && this.ship) {
-      streamX += this.ship.vel.x * 0.7;
-      streamZ += this.ship.vel.z * 0.7;
+      // Ensure the streaming center matches the spaceship's actual position,
+      // led slightly ahead by the velocity vector to build chunks in advance.
+      // The original code was using `this.player.pos` (which stays stationary at
+      // the boarding spot), causing a massive desync where the wrong terrain heightmap
+      // columns were generated and shifted, resulting in floating islands, holes,
+      // and sheared cliffs at high speed.
+      streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
+      streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
     }
     this.world.update(streamX, streamZ, dt > 0.024 ? 2.5 : 6);
     // toroidal rendering: pull every meshed chunk to its nearest-image copy
@@ -1350,38 +1302,52 @@ export class GameEngine {
       if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
     }
     this.sound.update(dt, this.sky.isDay);
-    this.applyUnderwaterFx();
 
     // ---- atmosphere: drive the shared fog uniforms from the sky ----
+    // (Underwater overrides run AFTER this so they win for the frame.)
     const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.08, 0.42);
     const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
     const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
 
-    // Fog colour tracks the sky by day, but at night it settles on a fixed
-    // cold mist instead. Following the sky at night is what produced the grey
-    // wash: the sky was being brightened by the moon glow, and the fog copied it.
-    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(NIGHT_MIST, nightFog);
-    FOG_UNIFORMS.uSkyFogColor.value.copy(FOG_UNIFORMS.uFogColor.value);
-    // Swallow the sky itself — stars and the moon dim out behind the murk
-    // rather than hanging crisply above a wall of fog.
-    FOG_UNIFORMS.uSkyFog.value = nightFog * 0.88;
+    // CRITICAL: fog colour MUST equal the sky background exactly, or distant
+    // terrain never dissolves into the sky (hard silhouettes). No night-mist
+    // offset — that desync is what left black ridges floating against a
+    // different-coloured sky.
+    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor);
+    FOG_UNIFORMS.uSkyFogColor.value.copy(this.sky.skyColor);
+    // Soft sky murk at night only (stars fade into the same sky colour).
+    FOG_UNIFORMS.uSkyFog.value = nightFog * 0.55;
 
     FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
     FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
       .sub(this.camera.position).normalize();
-    // Thick, low-lying mist. Falloff stays short at night so the soup hugs the
-    // ground and thins as you climb — classic horror-fog behaviour.
-    FOG_UNIFORMS.uFogDensity.value = 0.009 + nightFog * 0.05;
+
+    // Density + falloff. Night is thicker near the ground; day keeps a gentle
+    // atmospheric haze. Falloff is tall enough that flying still has fog.
+    FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.045;
     FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
-    FOG_UNIFORMS.uFogFalloff.value = 12 + this.sky.dayFactor * 16;
-    // In-scatter is a DAY effect (sun glare through haze). At night it was
-    // smearing near-white moon colour across the whole fog volume — the single
-    // biggest reason the old night looked washed out. Fade it to nearly zero.
-    FOG_UNIFORMS.uFogInscatter.value = 0.06 + this.sky.dayFactor * 0.8;
-    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(12, 3, nightFog);
-    const edge = C.VIEW_DISTANCE * C.CHUNK_SIZE;
-    FOG_UNIFORMS.uFarFogStart.value = edge - THREE.MathUtils.lerp(26, 56, nightFog);
-    FOG_UNIFORMS.uFarFogEnd.value = edge - THREE.MathUtils.lerp(4, 22, nightFog);
+    FOG_UNIFORMS.uFogFalloff.value = 28 + this.sky.dayFactor * 18;
+    // In-scatter is a DAY effect (sun glare through haze). Kill it at night
+    // so the moon never paints the fog white.
+    FOG_UNIFORMS.uFogInscatter.value = 0.04 + this.sky.dayFactor * 0.55;
+    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 2, nightFog);
+
+    // Far-fog ramp: dissolve terrain BEFORE the mesh cutoff. View radius is a
+    // CIRCLE of VIEW_DISTANCE chunks, so the farthest visible column is about
+    // (VIEW_DISTANCE+0.75)*CHUNK_SIZE (~92), not the axis-aligned 80. Ending
+    // the ramp short of that left hard silhouettes on the diagonal.
+    const maxRange = (C.VIEW_DISTANCE + 0.75) * C.CHUNK_SIZE;
+    const flyAmt = this.piloting
+      ? THREE.MathUtils.smoothstep(this.shipAltitude(), 10, 40)
+      : THREE.MathUtils.smoothstep(this.camera.position.y - this.world.gen.sea, 16, 46);
+    const blend = Math.max(nightFog, flyAmt);
+    // Start the dissolve earlier when flying/night; always hit full fog by ~0.9
+    // of the mesh radius so nothing hard remains against the sky.
+    FOG_UNIFORMS.uFarFogStart.value = THREE.MathUtils.lerp(maxRange * 0.48, maxRange * 0.32, blend);
+    FOG_UNIFORMS.uFarFogEnd.value = THREE.MathUtils.lerp(maxRange * 0.92, maxRange * 0.78, blend);
+
+    // Underwater wins last so background + fog stay a single deep-blue field.
+    this.applyUnderwaterFx();
 
     // ---- grass animation + distance LOD camera ----
     GRASS_TIME.value += dt;
@@ -2052,7 +2018,18 @@ export class GameEngine {
 
   /** submerged: swap the scene backdrop for deep-water blue */
   private applyUnderwaterFx(): void {
-    this.scene.background = this.player.headInWater ? UNDERWATER_FOG : this.sky.skyColor;
+    // Keep background and fog colour identical so underwater far-field also
+    // dissolves cleanly (same rule as the surface sky/fog lock).
+    if (this.player.headInWater) {
+      this.scene.background = UNDERWATER_FOG;
+      FOG_UNIFORMS.uFogColor.value.copy(UNDERWATER_FOG);
+      FOG_UNIFORMS.uSkyFogColor.value.copy(UNDERWATER_FOG);
+      FOG_UNIFORMS.uSkyFog.value = 0.92;
+      FOG_UNIFORMS.uFogDensity.value = Math.max(FOG_UNIFORMS.uFogDensity.value, 0.045);
+      FOG_UNIFORMS.uFogStart.value = 1.5;
+    } else {
+      this.scene.background = this.sky.skyColor;
+    }
   }
 
   // ------------------------------------------------------------ combat
@@ -2192,6 +2169,9 @@ export class GameEngine {
     const origin = this.camera.position.clone();
     const worldHit = this.world.raycast(origin, dir, 130);
     const enemyHit = this.enemies.raycast(origin, dir, 130);
+    // NOTE: alertNearby only re-points squads that are ALREADY in a firefight.
+    // Firing near a peaceful camp must not provoke it — a camp is only ever
+    // provoked by actually hitting one of its members (see below).
     this.enemies.alertNearby(origin, weaponId === 'sniper' ? 70 : 50);
 
     // practice-range boards
