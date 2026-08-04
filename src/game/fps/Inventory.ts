@@ -43,6 +43,15 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.CRAFTING_TABLE]: 'Crafting Table',
   [B.GLASS]: 'Glass',
   [B.FURNACE]: 'Furnace',
+  // gemstones (fps ids 50-57)
+  50: 'Ruby Ore',
+  51: 'Amber Ore',
+  52: 'Luminescence Ore',
+  53: 'Diamond Ore',
+  54: 'Gold Ore',
+  55: 'Silver Ore',
+  56: 'Jade Ore',
+  57: 'Emerald Ore',
 };
 
 export class Inventory {
@@ -252,6 +261,11 @@ export class Inventory {
     const arr = this.bank(ref);
     if (ref.isCraft && ref.index >= this.craftSize * this.craftSize) return null;
     return arr[ref.index] ?? null;
+  }
+
+  /** overwrite a slot in place (used by the furnace quick-move) */
+  setItem(ref: SlotRef, item: SlotItem | null): void {
+    this.bank(ref)[ref.index] = item;
   }
 
   /** would `item` fit without mutating anything? (used to gate crafting) */

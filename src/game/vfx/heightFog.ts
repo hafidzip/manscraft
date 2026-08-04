@@ -38,4 +38,14 @@ export const FOG_UNIFORMS = {
    */
   uFarFogStart: { value: 54 },
   uFarFogEnd: { value: 76 },
+  /**
+   * How strongly the *sky* itself is swallowed by the fog (0 = clear sky,
+   * 1 = the sky is solid mist). Sky pixels have no depth, so the height-fog
+   * integral can never touch them; without this the horizon dissolves into
+   * mist while the sky above stays perfectly clear, which instantly breaks
+   * the "socked-in" look on a foggy night.
+   */
+  uSkyFog: { value: 0 },
+  /** colour the sky is pushed toward as uSkyFog rises */
+  uSkyFogColor: { value: new THREE.Color(0x05070c) },
 };

@@ -5,9 +5,19 @@ import { BLOCK_COLORS, B, type WorldLike } from './World';
 import { Inventory } from './Inventory';
 import { AudioSynth } from './audio';
 import { buildAtlas, blockCubeGeometry } from './textures';
+import { minImageF } from '../core/constants';
 
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
+
+/**
+ * Seconds a fresh drop spends arcing out of the broken block before the
+ * magnet grabs it. Without this the item snaps to the player instantly and
+ * the satisfying "pop out of the voxel" moment is lost.
+ */
+const POP_TIME = 0.32;
+/** collection radius */
+const PICKUP_DIST = 0.95;
 
 export interface DroppedItem {
   mesh: THREE.Mesh;
@@ -82,32 +92,46 @@ export class ItemDropManager {
       const item = this.items[i];
       item.time += dt;
 
-      // Distance to player
-      tmpV.copy(playerPos).add(tmpV2.set(0, 0.8, 0)); // aim at torso
-      const d = item.pos.distanceTo(tmpV);
+      // ---- target: the player's torso, on the nearest toroidal image ----
+      // The world wraps every WORLD_SIZE blocks, so a drop left behind near
+      // the seam can be "500 blocks away" in raw coordinates while being a few
+      // steps away in reality. Rebase the item onto the image closest to the
+      // player so the magnet always takes the short way round.
+      tmpV.copy(playerPos).add(tmpV2.set(0, 0.8, 0));
+      const dx = minImageF(tmpV.x - item.pos.x);
+      const dz = minImageF(tmpV.z - item.pos.z);
+      item.pos.x = tmpV.x - dx;
+      item.pos.z = tmpV.z - dz;
 
-      // Magnetism toward player
-      if (d < 3.2) {
-        const pullSpeed = Math.min(12, (3.2 - d) * 6);
-        tmpV2.copy(tmpV).sub(item.pos).normalize().multiplyScalar(pullSpeed);
-        item.vel.lerp(tmpV2, dt * 8);
-        item.grounded = false;
-      } else if (!item.grounded) {
-        item.vel.y -= 14 * dt; // gravity
-      }
+      const dy = tmpV.y - item.pos.y;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-      // Physics integration
-      if (!item.grounded || d < 3.2) {
+      if (item.time < POP_TIME) {
+        // ---- pop phase: arc out of the block it came from ----
+        item.vel.y -= 14 * dt;
         item.pos.addScaledVector(item.vel, dt);
         const bx = Math.floor(item.pos.x);
         const by = Math.floor(item.pos.y - 0.11);
         const bz = Math.floor(item.pos.z);
-
-        if (this.world.solid(bx, by, bz) && item.vel.y < 0 && d >= 3.2) {
+        if (this.world.solid(bx, by, bz) && item.vel.y < 0) {
           item.pos.y = by + 1.12;
           item.vel.set(0, 0, 0);
-          item.grounded = true;
         }
+      } else {
+        // ---- magnet phase: unlimited range ----
+        // Speed ramps with distance so a drop across the map streaks back
+        // quickly, while a nearby one drifts in gently instead of overshooting.
+        item.grounded = false;
+        const pullSpeed = Math.min(60, 7 + d * 2.4);
+        if (d > 1e-4) {
+          tmpV2.set(dx / d, dy / d, dz / d).multiplyScalar(pullSpeed);
+          // snappier lerp when far away, softer on approach
+          item.vel.lerp(tmpV2, Math.min(1, dt * (d > 6 ? 14 : 9)));
+        }
+        // Terrain is ignored while homing: the item flies over/through the
+        // world straight to the player, so drops can never be stranded on a
+        // ledge, in a ravine, or behind a wall.
+        item.pos.addScaledVector(item.vel, dt);
       }
 
       // Visual spin and bobbing
@@ -116,7 +140,7 @@ export class ItemDropManager {
       item.mesh.rotation.y += dt * 3;
 
       // Collect when close
-      if (d < 0.95) {
+      if (d < PICKUP_DIST) {
         const added = this.inv.addBlock(item.blockId, 1);
         if (added) {
           this.audio.foley('snap');

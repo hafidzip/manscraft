@@ -14,6 +14,11 @@ import { TerrainGenerator } from './generator';
 import { buildChunkGeometry } from './mesher';
 import { raycastVoxel } from '../player/raycast';
 
+/** chunks examined per incremental eviction pass */
+const EVICT_SCAN_PER_PASS = 96;
+/** meshes/data blocks actually retired per pass (disposal is the expensive bit) */
+const EVICT_RETIRE_PER_PASS = 6;
+
 export interface ChunkMaterials {
   opaque: THREE.Material;
   cutout: THREE.Material;
@@ -60,6 +65,14 @@ export class World {
   private lastCenter = -1;
   private lastUnloadCheck = 0;
   private batchDepth = 0;
+  /** rolling cost (ms) of one re-mesh / one generate+mesh — drives the budget */
+  private meshCost = 1;
+  private loadCost = 2;
+  /** resumable cursor for the incremental eviction sweep */
+  private evictCursor = 0;
+  /** last camera position a full offset sync ran at */
+  private syncX = Infinity;
+  private syncZ = Infinity;
   /** latest camera position — drives nearest-image chunk placement */
   private camX = 8;
   private camZ = 8;
@@ -77,7 +90,12 @@ export class World {
   // ---- unified-game adapter surface (fps systems expect this API) ----
 
   solid(x: number, y: number, z: number): boolean {
-    return this.isSolid(x, y, z);
+    // Resident-only: AI sensing, pathfinding and collision must never force a
+    // synchronous chunk generation. Unloaded space reads as an impassable
+    // wall, exactly like the documented getBlockRaw contract.
+    const id = this.peekBlock(x, y, z);
+    if (id === -1) return true;
+    return DEFS[id].solid;
   }
 
   get(x: number, y: number, z: number): number {
@@ -88,11 +106,12 @@ export class World {
     this.setBlock(x, y, z, id);
   }
 
+  /** top non-air block of a column — O(1) via the cached column heights */
   highestY(x: number, z: number): number {
-    for (let y = H - 1; y >= 0; y--) {
-      if (this.getBlockRaw(x, y, z) !== B.AIR) return y;
-    }
-    return 0;
+    const px = Math.floor(wrapBlock(x));
+    const pz = Math.floor(wrapBlock(z));
+    const c = this.ensureData(Math.floor(px / S), Math.floor(pz / S));
+    return c.colH[(px % S) + (pz % S) * S];
   }
 
   /** fps-style raycast (DDA) — point/normal/block/dist surface */
@@ -259,12 +278,85 @@ export class World {
   mapColumn(wx: number, wz: number): MapColumn | null {
     const px = Math.floor(wrapBlock(wx));
     const pz = Math.floor(wrapBlock(wz));
-    const c = this.ensureData(Math.floor(px / S), Math.floor(pz / S));
+    const c = this.peekChunk(Math.floor(px / S), Math.floor(pz / S));
+    if (!c) return null; // unexplored — never generate terrain for the radar
     const i = (px % S) + (pz % S) * S;
     return { color: c.colC[i], height: c.colH[i], water: c.colW[i] === 1 };
   }
 
+  /**
+   * Batched minimap read. The radar samples n² columns every refresh; going
+   * through mapColumn() allocated one result object per pixel (~9k objects
+   * every 180 ms) and re-hashed the chunk map for each of them. This walks
+   * chunk-by-chunk instead: one lookup per 16-column run, zero allocation.
+   */
+  sampleMapRegion(
+    originX: number, originZ: number, n: number,
+    heights: Uint8Array, colors: Uint32Array, water: Uint8Array,
+  ): void {
+    let ck = -1;
+    let chunk: Chunk | null = null;
+    for (let sz = 0; sz < n; sz++) {
+      const pz = Math.floor(wrapBlock(originZ + sz));
+      const cz = Math.floor(pz / S);
+      const lz = (pz % S) * S;
+      for (let sx = 0; sx < n; sx++) {
+        const px = Math.floor(wrapBlock(originX + sx));
+        const cx = Math.floor(px / S);
+        const k = (cx << 5) | cz;
+        if (k !== ck) {
+          ck = k;
+          chunk = this.chunks.get(k) ?? null;
+        }
+        const o = sz * n + sx;
+        if (!chunk) {
+          heights[o] = 0;
+          colors[o] = 0;
+          water[o] = 0;
+          continue;
+        }
+        const i = (px % S) + lz;
+        heights[o] = chunk.colH[i];
+        colors[o] = chunk.colC[i];
+        water[o] = chunk.colW[i];
+      }
+    }
+  }
+
   // -------------------------------------------------------------- block I/O
+
+  /** resident chunk or undefined — never generates (memoized like ensureData) */
+  private peekChunk(rawCx: number, rawCz: number): Chunk | undefined {
+    const k = (wrapChunk(rawCx) << 5) | wrapChunk(rawCz);
+    if (k === this.memoKey && this.memoChunk) return this.memoChunk;
+    const c = this.chunks.get(k);
+    if (c) {
+      this.memoKey = k;
+      this.memoChunk = c;
+    }
+    return c;
+  }
+
+  /**
+   * Resident-only block read: -1 when the chunk is not loaded.
+   *
+   * This is the accessor every *gameplay* query must use (raycasts, AI
+   * sensing, collision, radar). getBlockRaw() generates missing chunks
+   * on demand, so a single stray query — an enemy line-of-sight ray 120
+   * blocks long, a rocket, or a radar pixel — used to synthesize whole
+   * chunks (terrain noise + trees + column cache + neighbour re-mesh)
+   * mid-frame. That was the main source of random multi-frame stalls
+   * while exploring.
+   */
+  peekBlock(wx: number, wy: number, wz: number): number {
+    if (wy < 0) return B.BEDROCK;
+    if (wy >= H) return B.AIR;
+    const px = Math.floor(wrapBlock(wx));
+    const pz = Math.floor(wrapBlock(wz));
+    const c = this.peekChunk(Math.floor(px / S), Math.floor(pz / S));
+    if (!c) return -1;
+    return c.data[chunkIndex(px % S, wy, pz % S)];
+  }
 
   /** raw block id, or -1 when its chunk is not loaded (x/z wrap toroidally) */
   getBlockRaw(wx: number, wy: number, wz: number): number {
@@ -388,6 +480,13 @@ export class World {
   syncChunkOffsets(camX: number, camZ: number): void {
     this.camX = camX;
     this.camZ = camZ;
+    // An offset only flips when the camera crosses a half-world boundary
+    // (256 blocks) relative to a chunk centre, so re-walking every resident
+    // chunk on every frame is pure overhead. Sub-block camera motion can
+    // never change the result.
+    if (Math.abs(camX - this.syncX) < 1 && Math.abs(camZ - this.syncZ) < 1) return;
+    this.syncX = camX;
+    this.syncZ = camZ;
     for (const c of this.chunks.values()) {
       if (!c.hasMesh) continue;
       const [ox, oz] = this.renderOffset(c.cx, c.cz);
@@ -428,62 +527,89 @@ export class World {
     const t0 = performance.now();
     let processed = 0;
 
-    while (this.dirtyQueue.length > 0 && performance.now() - t0 < budgetMs) {
+    // Cost-aware budgeting. The old loop only checked the clock *before*
+    // starting an item, so a single 20 ms chunk build could overrun a 6 ms
+    // budget by 3x and drop a frame. We now refuse to start an item unless
+    // the measured rolling cost of that kind of work still fits.
+    // `did*` guarantees forward progress: even if one item is measured as
+    // costing more than the whole budget we still retire one per call, so the
+    // queues can never deadlock (the loading screen drains through here too).
+    let now = t0;
+    let didMesh = false;
+    while (this.dirtyQueue.length > 0 && (!didMesh || now - t0 + this.meshCost <= budgetMs)) {
       const c = this.dirtyQueue.shift()!;
-      if (this.dirtySet.has(c)) this.buildMesh(c);
+      if (!this.dirtySet.has(c)) continue;
+      const s = now;
+      this.buildMesh(c);
+      now = performance.now();
+      this.meshCost = this.meshCost * 0.6 + (now - s) * 0.4;
+      didMesh = true;
     }
 
     const ccx = wrapChunk(Math.floor(wrapBlock(px) / S));
     const ccz = wrapChunk(Math.floor(wrapBlock(pz) / S));
     const centerKey = this.key(ccx, ccz);
-    if (this.loadQueue.length === 0 && centerKey !== this.lastCenter) {
-      this.rebuildLoadQueue(ccx, ccz);
-      this.lastCenter = centerKey;
-    } else if (this.loadQueue.length === 0 && this.lastCenter === -1) {
+    if (this.loadQueue.length === 0 && (centerKey !== this.lastCenter || this.lastCenter === -1)) {
       this.rebuildLoadQueue(ccx, ccz);
       this.lastCenter = centerKey;
     }
 
-    while (this.loadQueue.length > 0 && performance.now() - t0 < budgetMs) {
+    let didLoad = false;
+    while (this.loadQueue.length > 0 && (!didLoad || now - t0 + this.loadCost <= budgetMs)) {
       const item = this.loadQueue.shift()!;
+      const s = now;
       const c = this.ensureData(item.cx, item.cz);
       if (!c.hasMesh) {
         this.buildMesh(c);
         processed++;
       }
+      now = performance.now();
+      this.loadCost = this.loadCost * 0.6 + (now - s) * 0.4;
+      didLoad = true;
     }
 
-    // hysteresis eviction: meshes live out to EVICT_DISTANCE (no thrash at the
+    // Hysteresis eviction: meshes live out to EVICT_DISTANCE (no thrash at the
     // seam — crossing the boundary changes the resident set by one row, exactly
-    // like any interior chunk boundary)
-    if (t0 - this.lastUnloadCheck > 1200) {
+    // like any interior chunk boundary).
+    //
+    // Sweeping every chunk and disposing every stale mesh in one pass was a
+    // periodic ~1 Hz hitch. It now runs more often, resumes where it stopped
+    // (cursor over the map iterator) and caps how much it retires per pass.
+    if (t0 - this.lastUnloadCheck > 350) {
       this.lastUnloadCheck = t0;
-      for (const c of this.chunks.values()) {
-        if (!c.hasMesh) continue;
+      const lim2 = (EVICT_DISTANCE + 2) * (EVICT_DISTANCE + 2);
+      let scanned = 0;
+      let retired = 0;
+      const cursorStart = this.evictCursor;
+      let i = 0;
+      for (const [k, c] of this.chunks) {
+        // resume the sweep from where the previous pass left off
+        if (i++ < cursorStart) continue;
+        this.evictCursor = i;
+        if (++scanned > EVICT_SCAN_PER_PASS || retired >= EVICT_RETIRE_PER_PASS) break;
+
         // wrapped shortest-path distance on the torus
         const dx = wrapDelta(c.cx - ccx, WORLD_CHUNKS);
         const dz = wrapDelta(c.cz - ccz, WORLD_CHUNKS);
-        if (dx * dx + dz * dz > EVICT_DISTANCE * EVICT_DISTANCE) {
-          for (const m of c.meshes) {
-            this.group.remove(m);
-            m.geometry.dispose();
+        const d2 = dx * dx + dz * dz;
+        if (c.hasMesh) {
+          if (d2 > EVICT_DISTANCE * EVICT_DISTANCE) {
+            for (const m of c.meshes) {
+              this.group.remove(m);
+              m.geometry.dispose();
+            }
+            c.meshes.length = 0;
+            c.hasMesh = false;
+            retired++;
           }
-          c.meshes.length = 0;
-          c.hasMesh = false;
-        }
-      }
-      // modified chunks stay resident so player edits never vanish; others evict
-      const lim2 = (EVICT_DISTANCE + 2) * (EVICT_DISTANCE + 2);
-      for (const [k, c] of this.chunks) {
-        if (c.dirty) continue;
-        if (c.hasMesh) continue;
-        const dx = wrapDelta(c.cx - ccx, WORLD_CHUNKS);
-        const dz = wrapDelta(c.cz - ccz, WORLD_CHUNKS);
-        if (dx * dx + dz * dz > lim2) {
+        } else if (!c.dirty && d2 > lim2) {
+          // modified chunks stay resident so player edits never vanish
           this.chunks.delete(k);
           if (this.memoKey === k) { this.memoKey = -1; this.memoChunk = null; }
+          retired++;
         }
       }
+      if (i >= this.chunks.size) this.evictCursor = 0;
     }
 
     return processed;

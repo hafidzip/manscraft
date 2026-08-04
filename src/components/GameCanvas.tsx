@@ -4,13 +4,15 @@ import { themeFromPlanet, homeFromTheme, type PlanetHome } from '../game/space/t
 import { homeStar, homePlanet } from '../game/space/galaxy';
 import { HUD } from './HUD';
 import { Minimap } from './Minimap';
+import { Inventory } from '../game/fps/Inventory';
 
 interface GameCanvasProps {
   home?: PlanetHome | null;
   onEnterSpace?: (home: PlanetHome) => void;
+  persistentInventory?: Inventory | null;
 }
 
-export function GameCanvas({ home, onEnterSpace }: GameCanvasProps) {
+export function GameCanvas({ home, onEnterSpace, persistentInventory }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
 
@@ -58,6 +60,7 @@ export function GameCanvas({ home, onEnterSpace }: GameCanvasProps) {
         },
       },
       home ? themeFromPlanet(home.planet, home.star) : undefined,
+      persistentInventory ?? undefined,
     );
     engineRef.current = engine;
     engine.init().then(() => {

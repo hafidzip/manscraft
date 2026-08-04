@@ -23,6 +23,9 @@ const TILE_NAMES = [
   'craft_top', 'craft_side', 'craft_bottom',
   'furnace_front', 'furnace_front_lit', 'furnace_side', 'furnace_top',
   'cobble',
+  // gemstone ores
+  'ore_ruby', 'ore_amber', 'ore_luminescence', 'ore_diamond',
+  'ore_gold', 'ore_silver', 'ore_jade', 'ore_emerald',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -451,6 +454,97 @@ const PAINTERS: Partial<Record<string, Painter>> = {
         if (y === 12) return vary([70, 70, 74], 6, r);
       }
       return vary([124, 124, 128], 12, r);
+    }),
+
+  // ---- gemstone ores: stone base with colored crystal veins ----
+  ore_ruby: (img, r) =>
+    tileRegion(img, TILES.ore_ruby, (x, y) => {
+      // dark stone base
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // ruby crystals: deep red with bright highlights
+      const crystal = (x * 3 + y * 7) % 11 < 3 && r() < 0.5;
+      if (crystal) {
+        const bright = r() < 0.3;
+        return bright ? vary([255, 80, 90], 15, r) : vary([180, 30, 40], 12, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_amber: (img, r) =>
+    tileRegion(img, TILES.ore_amber, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // amber: warm orange-yellow, translucent look
+      const crystal = (x * 5 + y * 3) % 9 < 3 && r() < 0.45;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([255, 200, 60], 18, r) : vary([200, 140, 30], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_luminescence: (img, r) =>
+    tileRegion(img, TILES.ore_luminescence, (x, y) => {
+      if (r() < 0.08) return vary([52, 52, 58], 8, r);
+      // luminescence: pale blue-green glow crystals
+      const crystal = (x * 7 + y * 5) % 10 < 3 && r() < 0.5;
+      if (crystal) {
+        const bright = r() < 0.4;
+        return bright ? vary([140, 255, 220], 20, r) : vary([60, 180, 150], 16, r);
+      }
+      return vary([108, 108, 114], 14, r);
+    }),
+  ore_diamond: (img, r) =>
+    tileRegion(img, TILES.ore_diamond, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // diamond: cyan-blue sparkle
+      const crystal = (x * 4 + y * 6) % 10 < 3 && r() < 0.4;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([180, 240, 255], 18, r) : vary([80, 180, 220], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_gold: (img, r) =>
+    tileRegion(img, TILES.ore_gold, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // gold: rich yellow metallic flecks
+      const fleck = (x * 6 + y * 4) % 8 < 2 && r() < 0.5;
+      if (fleck) {
+        const bright = r() < 0.4;
+        return bright ? vary([255, 220, 80], 20, r) : vary([200, 160, 40], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_silver: (img, r) =>
+    tileRegion(img, TILES.ore_silver, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // silver: white-grey metallic
+      const fleck = (x * 5 + y * 7) % 9 < 2 && r() < 0.5;
+      if (fleck) {
+        const bright = r() < 0.4;
+        return bright ? vary([230, 235, 240], 15, r) : vary([170, 175, 180], 12, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_jade: (img, r) =>
+    tileRegion(img, TILES.ore_jade, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // jade: soft green with subtle variation
+      const crystal = (x * 4 + y * 5) % 9 < 3 && r() < 0.45;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([140, 220, 160], 16, r) : vary([70, 150, 90], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_emerald: (img, r) =>
+    tileRegion(img, TILES.ore_emerald, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      // emerald: deep vivid green
+      const crystal = (x * 6 + y * 4) % 10 < 3 && r() < 0.4;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([80, 255, 120], 18, r) : vary([30, 160, 80], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
     }),
 };
 

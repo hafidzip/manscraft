@@ -67,7 +67,10 @@ export function raycastVoxel(
     }
     if (t > maxDist) return null;
 
-    const id = world.getBlockRaw(x, y, z);
+    // Resident-only read: a long line-of-sight or projectile ray must never
+    // generate terrain mid-frame (see World.peekBlock). Unloaded space stops
+    // the ray, which is also the correct occlusion answer for AI sensing.
+    const id = world.peekBlock(x, y, z);
     if (id === -1) return null;
     if (id === B.AIR || isWaterId(id)) continue;
     const def = DEFS[id];

@@ -48,6 +48,8 @@ const FRAG = /* glsl */ `
   uniform float uFogStart;
   uniform float uFarFogStart;
   uniform float uFarFogEnd;
+  uniform float uSkyFog;
+  uniform vec3  uSkyFogColor;
   varying vec2 vUv;
 
   float viewZToDepth(float vz) {
@@ -71,7 +73,20 @@ const FRAG = /* glsl */ `
     //                    for robustness.
     //
     // In both cases return the raw sky colour with no fog applied.
-    if (depth <= 0.0001 || depth >= 0.9999) { gl_FragColor = base; return; }
+    if (depth <= 0.0001 || depth >= 0.9999) {
+      // Sky pixels carry no depth, so the height-fog integral below can never
+      // reach them. On a heavy-fog night that left a crisp starfield sitting
+      // above a wall of mist. uSkyFog drowns the sky in the same mist colour,
+      // fading hardest toward the horizon where the murk is thickest.
+      if (uSkyFog > 0.001) {
+        float horizon = 1.0 - smoothstep(0.5, 0.94, vUv.y);
+        float k = clamp(uSkyFog * mix(0.72, 1.0, horizon), 0.0, 1.0);
+        gl_FragColor = vec4(mix(base.rgb, uSkyFogColor, k), base.a);
+        return;
+      }
+      gl_FragColor = base;
+      return;
+    }
 
     // reconstruct world position from the packed depth
     vec4 ndc = vec4(vUv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);

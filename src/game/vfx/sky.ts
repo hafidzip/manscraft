@@ -11,7 +11,9 @@ import { mulberry32 } from '../core/noise';
 
 // base (earth-like) palette; per-planet tint blends on top of these
 const DAY_SKY_BASE = new THREE.Color(0x78a7ff);
-const NIGHT_SKY_BASE = new THREE.Color(0x05060d);
+// Deep, near-black and slightly cold. The night sky doubles as the fog colour,
+// so anything brighter than this turns the whole screen into grey milk.
+const NIGHT_SKY_BASE = new THREE.Color(0x04060b);
 const DUSK_SKY_BASE = new THREE.Color(0xff9a56);
 
 /** how strongly theme.skyHex pulls each band */
@@ -246,10 +248,18 @@ export class Sky {
     this.sun.color.copy(this.sunColor);
     // Day = sun is the direct light. Night = moon is the direct light.
     this.sun.intensity = day * 1.18;
-    this.moonColor.setHex(0x9fb8ff).lerp(this.tmp.setHex(0xc8d8ff), Math.min(1, moonFade * 0.35));
+    // Cold steel-blue moonlight. Anything near white reads as daylight and
+    // kills the mood the moment it hits pale terrain like snow or sand.
+    this.moonColor.setHex(0x7f9ad0).lerp(this.tmp.setHex(0x9fb6e6), Math.min(1, moonFade * 0.5));
     this.moon.color.copy(this.moonColor);
-    this.moon.intensity = moonFade * 0.42;
-    this.hemi.intensity = 0.18 + day * 0.66 + moonFade * 0.08;
+    // The moon is the key light at night — strong enough to carve out a lit
+    // side and cast shadows, but low absolute output so the world stays dark.
+    this.moon.intensity = moonFade * 0.95;
+    // Ambient collapses after dusk. This is what makes night READ as night:
+    // unlit faces fall to near-black instead of staying evenly grey.
+    this.hemi.intensity = 0.035 + day * 0.75;
+    // ground bounce goes cold and dark at night instead of warm dirt brown
+    this.hemi.groundColor.setHex(0x8a6f4d).lerp(this.tmp.setHex(0x0b1018), 1 - day);
     this.hemi.color.copy(this.daySky).lerp(this.tmp.setHex(0xbdd7ff), 0.25);
     this.sun.position.copy(camPos).addScaledVector(dir, 140);
     this.sun.target.position.copy(camPos);

@@ -1239,14 +1239,24 @@ function campRoster(s: CampSite, size: number): string[] {
 
 export interface EnemyHit { enemy: Enemy; point: THREE.Vector3; headshot: boolean; dist: number }
 
+/**
+ * Horizontal radius (blocks) inside which agents are simulated. Matches the
+ * evicted-terrain ring, so a dormant agent is by definition standing in
+ * chunks that are not resident.
+ */
+const SIM_RADIUS = 112;
+
 export class EnemyManager {
   enemies: Enemy[] = [];
   kills = 0;
   enabled = true;
+  /** reused per-frame list of simulated agents (separation pass) */
+  private activeScratch: Enemy[] = [];
   /** Stable read-out for Tasks 5/6: per-camp `cleared` + `site.cx/cz`. */
   camps: CampState[] = [];
   campsTotal = 0;
   campsCleared = 0;
+  /** true once the manager has ticked at least once */
   private primed = false;
   private scene: THREE.Object3D | null = null;
   private deps: EnemyDeps;
@@ -1268,7 +1278,8 @@ export class EnemyManager {
       return {
         site, build, squad: [], squadSize,
         roster: campRoster(site, squadSize),
-        respawnTimer: CAMP_MEMBER_RESPAWN,
+        // 0 = materialize the whole squad the first tick the player is in range
+        respawnTimer: 0,
         cleared: false, spawnedEver: false,
       };
     });
@@ -1278,33 +1289,59 @@ export class EnemyManager {
   }
 
   get aliveCount(): number {
-    return this.enemies.filter((e) => e.alive).length;
+    let n = 0;
+    for (let i = 0; i < this.enemies.length; i++) if (this.enemies[i].alive) n++;
+    return n;
   }
 
   update(dt: number) {
     if (!this.enabled) return;
-    if (!this.primed) { this.primed = true; for (const c of this.camps) this.spawnCamp(c); }
+    // Squads are no longer all materialized at once on the first tick: that
+    // built dozens of rigs (geometry + textures) and probed terrain across the
+    // whole planet in a single frame. respawnTick() now populates each camp
+    // the first time the player comes within simulation range.
+    if (!this.primed) this.primed = true;
 
     // A* is only used when line of sight is broken now, so a bigger budget
     // costs little and keeps blind pursuers moving on fresh routes.
     pathBudget.tokens = 5;
 
-    // update + cull
+    // ---- simulation culling ------------------------------------------------
+    // Every camp on the planet used to tick at full rate: three voxel LOS
+    // raycasts, swept-AABB physics and A* repaths per agent, for squads the
+    // player cannot even see. Worse, those queries reach into terrain that is
+    // not streamed in, which is what used to force mid-frame chunk builds.
+    // Agents outside the streamed ring go dormant (and stop rendering) until
+    // the player comes back.
+    const ppx = this.player.pos.x;
+    const ppz = this.player.pos.z;
+    const active = this.activeScratch;
+    active.length = 0;
+
     for (let i = this.enemies.length - 1; i >= 0; i--) {
-      const keep = this.enemies[i].update(dt, this.player);
+      const e = this.enemies[i];
+      const dx = wrapDelta(e.pos.x - ppx, WORLD_SIZE);
+      const dz = wrapDelta(e.pos.z - ppz, WORLD_SIZE);
+      if (e.alive && dx * dx + dz * dz > SIM_RADIUS * SIM_RADIUS) {
+        if (e.group.visible) e.group.visible = false;
+        continue;
+      }
+      if (!e.group.visible) e.group.visible = true;
+      const keep = e.update(dt, this.player);
       if (!keep) {
-        const g = this.enemies[i].group;
+        const g = e.group;
         g.parent?.remove(g);
         this.enemies.splice(i, 1);
+      } else if (e.alive) {
+        active.push(e);
       }
     }
     // separation — squadmates push apart so they never merge into one body,
     // but the shove is routed through collision so it can't force anyone
     // inside a wall (the old direct pos writes did exactly that)
-    for (let i = 0; i < this.enemies.length; i++) {
-      for (let j = i + 1; j < this.enemies.length; j++) {
-        const a = this.enemies[i], b = this.enemies[j];
-        if (!a.alive || !b.alive) continue;
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i], b = active[j];
         if (Math.abs(a.pos.y - b.pos.y) > 2) continue;   // different floors
         // cheap reject before the wrap math: squadmates that are nowhere
         // near each other dominate this O(n^2) pass
@@ -1431,8 +1468,24 @@ export class EnemyManager {
 
   /** per-camp: trickle dead members back, or repopulate a wiped camp */
   respawnTick(dt: number): void {
+    const ppx = this.player.pos.x;
+    const ppz = this.player.pos.z;
     for (const camp of this.camps) {
+      // Dormant camp: probing for standable ground calls highestY(), which
+      // *generates* terrain. Skipping out-of-range camps keeps the whole
+      // planet's garrison off the frame budget until the player closes in.
+      const cdx = wrapDelta(camp.site.cx - ppx, WORLD_SIZE);
+      const cdz = wrapDelta(camp.site.cz - ppz, WORLD_SIZE);
+      if (cdx * cdx + cdz * cdz > SIM_RADIUS * SIM_RADIUS) continue;
+
       for (let i = camp.squad.length - 1; i >= 0; i--) if (!camp.squad[i].alive) camp.squad.splice(i, 1);
+
+      // first approach: bring the whole squad up at once
+      if (!camp.spawnedEver && camp.squad.length === 0) {
+        camp.respawnTimer -= dt;
+        if (camp.respawnTimer <= 0) this.spawnCamp(camp);
+        continue;
+      }
 
       if (!camp.cleared && camp.spawnedEver && camp.squad.length === 0) {
         camp.cleared = true;

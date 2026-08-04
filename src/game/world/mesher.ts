@@ -53,6 +53,13 @@ const FACES: Face[] = [
 // Full occlusion (3 neighbours blocking) gives 0.68, not 0.55.
 const AO_SHADE = [0.68, 0.80, 0.91, 1.0];
 
+/**
+ * Flat-array index deltas for the six FACES directions, in the same order.
+ * chunkIndex(x, y, z) = (y * S + z) * S + x, so x steps by 1, z by S and
+ * y by S².
+ */
+const NEIGHBOR_STRIDE = [1, -1, S * S, -(S * S), S, -S];
+
 interface Bucket {
   pos: number[];
   nrm: number[];
@@ -118,9 +125,15 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
   for (let y = 0; y < H; y++) {
     for (let z = 0; z < S; z++) {
       for (let x = 0; x < S; x++) {
-        const id = data[chunkIndex(x, y, z)];
+        const idx = chunkIndex(x, y, z);
+        const id = data[idx];
         if (id === B.AIR) continue;
         const d = DEFS[id];
+        // Interior voxels (the overwhelming majority — only the 1-block shell
+        // of a chunk can reach into a neighbour) can read their six face
+        // neighbours straight out of `data` with constant strides, skipping
+        // the bounds-checked cross-chunk getter for every face test.
+        const interior = x > 0 && x < S - 1 && z > 0 && z < S - 1 && y > 0 && y < H - 1;
 
         if (d.cross) {
           if (id === B.TALLGRASS) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z);
@@ -216,7 +229,7 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
           const nx = x + f.dir[0];
           const ny = y + f.dir[1];
           const nz = z + f.dir[2];
-          const nid = localGet(nx, ny, nz);
+          const nid = interior ? data[idx + NEIGHBOR_STRIDE[fi]] : localGet(nx, ny, nz);
           if (nid === -1) continue;
           const nd = DEFS[nid];
 

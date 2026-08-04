@@ -4,7 +4,7 @@ import { mulberry32 } from './noise';
 
 const TILE = 32;          // pixels per tile
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 5;
+const ATLAS_ROWS = 7;     // grew from 5 to fit the 8 gemstone ore tiles
 
 function mkCanvas(w: number, h: number) {
   const c = document.createElement('canvas');
@@ -44,6 +44,9 @@ export const T = {
   LOG_TOP: 8, LEAVES: 9, CACTUS_SIDE: 10, CACTUS_TOP: 11,
   PLANK: 12, ORE: 13, COBBLE: 14, TARGET_WOOL: 15, CRAFT_TOP: 16, GLASS: 17,
   FURNACE: 18,
+  // gemstone ores (match the world-atlas gem set)
+  ORE_RUBY: 19, ORE_AMBER: 20, ORE_LUMI: 21, ORE_DIAMOND: 22,
+  ORE_GOLD: 23, ORE_SILVER: 24, ORE_JADE: 25, ORE_EMERALD: 26,
 } as const;
 
 let atlasTex: THREE.CanvasTexture | null = null;
@@ -181,6 +184,32 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 9, 11, 3, 3, '#e0f4fc');
     px(ox, oy, 18, 20, 4, 4, '#e0f4fc');
   });
+
+  // ---- gemstone ores: MC-style diamond clusters on a stone base ----
+  // dark = crystal body, lite = facet highlight, spark = 1px glint
+  const oreTile = (idx: number, seed: number, dark: string, lite: string, spark: string) => {
+    tile(idx, (ox, oy) => {
+      noisyTile(g, ox, oy, '#82858a', 12, seed, ['#75787d', '#8f9297']);
+      const rand = mulberry32(seed);
+      for (let i = 0; i < 6; i++) {
+        const x = 3 + Math.floor(rand() * 22), y = 3 + Math.floor(rand() * 22);
+        // diamond-shaped cluster (like MC ore blobs)
+        px(ox, oy, x + 1, y, 3, 1, dark);
+        px(ox, oy, x, y + 1, 5, 3, dark);
+        px(ox, oy, x + 1, y + 4, 3, 1, dark);
+        px(ox, oy, x + 1, y + 1, 2, 2, lite);
+        px(ox, oy, x + 2, y + 1, 1, 1, spark);
+      }
+    });
+  };
+  oreTile(T.ORE_RUBY,    401, '#b41e28', '#ff505a', '#ffb0b6');
+  oreTile(T.ORE_AMBER,   402, '#c88c1e', '#ffc83c', '#ffe9a8');
+  oreTile(T.ORE_LUMI,    403, '#2ea183', '#8cffe0', '#e2fff6');
+  oreTile(T.ORE_DIAMOND, 404, '#3c9cc8', '#b4f0ff', '#ffffff');
+  oreTile(T.ORE_GOLD,    405, '#c8a028', '#ffdc50', '#fff3b0');
+  oreTile(T.ORE_SILVER,  406, '#9aa0a6', '#e6ebf0', '#ffffff');
+  oreTile(T.ORE_JADE,    407, '#3f8a52', '#8cdc9f', '#d8ffe2');
+  oreTile(T.ORE_EMERALD, 408, '#178c46', '#50ff78', '#c8ffd8');
 
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
@@ -324,6 +353,18 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 11: return T.COBBLE;
     case 12: return T.TARGET_WOOL;
     case 13: return T.COBBLE; // BEDROCK
+    case 14: return T.CRAFT_TOP;
+    case 15: return T.GLASS;
+    case 16: return T.FURNACE;
+    // gemstone ores (world blocks mapped into fps inventory ids 50-57)
+    case 50: return T.ORE_RUBY;
+    case 51: return T.ORE_AMBER;
+    case 52: return T.ORE_LUMI;
+    case 53: return T.ORE_DIAMOND;
+    case 54: return T.ORE_GOLD;
+    case 55: return T.ORE_SILVER;
+    case 56: return T.ORE_JADE;
+    case 57: return T.ORE_EMERALD;
     default: return T.STONE;
   }
 }

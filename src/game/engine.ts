@@ -145,6 +145,14 @@ const LOAD_LABELS = [
 
 const UNDERWATER_FOG = new THREE.Color(0x0a2a5e);
 
+/**
+ * Colour of the night mist. Deliberately a hair above black: pure black fog
+ * hides everything and reads as a rendering bug, while anything lighter turns
+ * the screen into the grey milk the old night had. This value keeps silhouettes
+ * barely legible against the murk.
+ */
+const NIGHT_MIST = new THREE.Color(0x0a0e16);
+
 const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
 
@@ -154,6 +162,10 @@ const TO_FPS: Record<number, number> = {
   [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
   [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
   [B.COBBLE]: 11,
+  // gemstones map to unused high ids in the fps inventory
+  [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
+  [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
+  [B.ORE_JADE]: 56, [B.ORE_EMERALD]: 57,
 };
 const FROM_FPS: Record<number, number> = Object.fromEntries(
   Object.entries(TO_FPS).map(([k, v]) => [v, Number(k)])
@@ -189,7 +201,7 @@ export class GameEngine {
   private heldBlock!: HeldBlockTool;
   private toolMode: 'weapon' | 'laser' | 'block' | 'food' = 'weapon';
   /** unified inventory (voxel-fps): 6-slot hotbar + 3x9 storage */
-  public inventory = new Inventory();
+  public inventory!: Inventory;
   private enemiesEnabled = true;
   private triggerDown = false;
   private prevLeft = false;
@@ -208,6 +220,10 @@ export class GameEngine {
   private lastShadowX = 1e9;
   private lastShadowZ = 1e9;
   private lastSunElev = 1e9;
+  /** minimum seconds between two shadow-map re-renders */
+  private shadowCooldown = 0;
+  /** true while the moon is the scene's key (shadow-casting) light */
+  private moonIsKey = false;
   private inventoryOpen = false;
   private craftingOpen = false;
   /** every placed furnace's contents + burn state, keyed by block position */
@@ -217,6 +233,9 @@ export class GameEngine {
   private hitSeq = 0;
   private damageSeq = 0;
   private dmgAngle = 0;
+  private dmgFollowT = 0;
+  private lastDamageFrom = new THREE.Vector3();
+  private hasDamageFrom = false;
   private demolition = 0;
   private blocksMined = 0;
   private mineCharge = 0;
@@ -232,7 +251,6 @@ export class GameEngine {
   private eating = false;
   private eatT = 0;
   private biteAcc = 0;
-  private readT = 0;
   private hp = 100;
   private maxHp = 100;
   private invulnT = 0;
@@ -249,7 +267,6 @@ export class GameEngine {
 
   private aimPoint = new THREE.Vector3();
   private aimDir = new THREE.Vector3();
-  private sparkCd = 0;
 
   private input: InputState = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, crouch: false };
   private mouse = { left: false, right: false };
@@ -265,6 +282,7 @@ export class GameEngine {
   private highlight!: THREE.LineSegments;
   private crack!: THREE.Mesh;
   private crackMats: THREE.MeshBasicMaterial[] = [];
+  private blockGeomCache = new Map<number, THREE.BufferGeometry>();
 
   private spawn = new THREE.Vector3();
   private bob = 0;
@@ -281,8 +299,12 @@ export class GameEngine {
     private canvas: HTMLCanvasElement,
     private events: EngineEvents,
     theme?: PlanetTheme | null,
+    /** Optional persistent inventory (survives planet hops when provided) */
+    persistentInventory?: Inventory,
   ) {
     this.theme = theme ?? null;
+    // Use provided inventory or create fresh one
+    this.inventory = persistentInventory ?? new Inventory();
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
@@ -470,11 +492,17 @@ export class GameEngine {
     this.composer.addPass(new OutputPass());
 
     // ---- camera-mounted flashlight for night exploration ----
+    // Slightly warm, tighter cone: reads as a carried torch cutting through
+    // mist rather than a flat white wash.
     this.flashlight = new THREE.SpotLight(
-      0xe8f2ff, 0, 65, THREE.MathUtils.degToRad(48), 0.55, 1.6,
+      0xfff0d8, 0, 58, THREE.MathUtils.degToRad(42), 0.62, 1.5,
     );
-    this.flashlight.position.set(0.15, -0.32, -1.1);
-    this.flashlightTarget.position.set(0, -1.6, -30);
+    // Mounted BEHIND the eye (+z is backwards in view space). The old -1.1
+    // put the cone origin a block and a bit in front of the camera, so any
+    // wall closer than that fell entirely behind the spotlight and stayed
+    // pitch black while you were pressed against it.
+    this.flashlight.position.set(0.12, -0.16, 0.55);
+    this.flashlightTarget.position.set(0, -1.2, -30);
     this.camera.add(this.flashlight);
     this.camera.add(this.flashlightTarget);
     this.flashlight.target = this.flashlightTarget;
@@ -515,6 +543,14 @@ export class GameEngine {
     // park a ready-to-fly spaceship on nearby flat ground
     this.ship = new Spaceship(this.scene, this.world, this.particles);
     this.ship.placeNear(this.world.gen, sx, sz);
+    const startInShip = this.theme !== null;
+    if (startInShip) {
+      this.ship.enterAtmosphere(this.world.gen, this.spawn.x, this.spawn.z, this.player.yaw);
+      this.player.setSpawn(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
+      this.player.yaw = this.ship.yaw;
+      this.player.pitch = -0.16;
+      this.menuYaw = this.player.yaw;
+    }
 
     // ---- budgeted world preload with progress ----
     const total = World.cellsInRadius(C.VIEW_DISTANCE);
@@ -592,6 +628,7 @@ export class GameEngine {
     this.events.onReady(items, seed);
     this.selectSlot(2, true);
     this.events.onSelect(this.sel);
+    if (startInShip) this.boardShip();
 
     this.clock.start();
     this.renderer.setAnimationLoop(this.tick);
@@ -604,6 +641,9 @@ export class GameEngine {
   // ------------------------------------------------------- unified hotbar
 
   private blockGeometry(id: number): THREE.BufferGeometry {
+    const cached = this.blockGeomCache.get(id);
+    if (cached) return cached;
+
     const d = DEFS[id];
     const g = new THREE.BoxGeometry(0.19, 0.19, 0.19);
     const uv = g.attributes.uv as THREE.BufferAttribute;
@@ -617,6 +657,7 @@ export class GameEngine {
       }
     }
     uv.needsUpdate = true;
+    this.blockGeomCache.set(id, g);
     return g;
   }
 
@@ -805,6 +846,42 @@ export class GameEngine {
     this.events.onStats(this.buildStats());
   }
 
+  /**
+   * Minecraft shift-click semantics: clicking an inventory stack while the
+   * furnace is open routes the WHOLE stack to the correct slot automatically —
+   * smeltable items go to input, fuel goes to fuel (merging with same-type
+   * stacks up to 64). Returns false when the item fits neither slot.
+   */
+  furnaceQuickMove(ref: { isHotbar: boolean; isCraft?: boolean; index: number }): boolean {
+    const st = this.openFurnace;
+    if (!st) return false;
+    const inv = this.inventory;
+    const item = inv.getItem(ref);
+    if (!item || item.kind !== 'block') return false;
+
+    // smeltable wins when an item is somehow both (mirrors MC priority)
+    const target: 'input' | 'fuel' | null =
+      smeltResult(item.blockId) ? 'input' :
+      isFuel(item.blockId) ? 'fuel' : null;
+    if (!target) return false;
+
+    const cur = st[target];
+    if (cur && (cur.kind !== 'block' || cur.blockId !== item.blockId || cur.count >= 64)) return false;
+
+    const space = cur && cur.kind === 'block' ? 64 - cur.count : 64;
+    const n = Math.min(space, item.count);
+    if (n <= 0) return false;
+
+    if (cur && cur.kind === 'block') cur.count += n;
+    else st[target] = { kind: 'block', blockId: item.blockId, count: n };
+    item.count -= n;
+    if (item.count <= 0) inv.setItem(ref, null);
+
+    this.syncHotbarMode();
+    this.events.onStats(this.buildStats());
+    return true;
+  }
+
   /** advance every furnace; swap lit/unlit blocks as flames start and die */
   private updateFurnaces(dt: number): void {
     if (this.furnaces.size === 0) return;
@@ -907,6 +984,10 @@ export class GameEngine {
     this.target = null;
     this.breakT = 0;
     this.crack.visible = false;
+    // Do not build/push a full React HUD snapshot synchronously from the
+    // keydown handler. Slot changes can happen in bursts; the next animation
+    // tick will publish stats, keeping input responsive during weapon swaps.
+    this.statT = 0;
   }
 
   // ------------------------------------------------------------ practice range
@@ -1058,9 +1139,12 @@ export class GameEngine {
         else if (this.ship && this.ship.distanceTo(this.player.eye()) < 6) this.boardShip();
         break;
       default:
-        if (e.code.startsWith('Digit')) {
-          const n = parseInt(e.code.slice(5), 10);
-          if (n >= 1 && n <= 6) this.selectSlot(n - 1);
+        if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) {
+          const n = parseInt(e.code.replace('Digit', '').replace('Numpad', ''), 10);
+          if (n >= 1 && n <= 6) {
+            e.preventDefault();
+            this.selectSlot(n - 1);
+          }
         }
     }
   };
@@ -1145,6 +1229,7 @@ export class GameEngine {
 
     if (this.locked) this.tickPlay(dt);
     else this.tickMenuCamera(dt);
+    if (this.dmgFollowT > 0) this.dmgFollowT = Math.max(0, this.dmgFollowT - dt);
 
     // ---- break atmosphere: high enough -> hand off to the space scene ----
     // Runs in the main tick (not tickPilot) so it fires even if the pointer
@@ -1163,7 +1248,22 @@ export class GameEngine {
     this.textures.water.offset.y += dt * 0.006;
 
     this.fluid.update(dt);
-    this.world.update(this.player.pos.x, this.player.pos.z, 6);
+    // Streaming budget follows the frame clock: when a frame is already over
+    // budget (heavy combat, lots of VFX) the streamer backs off instead of
+    // stacking chunk builds on top of a frame that is running late.
+    //
+    // While flying, the ship covers ~28 blocks/s — a whole chunk every ~0.6s.
+    // Streaming around the ship's CURRENT column means the generator always
+    // reacts late, so chunks land in bursts right in front of the cockpit.
+    // Leading the stream centre along the velocity vector lets the ring build
+    // ahead of the hull instead of chasing it.
+    let streamX = this.player.pos.x;
+    let streamZ = this.player.pos.z;
+    if (this.piloting && this.ship) {
+      streamX += this.ship.vel.x * 0.7;
+      streamZ += this.ship.vel.z * 0.7;
+    }
+    this.world.update(streamX, streamZ, dt > 0.024 ? 2.5 : 6);
     // toroidal rendering: pull every meshed chunk to its nearest-image copy
     this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
     if (this.ship && !this.piloting) this.ship.updateParked(dt);
@@ -1171,43 +1271,96 @@ export class GameEngine {
     // moment a planet loads (including right after a space landing, before
     // the first pointer lock) and keep respawning through pause/death.
     // damagePlayer() already ignores hits while unlocked, piloting or dead.
-    this.enemies.update(dt);
+    //
+    // Cruising above the terrain is the exception: enemies cannot reach the
+    // ship, but flying drags the simulation radius across camp after camp, and
+    // every newly-entered camp builds a whole squad (rigs + generated canvas
+    // textures) inside one frame. That is the hitching felt while piloting
+    // even when the averaged FPS counter still reads 60.
+    if (!this.piloting || this.shipAltitude() < 26) this.enemies.update(dt);
     // furnaces smelt on the main clock so they keep cooking while the player
     // walks away or has the UI open
     this.updateFurnaces(dt);
     if (this.openFurnaceKey) this.events.onStats(this.buildStats());
     this.particles.update(dt);
     this.sky.update(dt, this.camera.position);
+    const moonAsKey = this.sky.dayFactor < 0.32;
+    if (moonAsKey !== this.moonIsKey) {
+      // NOTE: do NOT toggle `castShadow` here.
+      //
+      // `castShadow` feeds numDirLightsWithShadow, which is part of three.js's
+      // program cache key. Flipping it invalidates every cached shader, so the
+      // renderer recompiles EVERY material in the scene (hundreds of chunk
+      // meshes, enemy rigs, props) on a single frame — that was the multi-second
+      // freeze at dawn and dusk.
+      //
+      // Both lights keep castShadow = true for the whole session; the handover
+      // is purely an intensity cross-fade in Sky.update(). All we do here is
+      // force one shadow-map refresh so the new key light's depth is current.
+      this.moonIsKey = moonAsKey;
+      this.shadowCooldown = 0;
+      if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+    }
     this.sound.update(dt, this.sky.isDay);
     this.applyUnderwaterFx();
 
     // ---- atmosphere: drive the shared fog uniforms from the sky ----
-    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor);
+    const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.08, 0.42);
     const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
     const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
+
+    // Fog colour tracks the sky by day, but at night it settles on a fixed
+    // cold mist instead. Following the sky at night is what produced the grey
+    // wash: the sky was being brightened by the moon glow, and the fog copied it.
+    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(NIGHT_MIST, nightFog);
+    FOG_UNIFORMS.uSkyFogColor.value.copy(FOG_UNIFORMS.uFogColor.value);
+    // Swallow the sky itself — stars and the moon dim out behind the murk
+    // rather than hanging crisply above a wall of fog.
+    FOG_UNIFORMS.uSkyFog.value = nightFog * 0.88;
+
     FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
     FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
       .sub(this.camera.position).normalize();
-    FOG_UNIFORMS.uFogDensity.value = 0.010 + (1 - this.sky.dayFactor) * 0.016;
+    // Thick, low-lying mist. Falloff stays short at night so the soup hugs the
+    // ground and thins as you climb — classic horror-fog behaviour.
+    FOG_UNIFORMS.uFogDensity.value = 0.009 + nightFog * 0.05;
     FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
-    FOG_UNIFORMS.uFogFalloff.value = 16 + this.sky.dayFactor * 12;
-    FOG_UNIFORMS.uFogInscatter.value = 0.08 + this.sky.dayFactor * 0.78;
-    FOG_UNIFORMS.uFogStart.value = 12;
+    FOG_UNIFORMS.uFogFalloff.value = 12 + this.sky.dayFactor * 16;
+    // In-scatter is a DAY effect (sun glare through haze). At night it was
+    // smearing near-white moon colour across the whole fog volume — the single
+    // biggest reason the old night looked washed out. Fade it to nearly zero.
+    FOG_UNIFORMS.uFogInscatter.value = 0.06 + this.sky.dayFactor * 0.8;
+    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(12, 3, nightFog);
     const edge = C.VIEW_DISTANCE * C.CHUNK_SIZE;
-    FOG_UNIFORMS.uFarFogStart.value = edge - 26;
-    FOG_UNIFORMS.uFarFogEnd.value = edge - 4;
+    FOG_UNIFORMS.uFarFogStart.value = edge - THREE.MathUtils.lerp(26, 56, nightFog);
+    FOG_UNIFORMS.uFarFogEnd.value = edge - THREE.MathUtils.lerp(4, 22, nightFog);
 
     // ---- grass animation + distance LOD camera ----
     GRASS_TIME.value += dt;
     GRASS_CAM.value.copy(this.camera.position);
 
-    // ---- god rays: strongest at dawn/dusk, off at night ----
+    // ---- god rays: sun shafts by day, moonbeams after dark ----
+    // The pass used to track the sun unconditionally, so at night it aimed at
+    // a light that was below the horizon and faded to nothing — there was no
+    // way to ever see a moonbeam. Hand it the moon once the moon is the key.
     if (this.volumetricLight) {
-      this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
-      const elev = this.sky.sunElev;
-      const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
-      this.volumetricLight.intensity = angleFactor * 0.85;
-      this.volumetricLight.tint.copy(this.sky.sunColor);
+      if (moonAsKey) {
+        this.volumetricLight.lightWorldPosition.copy(this.sky.moonWorldPos);
+        const moonUp = THREE.MathUtils.clamp(-this.sky.sunElev, 0, 1);
+        // A faint cold shaft, nothing more. The emitter disc is also shrunk
+        // hard: at the sun's 85-unit size the additive sprite bloomed into the
+        // huge white halo that was swallowing the entire night sky.
+        this.volumetricLight.intensity = 0.05 + moonUp * 0.09;
+        this.volumetricLight.discScale = 18;
+        this.volumetricLight.tint.copy(this.sky.moonColor);
+      } else {
+        this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
+        const elev = this.sky.sunElev;
+        const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
+        this.volumetricLight.intensity = angleFactor * 0.85;
+        this.volumetricLight.discScale = 85;
+        this.volumetricLight.tint.copy(this.sky.sunColor);
+      }
     }
 
     // ---- bloom fades out at night so the dark scene stays clean ----
@@ -1219,7 +1372,10 @@ export class GameEngine {
     if (this.flashlight) {
       const canUse = !this.dead && !this.piloting;
       const nightAmt = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.05, 0.3);
-      this.flashlight.intensity = canUse ? nightAmt * 2.6 : 0;
+      // Ambient is near-zero at night now, so the torch carries the scene and
+      // needs real punch again — but the tight cone keeps it from flattening
+      // the mist the way the old wide 2.6 flood did.
+      this.flashlight.intensity = canUse ? nightAmt * 2.4 : 0;
     }
 
     // ---- celestial shadow: refresh only when the player or active light moves ----
@@ -1227,10 +1383,19 @@ export class GameEngine {
     const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
     const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
     const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087; // ~0.5°
-    if (this.renderer.shadowMap && (moved || lightMoved)) {
+    // A shadow refresh is a full extra depth pass over every chunk mesh.
+    // Sprinting crosses the 2-block threshold ~3x a second, and the sun test
+    // fires on its own cadence, so the two together were re-rendering the map
+    // far more often than the soft, low-frequency shadows actually need.
+    this.shadowCooldown -= dt;
+    if (this.renderer.shadowMap && (moved || lightMoved) && this.shadowCooldown <= 0) {
       this.lastShadowX = p.x;
       this.lastShadowZ = p.z;
       this.lastSunElev = activeElev;
+      // Flying crosses the 2-block trigger every frame, so the shadow map
+      // would re-render a full depth pass 5x a second while nothing on the
+      // ground is being inspected up close. Back it right off in the air.
+      this.shadowCooldown = this.piloting ? 0.75 : 0.2;
       this.renderer.shadowMap.needsUpdate = true;
     }
 
@@ -1262,6 +1427,7 @@ export class GameEngine {
   }
 
   private boardShip(): void {
+    this.ship.ensureClearance(0.35);
     this.piloting = true;
     // Stow EVERY camera child so nothing from the FPS kit rides along into
     // the chase cam or the space handoff: weapon rigs, the laser viewmodel,
@@ -1326,6 +1492,13 @@ export class GameEngine {
 
   /** snap the FP camera to the player's eye immediately (kills the stale
    *  chase-cam frame that showed the ship hull filling the screen on exit) */
+  /** height of the ship above the terrain column it is over (O(1)) */
+  private shipAltitude(): number {
+    if (!this.ship) return 0;
+    const gy = this.world.highestY(Math.floor(this.ship.pos.x), Math.floor(this.ship.pos.z));
+    return this.ship.pos.y - gy;
+  }
+
   private snapCameraToEye(): void {
     const eye = this.player.eye();
     this.camera.position.copy(eye);
@@ -1380,7 +1553,7 @@ export class GameEngine {
       this.ship.pos.y + 2.3 - fyy * dist,
       this.ship.pos.z - fz * dist
     );
-    this.flyCam.lerp(this.tmpCam, Math.min(1, 11 * dt));
+    this.flyCam.lerp(this.tmpCam, Math.min(1, 17 * dt));
 
     for (let i = 0; i < 16; i++) {
       if (!this.world.isSolid(
@@ -1415,8 +1588,9 @@ export class GameEngine {
     // Keep pooled VFX advancing while flying — otherwise any tracers/impacts
     // fired the instant we boarded (or by camps below) freeze mid-air and
     // pile up into the streaks seen crossing the cockpit view.
+    // (particles are stepped once by the main tick — stepping them here too
+    // ran the whole pool at double rate for every frame spent piloting.)
     this.fx.update(dt);
-    this.particles.update(dt);
   }
 
   private tickPlay(dt: number): void {
@@ -1603,88 +1777,97 @@ export class GameEngine {
     }
   }
 
+  /** laser mining: charge the beam, crack the block, break + drop it */
   private updateMining(dt: number): void {
     const active = this.toolMode === 'laser' && !this.dead;
+    const speed = this.player.horizontalSpeed();
+
     if (!active || !this.mouse.left || !this.target) {
       if (!this.target) this.crack.visible = false;
+      this.breakT = 0;
       this.mineCharge = Math.max(0, this.mineCharge - dt * 1.6);
-      this.laser.update(dt, { visible: active, firing: false, target: this.target ? this.aimPoint : null, charge: 0, speed: this.player.horizontalSpeed() });
+      this.laser.update(dt, {
+        visible: active, firing: false,
+        target: this.target ? this.aimPoint : null,
+        charge: 0, speed,
+      });
       return;
     }
+
     const d = DEFS[this.target.id];
     if (!isFinite(d.hardness)) {
       this.crack.visible = false;
-      this.laser.update(dt, { visible: true, firing: false, target: this.aimPoint, charge: 0, speed: this.player.horizontalSpeed() });
+      this.laser.update(dt, { visible: true, firing: false, target: this.aimPoint, charge: 0, speed });
       return; // bedrock
     }
 
+    this.mineCharge = Math.min(1, this.mineCharge + dt * 1.9);
+    this.breakT += dt / Math.max(0.05, d.hardness);
+
     this.digSoundT -= dt;
     if (this.digSoundT <= 0) {
-      this.digSoundT = 0.24;
-      this.sound.playDig(d.sound);
-    }
-
-    // laser sparks at the impact point
-    this.sparkCd -= dt;
-    if (this.sparkCd <= 0) {
-      this.sparkCd = 0.075;
+      this.digSoundT = 0.12;
+      this.fpsAudio.laserSizzle();
       this.particles.burst(
         this.aimPoint.x, this.aimPoint.y, this.aimPoint.z,
-        [...d.colors, 0xffe6b8, 0xff8a3c, 0xfff3df],
-        4, 2.4
+        d.colors, 2, 1.4,
       );
     }
 
-    this.breakT += dt / Math.max(0.05, d.hardness);
-    this.mineCharge = Math.min(1, this.breakT);
-    const stage = Math.min(4, Math.floor(this.breakT * 5));
-    this.crack.material = this.crackMats[stage];
-    this.crack.position.set(this.target.x + 0.5, this.target.y + 0.5, this.target.z + 0.5);
-    this.crack.visible = true;
-
     this.laser.update(dt, {
-      visible: true,
-      firing: true,
-      target: this.aimPoint,
-      charge: Math.min(1, this.breakT),
-      speed: this.player.horizontalSpeed(),
+      visible: true, firing: true, target: this.aimPoint,
+      charge: this.mineCharge, speed,
     });
 
-    if (this.breakT >= 1) {
-      const { x, y, z, id } = this.target;
-      this.world.setBlock(x, y, z, B.AIR);
-      this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
-      this.sound.playBreak(d.sound);
-      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
-      // a broken furnace spills its contents, like Minecraft
-      if (id === B.FURNACE || id === B.FURNACE_LIT) {
-        const k = furnaceKey(x, y, z);
-        const st = this.furnaces.get(k);
-        if (st) {
-          const drop = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
-          for (const it of [st.input, st.fuel, st.output]) {
-            if (it && it.kind === 'block') for (let n = 0; n < it.count; n++) this.itemDrops.spawn(it.blockId, drop);
-          }
-          this.furnaces.delete(k);
-          if (this.openFurnaceKey === k) this.closeFurnace();
-        }
-      }
-      this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
-      this.breakT = 0;
-      this.mineCharge = 0;
-      this.crack.visible = false;
-      this.target = null;
-      this.updateTarget();
+    // crack overlay stage
+    const stages = this.crackMats.length;
+    if (stages > 0) {
+      const stage = Math.min(stages - 1, Math.max(0, Math.floor(this.breakT * stages)));
+      this.crack.material = this.crackMats[stage];
+      this.crack.position.set(this.target.x + 0.5, this.target.y + 0.5, this.target.z + 0.5);
+      this.crack.visible = true;
     }
+
+    if (this.breakT < 1) return;
+
+    const { x, y, z, id } = this.target;
+    this.world.setBlock(x, y, z, B.AIR);
+    this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
+    this.sound.playBreak(d.sound);
+    this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    this.blocksMined++;
+
+    // a broken furnace spills its contents, like Minecraft
+    if (id === B.FURNACE || id === B.FURNACE_LIT) {
+      const k = furnaceKey(x, y, z);
+      const st = this.furnaces.get(k);
+      if (st) {
+        const drop = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+        for (const it of [st.input, st.fuel, st.output]) {
+          if (it && it.kind === 'block') {
+            for (let n = 0; n < it.count; n++) this.itemDrops.spawn(it.blockId, drop);
+          }
+        }
+        this.furnaces.delete(k);
+        if (this.openFurnaceKey === k) this.closeFurnace();
+      }
+    }
+
+    this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    this.breakT = 0;
+    this.mineCharge = 0;
+    this.crack.visible = false;
+    this.target = null;
   }
 
-  private playerIntersectsBlock(bx: number, by: number, bz: number): boolean {
+  /** would a solid block at (x,y,z) overlap the player's own collider? */
+  private playerIntersectsBlock(x: number, y: number, z: number): boolean {
     const p = this.player.pos;
     const hw = C.PLAYER_HALF_WIDTH;
     return (
-      bx + 1 > p.x - hw && bx < p.x + hw &&
-      by + 1 > p.y && by < p.y + C.PLAYER_HEIGHT &&
-      bz + 1 > p.z - hw && bz < p.z + hw
+      x + 1 > p.x - hw && x < p.x + hw &&
+      y + 1 > p.y && y < p.y + this.player.height &&
+      z + 1 > p.z - hw && z < p.z + hw
     );
   }
 
@@ -1736,61 +1919,38 @@ export class GameEngine {
     }
 
     this.heldFood.visible = true;
-    this.readT += dt;
-
-    // base MC first-person hold pose (lower-right, tilted)
-    const baseX = 0.40, baseY = -0.46, baseZ = -0.56;
+    const baseX = 0.38, baseY = -0.32, baseZ = -0.52;
     const baseRX = 0.35, baseRY = -0.55, baseRZ = 0.25;
 
-    // hold RMB to eat — release cancels instantly (exactly like Minecraft)
-    if (this.mouse.right && this.locked) {
-      if (!this.eating) {
-        this.eating = true;
-        this.eatT = 0;
-        this.biteAcc = 0;
-      }
-    } else if (this.eating) {
+    if (!this.mouse.right) {
       this.eating = false;
-      this.eatT = 0;
+      this.eatT = Math.max(0, this.eatT - dt * 2);
       this.biteAcc = 0;
+    } else {
+      this.eating = true;
+      this.eatT += dt;
+      this.biteAcc += dt;
     }
 
-    if (!this.eating) {
-      // idle sway (subtle walk bob when moving)
-      const bob = Math.min(1, this.player.speedSmooth / 5);
-      const swx = Math.sin(this.readT * 4.5) * 0.004 * (0.35 + bob);
-      const swy = -Math.abs(Math.cos(this.readT * 4.5)) * 0.005 * (0.35 + bob);
-      this.heldFood.position.set(baseX + swx, baseY + swy, baseZ);
-      this.heldFood.rotation.set(baseRX, baseRY, baseRZ);
-      return;
-    }
-
-    // ---- Minecraft eating animation (32 ticks / 1.6s) ----
-    const EAT_DUR = 1.6;
-    this.eatT += dt;
-    this.biteAcc += dt;
-    const p = Math.min(1, this.eatT / EAT_DUR);
-
-    // ease-in rise toward the mouth (first 20%)
-    const rise = Math.min(1, p / 0.2);
-    const riseE = rise * rise * (3 - 2 * rise);
-
-    // 4Hz chomp: abs(sin) gives the "jab up, fall down" triangle bob
-    const raw = Math.sin(this.eatT * 4.0 * Math.PI * 2);
-    const chomp = Math.abs(raw);
-    const chompDir = raw >= 0 ? 1 : -1;
+    const EAT_TIME = 1.6;
+    const p = Math.min(1, this.eatT / EAT_TIME);
+    const riseE = this.eating ? Math.min(1, this.eatT * 4) : p;
+    const chomp = this.eating ? Math.abs(Math.sin(this.eatT * Math.PI * 4)) : 0;
+    const chompDir = Math.sin(this.eatT * Math.PI * 4) >= 0 ? 1 : -1;
     const amp = 0.026 + p * 0.018;
 
     this.heldFood.position.set(
-      baseX - riseE * 0.07,                    // slide toward center
-      baseY + riseE * 0.11 + chomp * amp,      // jab up toward the mouth
-      baseZ + riseE * 0.06 - chomp * 0.012
+      baseX - riseE * 0.07,
+      baseY + riseE * 0.11 + chomp * amp,
+      baseZ + riseE * 0.06 - chomp * 0.012,
     );
     this.heldFood.rotation.set(
-      baseRX + riseE * 0.25 + chomp * 0.35,   // tip forward into mouth
+      baseRX + riseE * 0.25 + chomp * 0.35,
       baseRY + riseE * 0.2,
-      baseRZ + chompDir * chomp * 0.12        // roll wobble per chomp
+      baseRZ + chompDir * chomp * 0.12,
     );
+
+    if (!this.eating) return;
 
     // bite SFX + crumb particles every ~0.25s (one per chomp cycle)
     if (this.biteAcc > 0.25) {
@@ -1804,14 +1964,11 @@ export class GameEngine {
         this.fx.spawnParticle(
           mouth,
           new THREE.Vector3(
-            (Math.random() - 0.5) * 1.8,
-            -0.5 + Math.random() * 1.2,
-            (Math.random() - 0.5) * 1.8
+            (Math.random() - 0.5) * 1.2,
+            -0.4 - Math.random() * 0.6,
+            (Math.random() - 0.5) * 1.2,
           ),
-          [0xa05a28, 0xc87838, 0x7a4018, 0xd89850, 0xe8e0c8][i % 5],
-          0.015 + Math.random() * 0.018,
-          0.35 + Math.random() * 0.3,
-          true
+          0xc08050, 0.016 + Math.random() * 0.012, 0.5, true,
         );
       }
     }
@@ -1820,6 +1977,7 @@ export class GameEngine {
     if (p >= 1) {
       this.eating = false;
       this.eatT = 0;
+      this.biteAcc = 0;
       this.inventory.consumeAt({ isHotbar: true, index: this.sel });
       const food = FOODS[item.foodId];
       this.hp = Math.min(this.maxHp, this.hp + (food?.heal ?? 10));
@@ -1828,32 +1986,54 @@ export class GameEngine {
       for (let i = 0; i < 8; i++) {
         this.fx.spawnParticle(
           head,
-          new THREE.Vector3((Math.random() - 0.5) * 2.2, Math.random() * 1.5, (Math.random() - 0.5) * 2.2),
-          [0xa05a28, 0xc87838, 0xe8e0c8][i % 3],
-          0.02 + Math.random() * 0.02, 0.5 + Math.random() * 0.3, true
+          new THREE.Vector3(
+            (Math.random() - 0.5) * 1.6,
+            -0.2 - Math.random() * 0.8,
+            (Math.random() - 0.5) * 1.6,
+          ),
+          0xd8a86a, 0.018, 0.6, true,
         );
       }
-      this.syncHotbarMode();
+      this.selectSlot(this.sel, true);
+      this.statT = 0;
     }
   }
 
+  /** submerged: swap the scene backdrop for deep-water blue */
+  private applyUnderwaterFx(): void {
+    this.scene.background = this.player.headInWater ? UNDERWATER_FOG : this.sky.skyColor;
+  }
+
   // ------------------------------------------------------------ combat
+
+  /**
+   * Recompute the HUD hit chevron from the attacker's WORLD position against
+   * the player's CURRENT yaw. Storing a baked view-space angle at hit time
+   * made the arrow point the wrong way as soon as the player turned.
+   */
+  private updateDamageBearing(): void {
+    if (!this.hasDamageFrom) return;
+    const p = this.player.pos;
+    const dx = C.minImageF(this.lastDamageFrom.x - p.x);
+    const dz = C.minImageF(this.lastDamageFrom.z - p.z);
+    const yaw = this.player.yaw;
+    const fwd = dx * -Math.sin(yaw) + dz * -Math.cos(yaw);
+    const right = dx * Math.cos(yaw) + dz * -Math.sin(yaw);
+    if (fwd !== 0 || right !== 0) this.dmgAngle = Math.atan2(right, fwd);
+  }
 
   private damagePlayer(dmg: number, from: THREE.Vector3): void {
     if (this.dead || this.invulnT > 0 || !this.locked || this.piloting) return;
     this.hp = Math.max(0, this.hp - dmg);
     this.damageSeq++;
-    // bearing of the attacker in view space (minimum-image across the torus
-    // seam) so the HUD chevron points back at the shooter
-    const p = this.player.pos;
-    const dx = C.minImageF(from.x - p.x);
-    const dz = C.minImageF(from.z - p.z);
-    const yaw = this.player.yaw;
-    const fwd = (dx * -Math.sin(yaw) + dz * -Math.cos(yaw));
-    const right = (dx * Math.cos(yaw) + dz * -Math.sin(yaw));
-    if (fwd !== 0 || right !== 0) this.dmgAngle = Math.atan2(right, fwd);
+    this.lastDamageFrom.copy(from);
+    this.hasDamageFrom = true;
+    this.dmgFollowT = 1.2;
+    this.updateDamageBearing();
+    this.statT = 0;
     this.fpsAudio.hurt();
     this.player.addShake(0.012);
+
     if (this.hp <= 0) {
       // attacker position arrives in wrapped torus space; image it next to
       // the (unbounded) player so the death camera topples the right way
@@ -1863,54 +2043,70 @@ export class GameEngine {
         from.y,
         p.z + C.minImageF(from.z - p.z),
       );
-      this.killPlayer(img);
-    }
-  }
-
-  private killPlayer(from?: THREE.Vector3): void {
-    this.dead = true;
-    this.deadTimer = 0;
-    if (this.toolMode === 'weapon') {
+      this.dead = true;
+      this.deadTimer = 0;
       this.weapons.startDeath();
       this.spawnDroppedWeapon();
-    }
-    this.fpsAudio.playerDie();
-    // begin the collapse — the camera topples away from the killer
-    this.player.startDeath(from);
-    const head = this.camera.position.clone();
-    for (let i = 0; i < 16; i++) {
-      this.fx.spawnParticle(
-        head,
-        new THREE.Vector3((Math.random() - 0.5) * 4, Math.random() * 3, (Math.random() - 0.5) * 4),
-        [0xd0342c, 0x8e1f18, 0x5c1410][i % 3],
-        0.04 + Math.random() * 0.04, 0.9 + Math.random() * 0.5, true
-      );
+      this.fpsAudio.playerDie();
+      this.player.startDeath(img);
+      const head = this.camera.position.clone();
+      for (let i = 0; i < 16; i++) {
+        this.fx.spawnParticle(
+          head,
+          new THREE.Vector3(
+            (Math.random() - 0.5) * 3,
+            Math.random() * 2,
+            (Math.random() - 0.5) * 3,
+          ),
+          0xd0342c, 0.03 + Math.random() * 0.03, 0.8, true,
+        );
+      }
     }
   }
 
-  /** Clone the current viewmodel into the world so it tumbles to the dirt. */
-  private spawnDroppedWeapon() {
-    const rig = this.weapons.rig;
-    const gun = rig.gun.clone(true);
-    const wp = new THREE.Vector3();
-    const wq = new THREE.Quaternion();
-    rig.gun.getWorldPosition(wp);
-    rig.gun.getWorldQuaternion(wq);
-    gun.position.copy(wp);
-    gun.quaternion.copy(wq);
-    gun.scale.set(1, 1, 1);
+  private respawn(): void {
+    this.dead = false;
+    this.deadTimer = 0;
+    this.hp = this.maxHp;
+    this.invulnT = 1.5;
+    this.hasDamageFrom = false;
+    this.dmgFollowT = 0;
+    if (this.droppedGun) {
+      this.scene.remove(this.droppedGun.mesh);
+      this.droppedGun = null;
+    }
+    this.player.resetDeath();
+    this.player.setSpawn(this.spawn.x, this.spawn.y, this.spawn.z);
+    this.player.pitch = 0;
+    this.weapons.resetDeath();
+    this.selectSlot(this.sel, true);
+    this.snapCameraToEye();
+    this.statT = 0;
+  }
+
+  /** the held firearm falls out of the hands as a world prop on death */
+  private spawnDroppedWeapon(): void {
+    const gun = this.weapons.rig.gun.clone(true);
     gun.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) { m.castShadow = true; m.frustumCulled = true; }
     });
+    gun.position.copy(this.camera.position);
+    gun.scale.setScalar(1);
     this.scene.add(gun);
 
     const fwd = new THREE.Vector3();
     this.camera.getWorldDirection(fwd);
     this.droppedGun = {
       mesh: gun,
-      vel: fwd.multiplyScalar(1.5).add(new THREE.Vector3((Math.random() - 0.5) * 0.9, 1.1, (Math.random() - 0.5) * 0.9)),
-      spin: new THREE.Vector3((Math.random() - 0.5) * 7, (Math.random() - 0.5) * 7, (Math.random() - 0.5) * 7),
+      vel: fwd.multiplyScalar(1.5).add(
+        new THREE.Vector3((Math.random() - 0.5) * 0.9, 1.1, (Math.random() - 0.5) * 0.9),
+      ),
+      spin: new THREE.Vector3(
+        (Math.random() - 0.5) * 7,
+        (Math.random() - 0.5) * 7,
+        (Math.random() - 0.5) * 7,
+      ),
       settled: false,
     };
   }
@@ -1923,12 +2119,13 @@ export class GameEngine {
     g.mesh.rotation.x += g.spin.x * dt;
     g.mesh.rotation.y += g.spin.y * dt;
     g.mesh.rotation.z += g.spin.z * dt;
+
     const bx = Math.floor(g.mesh.position.x);
     const by = Math.floor(g.mesh.position.y - 0.06);
     const bz = Math.floor(g.mesh.position.z);
     if (this.world.solid(bx, by, bz) && g.vel.y < 0) {
-      g.mesh.position.y = by + 1.07;
-      g.vel.y *= -0.3;
+      g.mesh.position.y = by + 1.06;
+      g.vel.y *= -0.28;
       g.vel.x *= 0.5; g.vel.z *= 0.5;
       g.spin.multiplyScalar(0.42);
       this.fpsAudio.foley('grab');
@@ -1936,55 +2133,40 @@ export class GameEngine {
         g.settled = true;
         g.vel.set(0, 0, 0);
         g.spin.set(0, 0, 0);
-        g.mesh.rotation.x = 0;   // lie flat on the ground
-        g.mesh.rotation.z = 0;
       }
     }
-  }
-
-  private respawn(): void {
-    this.dead = false;
-    this.deadTimer = 0;
-    this.hp = this.maxHp;
-    this.invulnT = 2;
-    this.player.resetDeath();
-    this.player.setSpawn(this.spawn.x, this.spawn.y, this.spawn.z);
-    this.player.yaw = Math.PI / 4;
-    this.player.pitch = 0;
-    this.weapons.resetDeath();
-    if (this.droppedGun) { this.scene.remove(this.droppedGun.mesh); this.droppedGun = null; }
-    this.mineCharge = 0;
-    this.eating = false;
-    this.eatT = 0;
-    this.enemies.clear(this.scene);
-    this.selectSlot(this.sel, true);
   }
 
   private fireShot(muzzle: THREE.Vector3, dir: THREE.Vector3, weaponId: string): void {
     const origin = this.camera.position.clone();
     const worldHit = this.world.raycast(origin, dir, 130);
-    this.enemies.alertNearby(origin, weaponId === 'sniper' ? 70 : 50);
     const enemyHit = this.enemies.raycast(origin, dir, 130);
+    this.enemies.alertNearby(origin, weaponId === 'sniper' ? 70 : 50);
 
-    // practice targets (raycast boards)
-    let targetHit: { t: Target; dist: number; point: THREE.Vector3 } | null = null;
+    // practice-range boards
     this.raycaster.set(origin, dir);
     this.raycaster.far = 130;
+    let targetHit: { t: Target; point: THREE.Vector3; dist: number } | null = null;
     for (const t of this.targets) {
       const hits = this.raycaster.intersectObject(t.board, false);
-      if (hits.length) {
-        const h = hits[0];
-        if (!targetHit || h.distance < targetHit.dist) targetHit = { t, dist: h.distance, point: h.point.clone() };
+      if (hits.length > 0 && (!targetHit || hits[0].distance < targetHit.dist)) {
+        targetHit = { t, point: hits[0].point.clone(), dist: hits[0].distance };
       }
     }
 
-    const useEnemy = enemyHit && (!worldHit || enemyHit.dist < worldHit.dist - 0.05) && (!targetHit || enemyHit.dist < targetHit.dist - 0.05);
-    const useTarget = !useEnemy && targetHit && (!worldHit || targetHit.dist < worldHit.dist - 0.05);
-    const end = useEnemy ? enemyHit!.point : useTarget ? targetHit!.point : worldHit ? worldHit.point : origin.clone().addScaledVector(dir, 130);
+    const wd = worldHit ? worldHit.dist : Infinity;
+    const ed = enemyHit ? enemyHit.dist : Infinity;
+    const td = targetHit ? targetHit.dist : Infinity;
+    const useEnemy = !!enemyHit && ed <= wd && ed <= td;
+    const useTarget = !useEnemy && !!targetHit && td <= wd;
 
-    const muzzleBone = this.weapons.rig.muzzle;
-    this.fx.tracer(muzzle, end, muzzleBone);
-    this.fx.muzzleFlash(muzzle, weaponId === 'sniper' ? 1.6 : 1, muzzleBone);
+    const end = useEnemy ? enemyHit!.point.clone()
+      : useTarget ? targetHit!.point.clone()
+      : worldHit ? worldHit.point.clone()
+      : origin.clone().addScaledVector(dir, 130);
+
+    this.fx.muzzleFlash(muzzle, 0.5);
+    this.fx.tracer(muzzle, end);
 
     if (useEnemy) {
       const eh = enemyHit!;
@@ -1994,6 +2176,7 @@ export class GameEngine {
     } else if (useTarget) {
       this.hitTarget(targetHit!.t, dir);
       this.fx.puff(targetHit!.point, dir.clone().negate(), 0.25, 0.5, '#ffffff');
+      this.targetsHit++;
     } else if (worldHit) {
       this.fx.impact(worldHit.point, worldHit.normal, worldHit.block);
       if ((worldHit.block === B.STONE || worldHit.block === B.GRAVEL) && Math.random() < 0.3) {
@@ -2022,37 +2205,25 @@ export class GameEngine {
       drops++;
       this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
     });
+
     if (destroyed > 0) {
       this.demolition += destroyed;
       this.enemies.notifyWorldChanged(pos, 34);
-      for (let i = 0; i < Math.min(14, destroyed); i++) {
-        this.fx.spawnParticle(
-          pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 2, Math.random(), (Math.random() - 0.5) * 2)),
-          new THREE.Vector3((Math.random() - 0.5) * 9, 4 + Math.random() * 8, (Math.random() - 0.5) * 9),
-          0xd8cd9c, 0.08 + Math.random() * 0.06, 0.9 + Math.random() * 0.6, true
-        );
-      }
     }
+
     this.fpsAudio.explosion(dist);
     this.player.addShake(THREE.MathUtils.clamp(0.05 - dist * 0.0022, 0.004, 0.05));
+    if (dist < 6.5) this.damagePlayer(Math.round((1 - dist / 6.5) * 42), pos);
   }
 
   // ------------------------------------------------------------------- misc
 
-  private applyUnderwaterFx(): void {
-    const fog = this.scene.fog as THREE.Fog | null;
-    if (!fog) return;
-    if (this.player.headInWater) {
-      fog.color.copy(UNDERWATER_FOG);
-      fog.near = 1;
-      fog.far = 20;
-    }
-  }
-
   private reportStats(dt: number): void {
     this.statT -= dt;
     if (this.statT > 0) return;
-    this.statT = 0.25;
+    // While the damage chevron is on screen it has to track the player's yaw,
+    // so the HUD is refreshed far more often for that short window.
+    this.statT = this.dmgFollowT > 0 ? 0.05 : 0.25;
     this.events.onStats(this.buildStats());
   }
 
@@ -2063,16 +2234,10 @@ export class GameEngine {
    * flashes for a beat before the inventory arrives.
    */
   private buildStats(): HudStats {
+    this.updateDamageBearing();
     const p = this.player.pos;
-    let shipAlt = 0;
-    if (this.piloting && this.ship) {
-      for (let y = Math.floor(this.ship.pos.y); y > 0; y--) {
-        if (this.world.isSolid(Math.floor(this.ship.pos.x), y, Math.floor(this.ship.pos.z))) {
-          shipAlt = Math.round(this.ship.pos.y - y);
-          break;
-        }
-      }
-    }
+    const shipAlt = this.piloting && this.ship ? Math.max(0, Math.round(this.shipAltitude())) : 0;
+
     const selItem = this.inventory.hotbar[this.sel] ?? null;
     const weaponId =
       selItem && selItem.kind === 'weapon' ? selItem.weaponId :
@@ -2086,6 +2251,7 @@ export class GameEngine {
       selItem && (selItem.kind === 'block' || selItem.kind === 'food') ? selItem.count :
       this.toolMode === 'weapon' ? this.weapons.ammoInfo.ammo : -1;
     const mag = this.toolMode === 'weapon' ? this.weapons.ammoInfo.mag : selItem && selItem.kind === 'block' ? 64 : 0;
+
     return {
       fps: Math.round(this.fps),
       x: Math.floor(C.wrapBlock(p.x)),
@@ -2156,6 +2322,14 @@ export class GameEngine {
     return this.player;
   }
 
+  getCamps(): { x: number; z: number; cleared: boolean }[] {
+    return this.enemies.camps.map((c) => ({
+      x: c.site.cx,
+      z: c.site.cz,
+      cleared: c.cleared,
+    }));
+  }
+
   dispose(): void {
     this.disposed = true;
     this.renderer.setAnimationLoop(null);
@@ -2168,6 +2342,8 @@ export class GameEngine {
     this.volumetricLight?.dispose();
     this.composer?.dispose();
     this.composerRT?.dispose();
+    for (const g of this.blockGeomCache.values()) g.dispose();
+    this.blockGeomCache.clear();
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments || o instanceof THREE.Points) {
         o.geometry.dispose();
@@ -2177,12 +2353,5 @@ export class GameEngine {
       }
     });
     this.renderer.dispose();
-  }
-  getCamps(): { x: number; z: number; cleared: boolean }[] {
-    return this.enemies.camps.map((c) => ({
-      x: c.site.cx,
-      z: c.site.cz,
-      cleared: c.cleared,
-    }));
   }
 }

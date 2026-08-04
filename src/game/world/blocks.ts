@@ -29,6 +29,19 @@ export const B = {
   FURNACE: 18,
   FURNACE_LIT: 19,
   COBBLE: 20,
+  // NOTE: ids 24-38 are reserved for the dynamic water encoding
+  // (WATER_FLOW_BASE=24..30, WATER_FALL_BASE=31..38). Gemstone ores MUST live
+  // clear of that range, otherwise isWaterId() treats them as flowing water
+  // and they render/simulate as random water blocks.
+  // gemstone ores (40-47)
+  ORE_RUBY: 40,
+  ORE_AMBER: 41,
+  ORE_LUMINESCENCE: 42,
+  ORE_DIAMOND: 43,
+  ORE_GOLD: 44,
+  ORE_SILVER: 45,
+  ORE_JADE: 46,
+  ORE_EMERALD: 47,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -181,6 +194,40 @@ DEFS[B.FURNACE_LIT] = def({
   icon: TILES.furnace_front_lit,
   hardness: 1.2, sound: 'stone',
   colors: [0x7c7c80, 0xffa028, 0xe45818, 0xffd65c],
+});
+
+// ---- gemstone ores: harder than stone, valuable drops ----
+DEFS[B.ORE_RUBY] = def({
+  name: 'Ruby Ore', top: TILES.ore_ruby, hardness: 2.5, sound: 'stone',
+  colors: [0xb41e28, 0xff505a, 0x7a7a80],
+});
+DEFS[B.ORE_AMBER] = def({
+  name: 'Amber Ore', top: TILES.ore_amber, hardness: 2.0, sound: 'stone',
+  colors: [0xc88c1e, 0xffc83c, 0x7a7a80],
+});
+DEFS[B.ORE_LUMINESCENCE] = def({
+  name: 'Luminescence Ore', top: TILES.ore_luminescence, hardness: 3.0, sound: 'stone',
+  colors: [0x3cb496, 0x8cffe0, 0x6a6a70],
+});
+DEFS[B.ORE_DIAMOND] = def({
+  name: 'Diamond Ore', top: TILES.ore_diamond, hardness: 3.5, sound: 'stone',
+  colors: [0x50b4dc, 0xb4f0ff, 0x7a7a80],
+});
+DEFS[B.ORE_GOLD] = def({
+  name: 'Gold Ore', top: TILES.ore_gold, hardness: 2.8, sound: 'stone',
+  colors: [0xc8a028, 0xffdc50, 0x7a7a80],
+});
+DEFS[B.ORE_SILVER] = def({
+  name: 'Silver Ore', top: TILES.ore_silver, hardness: 2.5, sound: 'stone',
+  colors: [0xaab0b4, 0xe6ebf0, 0x7a7a80],
+});
+DEFS[B.ORE_JADE] = def({
+  name: 'Jade Ore', top: TILES.ore_jade, hardness: 2.8, sound: 'stone',
+  colors: [0x46965a, 0x8cdc9f, 0x7a7a80],
+});
+DEFS[B.ORE_EMERALD] = def({
+  name: 'Emerald Ore', top: TILES.ore_emerald, hardness: 3.2, sound: 'stone',
+  colors: [0x1ea050, 0x50ff78, 0x7a7a80],
 });
 
 /** hotbar pseudo-item: the water bucket (not a placeable block id) */

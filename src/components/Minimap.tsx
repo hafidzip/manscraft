@@ -99,6 +99,14 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
     ctx.imageSmoothingEnabled = false;
 
     const img = ctx.createImageData(SAMPLES, SAMPLES);
+    // Reused sample buffers: the radar reads 9,216 columns per refresh, which
+    // used to allocate one result object per pixel (~50k short-lived objects a
+    // second). The world now fills these typed arrays in one chunk-ordered
+    // pass, so the refresh is allocation-free.
+    const heights = new Uint8Array(SAMPLES * SAMPLES);
+    const colors = new Uint32Array(SAMPLES * SAMPLES);
+    const water = new Uint8Array(SAMPLES * SAMPLES);
+
     const t = setInterval(() => {
       const engine = engineRef.current;
       const world = engine?.getWorld();
@@ -109,38 +117,38 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
       const pz = Math.floor(player.pos.z);
       const d = img.data;
 
-      for (let sy = 0; sy < SAMPLES; sy++) {
-        for (let sx = 0; sx < SAMPLES; sx++) {
-          const col = world.mapColumn(px + sx - HALF, pz + sy - HALF);
-          const i = (sy * SAMPLES + sx) * 4;
-          if (!col || col.height <= 0) {
-            // unexplored
-            d[i] = 13;
-            d[i + 1] = 19;
-            d[i + 2] = 28;
-            d[i + 3] = 255;
-            continue;
-          }
-          let r = (col.color >> 16) & 255;
-          let g = (col.color >> 8) & 255;
-          let b = col.color & 255;
-          // relief shading by altitude
-          const f = 0.6 + 0.5 * Math.min(1, Math.max(0, (col.height - 12) / 46));
-          r *= f;
-          g *= f;
-          b *= f;
-          if (col.water) {
-            // depth tint: sink toward deep navy below sea level
-            const deep = Math.min(1, Math.max(0, (SEA_LEVEL - col.height) / 12));
-            r = r * (1 - deep) + 18 * deep;
-            g = g * (1 - deep) + 40 * deep;
-            b = Math.min(255, b * (1 - deep * 0.5) + 90 * deep);
-          }
-          d[i] = r;
-          d[i + 1] = g;
-          d[i + 2] = b;
-          d[i + 3] = 255;
+      world.sampleMapRegion(px - HALF, pz - HALF, SAMPLES, heights, colors, water);
+
+      for (let s = 0; s < heights.length; s++) {
+        const i = s * 4;
+        const height = heights[s];
+        d[i + 3] = 255;
+        if (height <= 0) {
+          // unexplored
+          d[i] = 13;
+          d[i + 1] = 19;
+          d[i + 2] = 28;
+          continue;
         }
+        const color = colors[s];
+        let r = (color >> 16) & 255;
+        let g = (color >> 8) & 255;
+        let b = color & 255;
+        // relief shading by altitude
+        const f = 0.6 + 0.5 * Math.min(1, Math.max(0, (height - 12) / 46));
+        r *= f;
+        g *= f;
+        b *= f;
+        if (water[s]) {
+          // depth tint: sink toward deep navy below sea level
+          const deep = Math.min(1, Math.max(0, (SEA_LEVEL - height) / 12));
+          r = r * (1 - deep) + 18 * deep;
+          g = g * (1 - deep) + 40 * deep;
+          b = Math.min(255, b * (1 - deep * 0.5) + 90 * deep);
+        }
+        d[i] = r;
+        d[i + 1] = g;
+        d[i + 2] = b;
       }
 
       // compose: clipped circle, scaled pixel grid, overlay ring glow

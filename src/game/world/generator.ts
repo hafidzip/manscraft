@@ -34,6 +34,14 @@ import { Biome, BIOME_DEFS, pickBiome } from './biomes';
 const TREE_SALT = 0x5eed;
 const W = WORLD_SIZE; // world edge length in blocks
 
+/**
+ * Densest tree roll any biome can pass. The tree pass visits 400 columns per
+ * chunk; testing this constant first rejects ~95% of them with one hash and
+ * zero terrain-field work.
+ */
+const MAX_TREE_DENSITY = Object.values(BIOME_DEFS)
+  .reduce((m, d) => Math.max(m, d.trees), 0);
+
 /** Structural subset of TASK 4's PlanetTheme that terrain cares about.
  *  Index signature keeps it assignable from the full space/palettes type. */
 export interface PlanetTheme {
@@ -140,25 +148,39 @@ export class TerrainGenerator {
     };
   }
 
-  biomeAt(x: number, z: number): Biome {
-    if (this.forced !== null) return this.forced;
-    const px = wrapBlock(x);
-    const pz = wrapBlock(z);
-    const { temp, humid } = this.climate(px, pz);
-    const { mount, cont } = this.fields(px, pz);
-    return pickBiome(temp, humid, mount, cont);
-  }
+  // ---------------------------------------------------------- column memo
+  // `fields()` + `climate()` cost ~21 noise octaves per column, and both
+  // heightAt() and biomeAt() used to evaluate them independently — so one
+  // chunk paid for ~1,300 full field evaluations (256 terrain columns + 400
+  // tree-margin columns, each sampled twice). That single hotspot produced
+  // the multi-frame hitches when the streamer activated a new chunk.
+  //
+  // The world torus is only 512×512 columns, so we memoize the *entire*
+  // column field in two flat typed arrays (768 KB). Every later query —
+  // re-meshing, camps, AI ground snapping, spawn scans, revisiting a chunk
+  // after eviction — becomes a single array read.
+  private colHeight: Int16Array | null = null;
+  private colBiome: Uint8Array | null = null;
 
-  biomeDefAt(x: number, z: number) {
-    return BIOME_DEFS[this.biomeAt(x, z)];
-  }
+  private computeColumn(px: number, pz: number): number {
+    let hCache = this.colHeight;
+    let bCache = this.colBiome;
+    if (!hCache || !bCache) {
+      hCache = this.colHeight = new Int16Array(W * W).fill(-1);
+      bCache = this.colBiome = new Uint8Array(W * W);
+    }
+    const k = pz * W + px;
+    const cached = hCache[k];
+    if (cached >= 0) return k;
 
-  heightAt(x: number, z: number): number {
-    const px = wrapBlock(x);
-    const pz = wrapBlock(z);
     const f = this.fields(px, pz);
-    const { temp, humid } = this.climate(px, pz);
-    const bDef = BIOME_DEFS[this.forced ?? pickBiome(temp, humid, f.mount, f.cont)];
+    let biome: Biome;
+    if (this.forced !== null) biome = this.forced;
+    else {
+      const { temp, humid } = this.climate(px, pz);
+      biome = pickBiome(temp, humid, f.mount, f.cont);
+    }
+    const bDef = BIOME_DEFS[biome];
 
     let h = this.base + f.cont * 6;                // continent raise
     if (f.cont < -0.18) h += (f.cont + 0.18) * 22; // descend into ocean basins
@@ -169,7 +191,24 @@ export class TerrainGenerator {
     const m = smoothstep(0.55, 0.86, f.mount);
     if (m > 0) h += this.mountAmp * (m * m * 26 + m * f.hills * 3 + m * Math.abs(f.pv) * 7);
 
-    return Math.max(3, Math.min(H - 16, Math.floor(h)));
+    hCache[k] = Math.max(3, Math.min(H - 16, Math.floor(h)));
+    bCache[k] = biome;
+    return k;
+  }
+
+  biomeAt(x: number, z: number): Biome {
+    if (this.forced !== null) return this.forced;
+    const k = this.computeColumn(wrapBlock(x), wrapBlock(z));
+    return this.colBiome![k] as Biome;
+  }
+
+  biomeDefAt(x: number, z: number) {
+    return BIOME_DEFS[this.biomeAt(x, z)];
+  }
+
+  heightAt(x: number, z: number): number {
+    const k = this.computeColumn(wrapBlock(x), wrapBlock(z));
+    return this.colHeight![k];
   }
 
   /**
@@ -266,6 +305,53 @@ export class TerrainGenerator {
           for (let y = h + 1; y <= this.sea; y++) data[chunkIndex(lx, y, lz)] = B.WATER;
         }
 
+        // ---- gemstone ore generation: each gem has its own depth range ----
+        // deeper = rarer and more valuable. Uses deterministic per-column hash
+        // so ores are stable across chunk reloads.
+        for (let y = 2; y < Math.min(h, H - 8); y++) {
+          if (data[chunkIndex(lx, y, lz)] !== B.STONE) continue;
+          const oreRoll = this.decoHash(0x07e0 + y, px, pz);
+          // Luminescence (rarest, deepest): Y 2-15
+          if (y <= 15 && oreRoll < 0.008) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_LUMINESCENCE;
+            continue;
+          }
+          // Diamond: Y 5-20
+          if (y <= 20 && y >= 5 && oreRoll < 0.012) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_DIAMOND;
+            continue;
+          }
+          // Emerald: Y 8-25
+          if (y <= 25 && y >= 8 && oreRoll < 0.010) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_EMERALD;
+            continue;
+          }
+          // Ruby: Y 10-30
+          if (y <= 30 && y >= 10 && oreRoll < 0.014) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_RUBY;
+            continue;
+          }
+          // Gold: Y 15-35
+          if (y <= 35 && y >= 15 && oreRoll < 0.016) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_GOLD;
+            continue;
+          }
+          // Jade: Y 18-40
+          if (y <= 40 && y >= 18 && oreRoll < 0.018) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_JADE;
+            continue;
+          }
+          // Silver: Y 20-45
+          if (y <= 45 && y >= 20 && oreRoll < 0.020) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_SILVER;
+            continue;
+          }
+          // Amber (most common, shallowest): Y 25-50
+          if (y <= 50 && y >= 25 && oreRoll < 0.022) {
+            data[chunkIndex(lx, y, lz)] = B.ORE_AMBER;
+          }
+        }
+
         // decorations on dry land
         if (!underwater) {
           const r = this.decoHash(0xdec0, px, pz);
@@ -284,20 +370,26 @@ export class TerrainGenerator {
     }
 
     // trees: canonical coords in a 2-block margin -> stable across chunks & the seam
+    // The cheap deterministic hash gate runs FIRST: >95% of the 400 margin
+    // columns are rejected before any terrain field is touched, and the
+    // setter closure is hoisted out of the loop instead of being rebuilt for
+    // every trunk.
+    const set = this.makeSetter(data, baseX, baseZ);
     for (let tx = -2; tx < S + 2; tx++) {
       for (let tz = -2; tz < S + 2; tz++) {
         const px = wrapBlock(baseX + tx);
         const pz = wrapBlock(baseZ + tz);
+        const roll = hash2(this.seed ^ TREE_SALT, px, pz);
+        if (roll >= MAX_TREE_DENSITY) continue;
         const biome = this.biomeAt(px, pz);
         const bDef = BIOME_DEFS[biome];
         if (!bDef.tree || bDef.trees <= 0) continue;
-        if (hash2(this.seed ^ TREE_SALT, px, pz) >= bDef.trees) continue;
+        if (roll >= bDef.trees) continue;
         const h = this.heightAt(px, pz);
         if (h <= this.sea + 1) continue;
         const surface = this.surfaceBlock(biome, h);
         // never place trees on snowy ground (snow block, snow cap, or taiga floor)
         if (surface !== B.GRASS) continue;
-        const set = this.makeSetter(data, baseX, baseZ);
         if (bDef.tree === 'spruce') this.placeSpruce(set, px, h, pz);
         else this.placeOak(set, px, h, pz);
       }

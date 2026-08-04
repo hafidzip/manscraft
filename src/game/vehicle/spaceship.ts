@@ -164,12 +164,7 @@ export class Spaceship {
         const a = (i / 8) * Math.PI * 2;
         const x = cx + Math.cos(a) * r;
         const z = cz + Math.sin(a) * r;
-        const h00 = gen.heightAt(x - 2, z - 2);
-        const h11 = gen.heightAt(x + 2, z + 2);
-        const h10 = gen.heightAt(x - 2, z + 2);
-        const h01 = gen.heightAt(x + 2, z - 2);
-        const maxH = Math.max(h00, h11, h10, h01);
-        const minH = Math.min(h00, h11, h10, h01);
+        const { minH, maxH } = this.footprintHeights(gen, x, z);
         if (minH <= 31) continue; // water or beach
         const cost = (maxH - minH) * 4 + Math.abs(r - 10);
         if (cost < best) {
@@ -178,16 +173,31 @@ export class Spaceship {
           bz = z;
           // collision-box floor is pos.y - 0.1; park ABOVE the tallest block
           // so the hull never starts embedded in terrain
-          this.pos.set(bx, maxH + 1.25, bz);
+          this.pos.set(bx, maxH + 1.35, bz);
           if (maxH - minH === 0) r = 99; // flat spot found
         }
       }
     }
     if (!isFinite(best)) {
-      this.pos.set(cx + 7, gen.heightAt(cx + 7, cz + 3) + 1.25, cz + 3);
+      const x = cx + 7;
+      const z = cz + 3;
+      this.pos.set(x, this.footprintHeights(gen, x, z).maxH + 1.35, z);
     }
     this.baseY = this.pos.y;
     this.yaw = Math.random() * Math.PI * 2;
+    this.sync();
+  }
+
+  /** start a planet approach already airborne and seated in the ship */
+  enterAtmosphere(gen: TerrainGenerator, cx: number, cz: number, yaw: number): void {
+    const h = this.footprintHeights(gen, cx, cz).maxH;
+    this.pos.set(cx, Math.min(155, Math.max(118, h + 86)), cz);
+    this.baseY = this.pos.y;
+    this.yaw = yaw;
+    this.vel.set(0, 0, 0);
+    this.pitchVis = -0.08;
+    this.flyPitch = -0.08;
+    this.bank = 0;
     this.sync();
   }
 
@@ -200,6 +210,37 @@ export class Spaceship {
     out.add(this.pos);
     out.y += Math.sin(-lookPitch) * 0.1; // tiny cockpit feel
     return out;
+  }
+
+  private footprintHeights(gen: TerrainGenerator, cx: number, cz: number): { minH: number; maxH: number } {
+    let minH = Infinity;
+    let maxH = -Infinity;
+    for (let x = Math.floor(cx - HX); x <= Math.ceil(cx + HX); x += 2) {
+      for (let z = Math.floor(cz - HZ); z <= Math.ceil(cz + HZ); z += 2) {
+        const h = gen.heightAt(x, z);
+        if (h < minH) minH = h;
+        if (h > maxH) maxH = h;
+      }
+    }
+    return { minH, maxH };
+  }
+
+  private footprintGroundY(): number {
+    let gy = 0;
+    for (let x = Math.floor(this.pos.x - HX); x <= Math.ceil(this.pos.x + HX); x += 2) {
+      for (let z = Math.floor(this.pos.z - HZ); z <= Math.ceil(this.pos.z + HZ); z += 2) {
+        gy = Math.max(gy, this.world.highestY(x, z));
+      }
+    }
+    return gy;
+  }
+
+  /** lift the full collision hull above terrain before boarding/parking */
+  ensureClearance(margin = 0.25): void {
+    const safeY = this.footprintGroundY() + 1.1 + margin;
+    if (this.pos.y < safeY) this.pos.y = safeY;
+    this.baseY = Math.max(this.baseY, this.pos.y);
+    this.sync();
   }
 
   private sync(): void {
@@ -215,12 +256,10 @@ export class Spaceship {
    * hull doesn't hang over the freshly restored first-person camera.
    */
   settleHere(): void {
-    // find ground under the current position and rest just above it
-    let gy = 2;
-    for (let y = Math.min(Math.floor(this.pos.y), 200); y > 1; y--) {
-      if (this.world.solid(Math.floor(this.pos.x), y, Math.floor(this.pos.z))) { gy = y + 1; break; }
-    }
-    this.pos.y = Math.max(gy + HY + 0.1, Math.min(this.pos.y, gy + HY + 1.4));
+    // Rest above the highest terrain under the full hull footprint. Center-only
+    // probing let wings/belly dip into slopes when boarding or disembarking.
+    const gy = this.footprintGroundY();
+    this.pos.y = Math.max(gy + 1.35, Math.min(this.pos.y, gy + HY + 1.4));
     this.baseY = this.pos.y;
     this.vel.set(0, 0, 0);
     this.pitchVis = 0;
@@ -255,12 +294,15 @@ export class Spaceship {
     this.bobT += dt;
 
     // ship heading chases camera orbit with lag -> weighty turns, visible banking
+    // Response rates: the old lag values (5/6/6) read as input latency —
+    // the hull kept drifting after the mouse stopped, which feels like a
+    // framerate problem even at a locked 60fps.
     let dyaw = orbitYaw - this.yaw;
     dyaw = ((dyaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-    this.yaw += dyaw * Math.min(1, 5 * dt);
-    this.flyPitch += (orbitPitch - this.flyPitch) * Math.min(1, 6 * dt);
+    this.yaw += dyaw * Math.min(1, 10 * dt);
+    this.flyPitch += (orbitPitch - this.flyPitch) * Math.min(1, 11 * dt);
     const targetPitchVis = this.flyPitch * 0.35;
-    this.pitchVis += (targetPitchVis - this.pitchVis) * Math.min(1, 6 * dt);
+    this.pitchVis += (targetPitchVis - this.pitchVis) * Math.min(1, 9 * dt);
 
     // thrust follows the SHIP heading (motion matches the hull)
     const cy = this.yaw;

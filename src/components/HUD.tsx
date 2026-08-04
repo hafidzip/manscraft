@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { GameEngine, HotbarItem, HudStats } from '../game/engine';
 import { RECIPES, RECIPE_GROUPS, matchCraft, recipeIngredients, type Recipe, type RecipeGroupId } from '../game/crafting/recipes';
+import { smeltResult, isFuel } from '../game/crafting/smelting';
 import { B } from '../game/fps/World';
 import { buildAtlas, tileUV, T, drumstickTexture } from '../game/fps/textures';
 import type { SlotRef, SlotItem } from '../game/fps/Inventory';
@@ -108,6 +109,15 @@ function blockTile(blockId: number): number {
     case B.CRAFTING_TABLE: return T.CRAFT_TOP;
     case B.GLASS: return T.GLASS;
     case B.FURNACE: return T.FURNACE;
+    // gemstone ores (fps ids 50-57)
+    case 50: return T.ORE_RUBY;
+    case 51: return T.ORE_AMBER;
+    case 52: return T.ORE_LUMI;
+    case 53: return T.ORE_DIAMOND;
+    case 54: return T.ORE_GOLD;
+    case 55: return T.ORE_SILVER;
+    case 56: return T.ORE_JADE;
+    case 57: return T.ORE_EMERALD;
     default: return T.STONE;
   }
 }
@@ -1053,12 +1063,28 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
 
         const burn = stats.furnaceBurn ?? 0;
         const cook = stats.furnaceCook ?? 0;
-        const move = (slot: 'input' | 'fuel' | 'output') => (e: React.MouseEvent) => {
-          g.furnaceTransfer(slot, e.shiftKey);
+
+        // Furnace slots: one click returns the whole stack to the inventory
+        // (like MC shift-click); output collects everything.
+        const takeBack = (slot: 'input' | 'fuel' | 'output') => () => {
+          g.furnaceTransfer(slot, true);
           refreshInv();
         };
-        const held = inv.hotbar[stats.slot];
-        const heldName = held ? itemName(held) : 'nothing';
+        // Inventory stacks: one click auto-routes the whole stack —
+        // smeltable → input, fuel → fuel. Exactly MC's shift-click behaviour.
+        const quickMove = (isHotbar: boolean, index: number) => () => {
+          g.furnaceQuickMove({ isHotbar, index });
+          refreshInv();
+        };
+        /** eligibility → outline colour class for an inventory stack */
+        const slotClass = (item: SlotItem | null): string => {
+          if (!item || item.kind !== 'block') return 'opacity-60';
+          if (smeltResult(item.blockId))
+            return 'cursor-pointer !outline-[#6dc24a] hover:!bg-[#3f5a34]/70';
+          if (isFuel(item.blockId))
+            return 'cursor-pointer !outline-[#ff8b4e] hover:!bg-[#5a3a24]/70';
+          return 'opacity-60';
+        };
 
         return (
           <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm"
@@ -1079,8 +1105,10 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
               <div className="flex items-center justify-center gap-4 mb-4">
                 <div className="flex flex-col items-center gap-2">
                   {/* input */}
-                  <button onClick={move('input')} title="Click: take/put 1 · Shift: whole stack"
-                    className="mc-book-slot mc-book-slot-hoverable w-[52px] h-[52px] flex items-center justify-center cursor-pointer">
+                  <button onClick={takeBack('input')} title={fur.input ? 'Click: return to inventory' : 'Click a smeltable item below to load'}
+                    className={`mc-book-slot w-[52px] h-[52px] flex items-center justify-center relative
+                      ${fur.input ? 'mc-book-slot-hoverable cursor-pointer' : '!outline-dashed !outline-[#6dc24a]/40'}`}>
+                    {!fur.input && <span className="px-font text-[6px] text-[#6dc24a]/60 absolute inset-0 flex items-center justify-center">SMELT</span>}
                     <RenderSlotItem item={fur.input} />
                   </button>
                   {/* flame gauge */}
@@ -1092,8 +1120,10 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
                     </div>
                   </div>
                   {/* fuel */}
-                  <button onClick={move('fuel')} title="Fuel: planks, logs, leaves, cactus"
-                    className="mc-book-slot mc-book-slot-hoverable w-[52px] h-[52px] flex items-center justify-center cursor-pointer">
+                  <button onClick={takeBack('fuel')} title={fur.fuel ? 'Click: return to inventory' : 'Click a fuel item below to load (planks, logs, leaves, cactus)'}
+                    className={`mc-book-slot w-[52px] h-[52px] flex items-center justify-center relative
+                      ${fur.fuel ? 'mc-book-slot-hoverable cursor-pointer' : '!outline-dashed !outline-[#ff8b4e]/40'}`}>
+                    {!fur.fuel && <span className="px-font text-[6px] text-[#ff8b4e]/60 absolute inset-0 flex items-center justify-center">FUEL</span>}
                     <RenderSlotItem item={fur.fuel} />
                   </button>
                 </div>
@@ -1110,39 +1140,37 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
                 </div>
 
                 {/* output */}
-                <button onClick={move('output')} title="Click: take 1 · Shift: take all"
+                <button onClick={takeBack('output')} title="Click: collect"
                   className={`mc-book-slot w-[62px] h-[62px] flex items-center justify-center relative
                     ${fur.output ? 'cursor-pointer !outline-[#6dc24a] hover:!bg-[#3f5a34]/80' : 'opacity-60'}`}>
                   <RenderSlotItem item={fur.output} />
                 </button>
               </div>
 
-              {/* held-item hint */}
-              <div className="mc-book-slot px-3 py-2 mb-3 flex items-center justify-center gap-2">
-                <span className="px-font text-[7px] text-white/40">HOLDING</span>
-                {held && <BlockIcon blockId={held.kind === 'block' ? held.blockId : 1} size={14} />}
-                <span className="px-font text-[8px] text-white">{heldName.toUpperCase()}</span>
-                <span className="px-font text-[7px] text-white/40">— CLICK A SLOT TO INSERT</span>
-              </div>
-
-              {/* inventory reference */}
+              {/* interactive inventory: click a highlighted stack to load it */}
               <div className="mc-book-slot p-3">
-                <div className="flex items-center justify-center gap-2 mb-2">
+                <div className="flex items-center justify-center gap-3 mb-2">
                   <Package size={11} className="text-[#8ab4ff]" />
                   <span className="px-font px-shadow-sm text-[9px] text-white/80 tracking-wider">INVENTORY</span>
+                  <span className="px-font text-[6px] text-[#6dc24a]">■ SMELTABLE</span>
+                  <span className="px-font text-[6px] text-[#ff8b4e]">■ FUEL</span>
                 </div>
                 <div className="grid grid-cols-9 gap-[3px] mb-2">
                   {inv.mainInv.map((item, i) => (
-                    <div key={i} className="mc-book-slot w-[46px] h-[40px] flex items-center justify-center">
+                    <button key={i} onClick={quickMove(false, i)}
+                      title={item && item.kind === 'block' ? (smeltResult(item.blockId) ? 'Click: smelt' : isFuel(item.blockId) ? 'Click: use as fuel' : undefined) : undefined}
+                      className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${slotClass(item)}`}>
                       {item && <RenderSlotItem item={item} />}
-                    </div>
+                    </button>
                   ))}
                 </div>
                 <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
                   {inv.hotbar.map((item, i) => (
-                    <div key={i} className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${stats.slot === i ? 'mc-book-picked' : ''}`}>
+                    <button key={i} onClick={quickMove(true, i)}
+                      title={item && item.kind === 'block' ? (smeltResult(item.blockId) ? 'Click: smelt' : isFuel(item.blockId) ? 'Click: use as fuel' : undefined) : undefined}
+                      className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${slotClass(item)} ${stats.slot === i ? 'mc-book-picked' : ''}`}>
                       {item && <RenderSlotItem item={item} />}
-                    </div>
+                    </button>
                   ))}
                   {Array.from({ length: 3 }).map((_, i) => (
                     <div key={`f${i}`} className="mc-book-slot w-[46px] h-[40px] opacity-60" />
@@ -1153,8 +1181,7 @@ export function HUD({ phase, locked, hasPlayed, progress, label, stats, seed, on
               {/* key hints */}
               <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">
                 <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
-                <span className="flex items-center gap-1.5"><span className="mc-book-key">1-6</span> PICK FUEL</span>
-                <span className="flex items-center gap-1.5"><span className="mc-book-key">SHIFT</span> WHOLE STACK</span>
+                <span>CLICK ITEM → AUTO-LOADS · CLICK FURNACE SLOT → RETURNS</span>
               </div>
             </div>
           </div>

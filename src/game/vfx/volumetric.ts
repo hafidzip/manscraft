@@ -105,6 +105,14 @@ export class VolumetricLightPass extends Pass {
   intensity = 0;
   /** additive colour multiplier for the rays (warm near sunrise/sunset). */
   readonly tint = new THREE.Color(0xfff2d0);
+  /**
+   * World-space size of the emitter disc used to seed the shafts. The sun
+   * wants a big disc; the moon needs a much smaller one, otherwise the
+   * additive sprite reads as a giant white blob filling half the sky.
+   */
+  set discScale(v: number) {
+    this.sunSprite.scale.setScalar(v);
+  }
 
   // God ray parameters tuned for visibility with Reinhard tone mapping:
   // - exposure: how bright the accumulated rays are before blending

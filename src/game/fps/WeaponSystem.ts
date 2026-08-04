@@ -81,6 +81,7 @@ export class WeaponSystem {
   private deathT = -1;          // >= 0 while the weapon is being dropped
   private holstered = false;    // true while a non-gun tool (laser) is equipped
   private lastHudKey = '';
+  private lastSwitchFoley = 0;
   private magDrops: MagDrop[] = [];
   private dropMat = new THREE.MeshLambertMaterial({ color: '#33363c' });
 
@@ -190,7 +191,24 @@ export class WeaponSystem {
   }
 
   switchTo(id: string) {
-    if (id === this.currentId || this.state === 'switch' || !this.rigs.has(id)) return;
+    if (!this.rigs.has(id)) return;
+    if (id === this.currentId && this.state !== 'switch') return;
+
+    if (this.state === 'switch') {
+      if (this.switchNext === id) return;
+      // Hotbar key presses can arrive while the previous lower/raise animation
+      // is still running. The old code ignored them, which made 1-6 feel
+      // unreliable. Retarget the pending switch instead and keep the animation
+      // in its lowering phase so the selected weapon appears on this swap.
+      this.switchNext = id;
+      this.switchT = Math.min(this.switchT, 0.12);
+      this.timeline = null;
+      this.burstReset();
+      this.adsSpring.target = 0;
+      this.switchFoley();
+      return;
+    }
+
     this.state = 'switch';
     this.switchT = 0;
     this.switchNext = id;
@@ -198,7 +216,7 @@ export class WeaponSystem {
     this.boltTimer = -1;
     this.autoReloadTimer = -1;
     this.equipKick.impulse(2);
-    this.audio.foley('grab');
+    this.switchFoley();
   }
 
   cycle(dir: number) {
@@ -229,6 +247,13 @@ export class WeaponSystem {
     this.fireTimer = 0;
     this.boltTimer = -1;
     this.autoReloadTimer = -1;
+  }
+
+  private switchFoley() {
+    const now = performance.now();
+    if (now - this.lastSwitchFoley < 75) return;
+    this.lastSwitchFoley = now;
+    this.audio.foley('grab');
   }
 
   resetDeath() {
