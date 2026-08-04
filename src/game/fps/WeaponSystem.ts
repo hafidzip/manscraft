@@ -179,6 +179,30 @@ export class WeaponSystem {
     };
   }
 
+  /**
+   * Put a rig's swappable parts back into a sane visual state.
+   *
+   * The reload timelines are authored so the magazine bone is already back in
+   * the magwell before it is revealed, but a reload can also be *interrupted*
+   * (weapon switch, death, holster) at any arbitrary frame — leaving the mag
+   * bone parked at the "dropped away" pose. Snapping the bones to rest here
+   * guarantees the magazine can never be revealed at a stale pose and then
+   * pop into place a moment later.
+   */
+  private restoreRigVisuals(rig: WeaponRig, loaded: boolean) {
+    for (const name of ['mag', 'maghand', 'warhead', 'warheadhand']) {
+      const bone = rig.bones.get(name);
+      const rest = rig.rest.get(name);
+      if (!bone || !rest) continue;
+      bone.position.copy(rest.p);
+      bone.rotation.copy(rest.r);
+    }
+    rig.magMesh.visible = true;
+    rig.magHandMesh.visible = false;
+    if (rig.warheadMesh) rig.warheadMesh.visible = loaded;
+    if (rig.warheadHandMesh) rig.warheadHandMesh.visible = false;
+  }
+
   private spawnMagDrop(rig: WeaponRig) {
     const size = MAG_DROP_SIZE[this.currentId] ?? [0.03, 0.08, 0.04];
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), this.dropMat);
@@ -422,15 +446,16 @@ export class WeaponSystem {
         lowerAmt = this.switchT / LOWER;
       } else {
         if (this.currentId !== this.switchNext) {
-          this.rigs.get(this.currentId)!.root.visible = false;
+          const prev = this.rigs.get(this.currentId)!;
+          prev.root.visible = false;
+          // the outgoing rig may have been frozen mid-reload — reset it now so
+          // it is correct the next time it is raised
+          this.restoreRigVisuals(prev, this.ammo[this.currentId] > 0);
           this.currentId = this.switchNext;
           const nr = this.rigs.get(this.currentId)!;
           nr.root.visible = true;
           // restore sane visual state in case a reload was cancelled mid-way
-          nr.magMesh.visible = true;
-          nr.magHandMesh.visible = false;
-          if (nr.warheadMesh) nr.warheadMesh.visible = this.ammo[this.currentId] > 0;
-          if (nr.warheadHandMesh) nr.warheadHandMesh.visible = false;
+          this.restoreRigVisuals(nr, this.ammo[this.currentId] > 0);
         }
         lowerAmt = 1 - (this.switchT - LOWER) / RAISE;
         if (this.switchT >= TOTAL) {
@@ -449,8 +474,7 @@ export class WeaponSystem {
         this.state = 'idle';
         if (wasReload) {
           this.ammo[this.currentId] = this.def.magSize;
-          this.rig.magMesh.visible = true;
-          this.rig.magHandMesh.visible = false;
+          this.restoreRigVisuals(this.rig, true);
           this.audio.foley('grab');
         }
       }

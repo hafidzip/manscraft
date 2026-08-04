@@ -600,15 +600,23 @@ function buildBazooka(): WeaponRig {
   trackBone(rig, 'warhead', warhead);
   rig.warheadMesh = warhead;
 
-  // rocket carried in the left hand during reload
+  // Rocket carried in the left hand during reload.
+  // Its nose section is an EXACT copy of the loaded warhead above, shifted
+  // +0.30 in Z. The reload timeline seats this bone at z = -0.30, so on the
+  // handoff frame the carried rocket and the loaded rocket occupy identical
+  // world space — the swap is literally invisible (no pop, no blink).
   const warheadHand = new THREE.Group();
   gun.add(warheadHand);
-  box(warheadHand, 0.05, 0.05, 0.22, 0, 0, 0.06, MATS.warheadTip);
-  box(warheadHand, 0.052, 0.052, 0.1, 0, 0, -0.1, MATS.warhead);
-  box(warheadHand, 0.09, 0.09, 0.07, 0, 0, -0.18, MATS.warhead);
-  box(warheadHand, 0.032, 0.032, 0.05, 0, 0, -0.24, MATS.warheadTip);
-  box(warheadHand, 0.012, 0.05, 0.05, 0, 0.03, 0.15, MATS.black);        // fins
-  box(warheadHand, 0.05, 0.012, 0.05, 0, 0, 0.15, MATS.black);
+  box(warheadHand, 0.052, 0.052, 0.1, 0, 0, -0.12, MATS.warhead);
+  box(warheadHand, 0.092, 0.092, 0.07, 0, 0, -0.2, MATS.warhead);
+  box(warheadHand, 0.06, 0.06, 0.05, 0, 0, -0.26, MATS.warheadTip);
+  box(warheadHand, 0.032, 0.032, 0.05, 0, 0, -0.3, MATS.warheadTip);
+  // Motor tube + fins. Kept under the 0.058 bore width so that once the rocket
+  // is seated they vanish cleanly inside the launcher instead of poking out
+  // through the side of the body.
+  box(warheadHand, 0.05, 0.05, 0.2, 0, 0, 0.02, MATS.warheadTip);
+  box(warheadHand, 0.012, 0.036, 0.05, 0, 0, 0.1, MATS.black);
+  box(warheadHand, 0.036, 0.012, 0.05, 0, 0, 0.1, MATS.black);
   warheadHand.visible = false;
   trackBone(rig, 'warheadhand', warheadHand);
   rig.warheadHandMesh = warheadHand;
