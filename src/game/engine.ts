@@ -601,8 +601,8 @@ export class GameEngine {
     // ---- unified combat systems ----
     this.fx = new Effects(this.scene, this.world, this.player.pos, (pos) => this.handleExplosion(pos));
     const bridge: GameBridge = {
-      fireShot: (m, d, def) => this.fireShot(m, d, def.id),
-      launchRocket: (m, d) => this.launchRocket(m, d),
+      fireShot: (m, d, def, anchor) => this.fireShot(m, d, def.id, anchor),
+      launchRocket: (m, d, anchor) => this.launchRocket(m, d, anchor),
       casing: (p, r, big) => this.fx.casing(p, r, big, this.player.vel),
     };
     this.weapons = new WeaponSystem(this.camera, this.player, this.fpsAudio, bridge, () => { /* HUD via stats */ });
@@ -766,6 +766,31 @@ export class GameEngine {
     if (fpsId === undefined) return; // not representable in the fps inventory
     this.itemDrops.spawn(fpsId, pos);
     this.blocksMined++;
+  }
+
+  /**
+   * Ground-support pass: cross-quad plants (flowers, tall grass) require the
+   * block directly beneath them to survive. When we break a block we need to
+   * strip any plant sitting on top or it visually floats. Walks upward so
+   * stacked plants (unlikely, but possible via placement) all fall together.
+   *
+   * Silent when nothing was on top — the common case.
+   */
+  private removeFloatingPlantsAbove(x: number, y: number, z: number): void {
+    let cy = y + 1;
+    while (true) {
+      const id = this.world.getBlockRaw(x, cy, z);
+      if (id === -1 || id === B.AIR) return;
+      const d = DEFS[id];
+      // Only cross-quad foliage (flowers / tallgrass) needs support here.
+      // Full-cube blocks like leaves or logs support themselves visually.
+      if (!d || d.cross !== true) return;
+      this.world.setBlock(x, cy, z, B.AIR);
+      this.particles.burst(x + 0.5, cy + 0.5, z + 0.5, d.colors, 8, 1.6);
+      this.sound.playBreak(d.sound);
+      this.dropBlock(id, new THREE.Vector3(x + 0.5, cy + 0.5, z + 0.5));
+      cy++;
+    }
   }
 
   // ---------------------------------------------------------------- crafting
@@ -954,35 +979,9 @@ export class GameEngine {
     if (this.coins < item.price) { this.fpsAudio.deny(); return false; }
 
     const inv = this.inventory;
-    switch (item.id) {
-      case 'ammo':
-        this.weapons.refillAllAmmo();
-        break;
-      case 'medkit':
-        this.hp = this.maxHp;
-        break;
-      case 'vitality':
-        this.maxHp += 20;
-        this.hp = Math.min(this.maxHp, this.hp + 20);
-        break;
-      case 'rations': {
-        const goods = { kind: 'food', foodId: 'chicken-drum', count: 4 } as const;
-        if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
-        inv.addItem(goods);
-        break;
-      }
-      case 'cobble': {
-        const goods = { kind: 'block', blockId: B.COBBLE, count: 32 } as const;
-        if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
-        inv.addItem(goods);
-        break;
-      }
-      case 'rockets':
-        this.weapons.giveAmmo('bazooka', 2);
-        break;
-      default:
-        return false;
-    }
+    const goods = item.goods;
+    if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
+    inv.addItem(goods);
 
     this.coins -= item.price;
     saveCoins(this.coins);
@@ -1826,6 +1825,13 @@ export class GameEngine {
     // head bob distance-driven
     if (p.onGround && hs > 0.5) this.bob += dt * hs * 1.6;
 
+    // Sync the camera to the player's fresh physics / bob state BEFORE any
+    // viewmodel (weapon muzzle, laser beam origin) samples its world position.
+    // Previously syncCamera ran AFTER the weapon and laser updates, so shots
+    // fired or beams drawn while the player was moving lagged the camera by
+    // one frame — the muzzle/beam appeared to drift off the barrel.
+    this.syncCamera(dt);
+
     // ---- unified tool modes ----
     if (this.toolMode === 'weapon') {
       this.triggerDown = this.mouse.left && !this.prevLeft;
@@ -1866,8 +1872,6 @@ export class GameEngine {
       canWeapon && this.mouse.left,
       canWeapon && this.adsHeld
     );
-
-    this.syncCamera(dt);
 
     // ---- combat state (enemies tick on the main clock, see tick()) ----
     if (this.invulnT > 0) this.invulnT -= dt;
@@ -2012,6 +2016,10 @@ export class GameEngine {
     this.sound.playBreak(d.sound);
     this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
     this.blocksMined++;
+
+    // Strip flowers / tall grass that just lost their support block, so we
+    // don't leave a hovering cross-quad above an empty voxel.
+    this.removeFloatingPlantsAbove(x, y, z);
 
     // a broken furnace spills its contents, like Minecraft
     if (id === B.FURNACE || id === B.FURNACE_LIT) {
@@ -2324,7 +2332,12 @@ export class GameEngine {
     }
   }
 
-  private fireShot(muzzle: THREE.Vector3, dir: THREE.Vector3, weaponId: string): void {
+  private fireShot(
+    muzzle: THREE.Vector3,
+    dir: THREE.Vector3,
+    weaponId: string,
+    muzzleAnchor: THREE.Object3D,
+  ): void {
     const origin = this.camera.position.clone();
     const worldHit = this.world.raycast(origin, dir, 130);
     const enemyHit = this.enemies.raycast(origin, dir, 130);
@@ -2355,8 +2368,10 @@ export class GameEngine {
       : worldHit ? worldHit.point.clone()
       : origin.clone().addScaledVector(dir, 130);
 
-    this.fx.muzzleFlash(muzzle, 0.5);
-    this.fx.tracer(muzzle, end);
+    // Keep both short-lived effects constrained to the live viewmodel muzzle.
+    // Their far endpoint remains fixed in world space while the player moves.
+    this.fx.muzzleFlash(muzzle, 0.5, muzzleAnchor);
+    this.fx.tracer(muzzle, end, muzzleAnchor);
 
     if (useEnemy) {
       const eh = enemyHit!;
@@ -2377,7 +2392,8 @@ export class GameEngine {
     }
   }
 
-  private launchRocket(muzzle: THREE.Vector3, dir: THREE.Vector3): void {
+  private launchRocket(muzzle: THREE.Vector3, dir: THREE.Vector3, muzzleAnchor: THREE.Object3D): void {
+    this.fx.muzzleFlash(muzzle, 0.7, muzzleAnchor);
     this.fx.launchRocket(muzzle.clone().addScaledVector(dir, 0.4), dir);
     this.fpsAudio.whoosh();
     this.player.addShake(0.03);
@@ -2395,6 +2411,9 @@ export class GameEngine {
     const MAX_BLAST_DROPS = 14;
     let drops = 0;
     const destroyed = this.world.destroySphere(pos, 2.9, (x, y, z, id) => {
+      // Rocket blasts can nibble the crater rim without touching the plant
+      // directly above — clear any leftover cross-quad so nothing hangs.
+      this.removeFloatingPlantsAbove(x, y, z);
       if (drops >= MAX_BLAST_DROPS || Math.random() > 0.28) return;
       drops++;
       this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));

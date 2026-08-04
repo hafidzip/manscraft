@@ -330,45 +330,10 @@ function CoinIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-const SHOP_ICONS: Record<string, [number, number, number, number, string][]> = {
-  ammo: [
-    [1, 6, 2, 3, '#c9a227'], [3, 5, 2, 4, '#c9a227'], [5, 6, 2, 3, '#c9a227'],
-    [1, 4, 2, 2, '#d8b345'], [3, 3, 2, 2, '#d8b345'], [5, 4, 2, 2, '#d8b345'],
-    [1, 2, 2, 2, '#a33b2e'], [3, 1, 2, 2, '#a33b2e'], [5, 2, 2, 2, '#a33b2e'],
-    [0, 8, 8, 2, '#5d4a2e'],
-  ],
-  medkit: [
-    [0, 2, 10, 7, '#e8e6df'], [0, 2, 10, 1, '#c9c4b8'],
-    [4, 3, 2, 5, '#d43a2f'], [2, 5, 6, 2, '#d43a2f'],
-    [3, 0, 4, 2, '#8a8578'],
-  ],
-  heart: [
-    [1, 1, 3, 2, '#e84fc0'], [6, 1, 3, 2, '#e84fc0'],
-    [0, 2, 10, 3, '#e84fc0'], [1, 5, 8, 2, '#e84fc0'],
-    [2, 7, 6, 1, '#c93aa0'], [3, 8, 4, 1, '#c93aa0'], [4, 9, 2, 1, '#c93aa0'],
-    [2, 2, 2, 2, '#ffb7ec'],
-  ],
-  food: [
-    [2, 1, 6, 5, '#c98f5f'], [1, 2, 8, 3, '#c98f5f'],
-    [3, 2, 4, 3, '#e0b184'], [4, 6, 2, 3, '#e8e6df'], [3, 8, 4, 2, '#e8e6df'],
-  ],
-  blocks: [
-    [0, 0, 5, 5, '#8c8c90'], [5, 0, 5, 5, '#76767a'], [0, 5, 5, 5, '#646468'], [5, 5, 5, 5, '#8c8c90'],
-    [1, 1, 2, 2, '#76767a'], [6, 2, 2, 2, '#646468'], [2, 6, 2, 2, '#8c8c90'], [6, 6, 2, 2, '#76767a'],
-  ],
-  rocket: [
-    [4, 0, 2, 3, '#d43a2f'], [3, 3, 4, 5, '#c9c4b8'], [4, 4, 2, 2, '#8ecae6'],
-    [2, 6, 1, 3, '#d43a2f'], [7, 6, 1, 3, '#d43a2f'], [4, 8, 2, 2, '#ffb03a'],
-  ],
-};
-
-function ShopIcon({ id, size = 40 }: { id: string; size?: number }) {
-  const rects = SHOP_ICONS[id] ?? SHOP_ICONS.ammo;
-  return (
-    <svg width={size} height={size} viewBox="0 0 10 10" style={{ imageRendering: 'pixelated' }} shapeRendering="crispEdges">
-      {rects.map((r, i) => <rect key={i} x={r[0]} y={r[1]} width={r[2]} height={r[3]} fill={r[4]} />)}
-    </svg>
-  );
+/** Render a shop item's icon — block texture tile or drumstick for food */
+function ShopItemIcon({ item, size = 32 }: { item: typeof SHOP_ITEMS[0]; size?: number }) {
+  if (item.goods.kind === 'food') return <DrumstickIcon size={size} />;
+  return <BlockIcon blockId={item.goods.blockId} size={size} />;
 }
 
 /** the player's purse — pulses when coins come in or go out */
@@ -419,95 +384,145 @@ function TradePrompt() {
   );
 }
 
-/** full merchant shop overlay */
+/** full merchant shop overlay — styled to match the crafting/furnace mc-book panels */
 function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject<GameEngine | null> }) {
   const [flash, setFlash] = useState<string | null>(null);
+  const [hoverItem, setHoverItem] = useState<string | null>(null);
   const buy = (id: string) => {
     const ok = engineRef.current?.buyShopItem(id);
     if (ok) {
       setFlash(id);
-      window.setTimeout(() => setFlash((f) => (f === id ? null : f)), 260);
+      window.setTimeout(() => setFlash((f) => (f === id ? null : f)), 280);
     }
   };
+
+  const hoveredEntry = hoverItem ? SHOP_ITEMS.find((i) => i.id === hoverItem) ?? null : null;
+
   return (
-    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 p-4">
-      <div className="shop-panel w-[min(680px,94vw)] overflow-hidden rounded-lg border-4 border-[#3d2f17] bg-[#241b0e] shadow-[0_18px_60px_rgba(0,0,0,0.65)]">
-        {/* header */}
-        <div className="flex items-center justify-between border-b-4 border-[#3d2f17] bg-[#2f2412] px-5 py-3">
-          <div className="flex items-center gap-3">
-            <CoinIcon size={26} />
-            <div>
-              <h3 className="px-font px-shadow text-lg leading-none text-[#ffd23e]">
-                {stats.shopMerchantName ?? 'MERCHANT'}
-              </h3>
-              <p className="mt-1 font-vt text-sm leading-none text-[#c9a227]/80">
-                "Best prices this side of the galaxy, friend."
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 rounded-md border-2 border-[#f2c14e]/50 bg-[#1a1408] px-3 py-1.5 font-pixel text-[11px] text-[#ffe08a]">
-              <CoinIcon size={14} />
-              <span className="tabular-nums">{stats.coins}</span>
-            </div>
-            <button
-              onClick={() => engineRef.current?.closeShop()}
-              className="rounded-md border-2 border-white/20 bg-white/5 px-3 py-1.5 font-vt text-base leading-none text-white/80 transition-colors hover:border-[#ff5347]/70 hover:bg-[#ff5347]/20 hover:text-white"
-            >
-              CLOSE [ESC]
-            </button>
-          </div>
+    <div className="absolute inset-0 z-40 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) engineRef.current?.closeShop(); }}>
+      <div className="mc-book px-5 pt-4 pb-4 w-[min(860px,94vw)] relative">
+        <button onClick={() => engineRef.current?.closeShop()}
+          className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer">
+          <X size={14} />
+        </button>
+
+        {/* title */}
+        <div className="flex items-center justify-center gap-2 mb-3">
+          <CoinIcon size={16} />
+          <span className="px-font px-shadow text-[12px] text-white tracking-widest">
+            {stats.shopMerchantName?.toUpperCase() ?? 'MERCHANT'}
+          </span>
         </div>
 
-        {/* goods */}
-        <div className="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2 lg:grid-cols-3">
+        {/* tooltip strip — matches inventory tooltip */}
+        <div className="h-8 px-2 flex items-center mc-book-slot overflow-hidden mb-3">
+          {hoveredEntry ? (
+            <div className="flex items-center gap-2">
+              <Package size={11} className="text-[#8ab4ff]" />
+              <span className="px-font text-[8px] text-white">{hoveredEntry.name}</span>
+              <span className="px-font text-[7px] text-white/50">
+                ×{hoveredEntry.goods.count}
+              </span>
+              <span className="px-font text-[6px] text-white/30 ml-2">{hoveredEntry.desc}</span>
+            </div>
+          ) : (
+            <span className="px-font text-[7px] text-white/30">HOVER TO INSPECT · CLICK TO BUY</span>
+          )}
+        </div>
+
+        {/* goods grid — matching mc-book-slot styling like crafting recipe strip */}
+        <div className="grid grid-cols-4 sm:grid-cols-6 gap-[3px] mb-4">
           {SHOP_ITEMS.map((item) => {
             const affordable = stats.coins >= item.price;
+            const isFlash = flash === item.id;
             return (
-              <div
+              <button
                 key={item.id}
-                className={`group flex flex-col rounded-md border-2 p-3 transition-all duration-150 ${
-                  flash === item.id
-                    ? 'border-[#6dc24a] bg-[#6dc24a]/15'
-                    : affordable
-                      ? 'border-[#4d3b1e] bg-[#2c2110] hover:-translate-y-0.5 hover:border-[#f2c14e]/70 hover:bg-[#33280f]'
-                      : 'border-[#3a3020] bg-[#26200f] opacity-60'
-                }`}
+                onClick={() => buy(item.id)}
+                onMouseEnter={() => setHoverItem(item.id)}
+                onMouseLeave={() => setHoverItem((h) => (h === item.id ? null : h))}
+                disabled={!affordable}
+                className={`mc-book-slot mc-book-slot-hoverable w-full aspect-square flex flex-col items-center justify-center gap-1 relative cursor-pointer transition-all duration-75
+                  ${isFlash ? 'mc-book-picked !bg-[#3f5a34]/80' : ''}
+                  ${!affordable ? 'opacity-45 cursor-not-allowed' : ''}
+                  ${affordable && !isFlash ? 'hover:!bg-[#5a6070]/90' : ''}`}
               >
-                <div className="flex items-start gap-3">
-                  <div className="rounded-sm border border-[#4d3b1e] bg-[#1a1408] p-1.5">
-                    <ShopIcon id={item.icon} size={38} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="px-font text-[10px] leading-tight text-[#ffe08a]">{item.name}</div>
-                    <p className="mt-1 font-vt text-[13px] leading-tight text-[#c9b892]/75">{item.desc}</p>
-                  </div>
+                {/* item icon */}
+                <ShopItemIcon item={item} size={28} />
+                {/* count badge */}
+                <span className="px-font px-shadow absolute bottom-0.5 right-1 text-[7px] text-white">
+                  {item.goods.count}
+                </span>
+                {/* price badge */}
+                <div className="flex items-center gap-0.5 absolute top-0.5 left-0.5">
+                  <CoinIcon size={8} />
+                  <span className={`px-font text-[6px] ${affordable ? 'text-[#ffd23e]' : 'text-[#ff5347]'}`}>
+                    {item.price}
+                  </span>
                 </div>
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-pixel text-[11px] text-[#f2c14e]">
-                    <CoinIcon size={13} />
-                    <span className="tabular-nums">{item.price}</span>
-                  </div>
-                  <button
-                    onClick={() => buy(item.id)}
-                    disabled={!affordable}
-                    className={`rounded-sm border-2 px-3 py-1 font-pixel text-[10px] leading-none transition-all duration-100 ${
-                      affordable
-                        ? 'border-[#6dc24a] bg-[#3f6b2c] text-[#d9f2c9] hover:bg-[#4c8236] active:translate-y-px'
-                        : 'cursor-not-allowed border-[#55503f] bg-[#3a352a] text-[#8a8271]'
-                    }`}
-                  >
-                    {affordable ? 'BUY' : 'POOR'}
-                  </button>
-                </div>
-              </div>
+              </button>
             );
           })}
         </div>
 
-        <p className="border-t-2 border-[#3d2f17] bg-[#2f2412]/60 px-5 py-2 font-vt text-[13px] text-[#c9a227]/60">
-          Earn coins by clearing hostile camps. The merchant only trades while calm — start a firefight and the stall closes.
-        </p>
+        {/* bottom: purse + inventory preview side by side */}
+        <div className="flex gap-4">
+          {/* purchase detail panel */}
+          <div className="mc-book-slot flex-1 p-3">
+            <div className="flex items-center justify-center gap-2 mb-3">
+              <CoinIcon size={13} />
+              <span className="px-font px-shadow-sm text-[9px] text-[#ffd23e] tracking-wider">
+                YOUR PURSE
+              </span>
+            </div>
+            <div className="flex items-center justify-center gap-4">
+              <div className="flex items-center gap-2">
+                <CoinIcon size={20} />
+                <span className="px-font px-shadow text-[18px] text-[#ffe08a] tabular-nums">
+                  {stats.coins}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center justify-center gap-3 mt-3 pt-2 border-t border-white/10">
+              <span className="px-font text-[6px] text-white/35">
+                EARN COINS BY CLEARING CAMPS
+              </span>
+            </div>
+          </div>
+
+          {/* inventory preview — matches crafting/furnace style */}
+          <div className="mc-book-slot w-[430px] p-3">
+            <div className="flex items-center justify-center gap-2 mb-3">
+              <Package size={11} className="text-[#8ab4ff]" />
+              <span className="px-font px-shadow-sm text-[9px] text-white/80 tracking-wider">INVENTORY</span>
+            </div>
+            <div className="grid grid-cols-9 gap-[3px] mb-2">
+              {(engineRef.current?.inventory.mainInv ?? Array(27).fill(null)).map((item, i) => (
+                <div key={i} className="mc-book-slot w-[40px] h-[40px] flex items-center justify-center">
+                  {item && <RenderSlotItem item={item} />}
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
+              {(engineRef.current?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => (
+                <div key={i} className={`mc-book-slot w-[40px] h-[40px] flex items-center justify-center ${stats.slot === i ? 'mc-book-picked' : ''}`}>
+                  {item && <RenderSlotItem item={item} />}
+                </div>
+              ))}
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={`h${i}`} className="mc-book-slot w-[40px] h-[40px] opacity-60" />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* key hints — same style as crafting/furnace */}
+        <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">
+          <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
+          <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> BUY</span>
+          <span>ITEMS ADDED TO INVENTORY ON PURCHASE</span>
+        </div>
       </div>
     </div>
   );

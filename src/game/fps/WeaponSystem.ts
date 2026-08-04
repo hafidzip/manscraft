@@ -24,8 +24,8 @@ export interface WeaponPlayer {
 }
 
 export interface GameBridge {
-  fireShot(muzzle: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef): void;
-  launchRocket(muzzle: THREE.Vector3, dir: THREE.Vector3): void;
+  fireShot(muzzle: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, muzzleAnchor: THREE.Object3D): void;
+  launchRocket(muzzle: THREE.Vector3, dir: THREE.Vector3, muzzleAnchor: THREE.Object3D): void;
   casing(pos: THREE.Vector3, right: THREE.Vector3, big: boolean): void;
 }
 
@@ -350,12 +350,12 @@ export class WeaponSystem {
     this.audio.shot(def.sound);
 
     if (def.fireMode === 'launcher') {
-      this.bridge.launchRocket(muzzle, dir.clone());
+      this.bridge.launchRocket(muzzle, dir.clone(), this.rig.muzzle);
       if (this.rig.warheadMesh) this.rig.warheadMesh.visible = false;
       this.player.addShake(0.02);
       this.autoReloadTimer = 0.85;
     } else {
-      this.bridge.fireShot(muzzle, dir, def);
+      this.bridge.fireShot(muzzle, dir, def, this.rig.muzzle);
       if (def.fireMode === 'bolt') {
         this.boltTimer = 0.55;
       } else {
@@ -405,10 +405,6 @@ export class WeaponSystem {
       this.autoReloadTimer -= dt;
       if (this.autoReloadTimer <= 0) this.startReload();
     }
-
-    // ---- trigger
-    const canAuto = def.fireMode === 'auto';
-    if ((canAuto && triggerHeld) || (triggerDown && !canAuto)) this.tryFire();
 
     // ---- ads
     const wantAds = adsHeld && this.state === 'idle' && this.player.sprintAmt < 0.5;
@@ -463,7 +459,22 @@ export class WeaponSystem {
     // ---- bloom decay
     this.bloom = Math.max(0, this.bloom - dt * 2.6 - this.adsSpring.v * dt * 2);
 
+    // Apply the frame's pose (bob/sway/ads/switch/recoil springs) BEFORE we
+    // try to fire, so muzzle/eject world positions sampled inside tryFire
+    // reflect THIS frame's gun pose rather than the previous one. Without
+    // this, shots fired while running land the tracer a frame behind the
+    // visual barrel — especially visible at higher gait speeds.
     this.applyPose(dt, time, ads, lowerAmt);
+    this.camera.updateMatrixWorld(true);
+
+    // ---- trigger (fires AFTER pose so the muzzle is where the barrel looks)
+    const canAuto = def.fireMode === 'auto';
+    if ((canAuto && triggerHeld) || (triggerDown && !canAuto)) {
+      // Do not applyPose again after firing. tryFire adds recoil impulses, but
+      // advancing the pose a second time would move the rendered barrel after
+      // its muzzle position was sampled, separating it from the new effect.
+      this.tryFire();
+    }
   }
 
   // ------------------------------------------------------------ pose compositor
