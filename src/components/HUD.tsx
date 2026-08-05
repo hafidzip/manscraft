@@ -8,9 +8,10 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import {
   Bomb, ChevronUp, Crosshair as CrosshairIcon, Hammer, Moon, Mountain,
   Rocket, Shield, Skull, Sun, Swords, Volume2, VolumeX, X, Package, Apple, ArrowRight, Flame,
+  ArrowDownUp,
 } from 'lucide-react';
 import type { GameEngine, HotbarItem, HudStats } from '../game/engine';
-import { SHOP_ITEMS } from '../game/fps/shop';
+import { SHOP_ITEMS, getBlockSellPrice, getFoodSellPrice } from '../game/fps/shop';
 import { RECIPES, RECIPE_GROUPS, matchCraft, recipeIngredients, type Recipe, type RecipeGroupId } from '../game/crafting/recipes';
 import { smeltResult, isFuel } from '../game/crafting/smelting';
 import { B } from '../game/fps/World';
@@ -387,7 +388,23 @@ function TradePrompt() {
 /** full merchant shop overlay — styled to match the crafting/furnace mc-book panels */
 function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject<GameEngine | null> }) {
   const [flash, setFlash] = useState<string | null>(null);
+  const [sellFlash, setSellFlash] = useState<string | null>(null);
   const [hoverItem, setHoverItem] = useState<string | null>(null);
+  const [hoverSellSlot, setHoverSellSlot] = useState<string | null>(null);
+
+  const isSell = stats.shopSellOpen;
+
+  // ----- BUY tab: only show stocked items
+  const stockedItems = stats.shopStock.length > 0
+    ? stats.shopStock.map((s) => ({
+        stock: s,
+        item: SHOP_ITEMS.find((i) => i.id === s.itemId)!,
+      })).filter((s) => s.item)
+    : SHOP_ITEMS.map((item) => ({
+        stock: { itemId: item.id, quantity: 999, maxQuantity: 999 },
+        item,
+      }));
+
   const buy = (id: string) => {
     const ok = engineRef.current?.buyShopItem(id);
     if (ok) {
@@ -396,132 +413,210 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
     }
   };
 
+  // ----- SELL tab: sell from inventory
+  const sellItem = (ref: { isHotbar: boolean; index: number }, amount: number) => {
+    const ok = engineRef.current?.sellShopItem(ref, amount);
+    if (ok) {
+      const key = `${ref.isHotbar ? 'h' : 'm'}${ref.index}`;
+      setSellFlash(key);
+      window.setTimeout(() => setSellFlash((f) => (f === key ? null : f)), 280);
+    }
+  };
+
   const hoveredEntry = hoverItem ? SHOP_ITEMS.find((i) => i.id === hoverItem) ?? null : null;
+
+  // Build sellable items from inventory
+  const sellableInventory = (() => {
+    const inv = engineRef.current?.inventory;
+    if (!inv) return [];
+    type SellEntry = { ref: { isHotbar: boolean; index: number }; item: Exclude<SlotItem, { kind: 'weapon' }>; pricePerUnit: number; totalValue: number };
+    const result: SellEntry[] = [];
+    const addItem = (it: SlotItem, isHotbar: boolean, index: number) => {
+      if (it.kind === 'weapon') return;
+      const pricePerUnit = it.kind === 'block' ? getBlockSellPrice(it.blockId) : getFoodSellPrice(it.foodId);
+      if (pricePerUnit <= 0) return;
+      result.push({ ref: { isHotbar, index }, item: it, pricePerUnit, totalValue: pricePerUnit * it.count });
+    };
+    inv.mainInv.forEach((it, i) => { if (it) addItem(it, false, i); });
+    inv.hotbar.forEach((it, i) => { if (it) addItem(it, true, i); });
+    return result;
+  })();
 
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) engineRef.current?.closeShop(); }}>
-      <div className="mc-book px-5 pt-4 pb-4 w-[min(860px,94vw)] relative">
+      <div className="mc-book px-5 pt-4 pb-5 w-[min(780px,94vw)] relative">
         <button onClick={() => engineRef.current?.closeShop()}
-          className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer">
+          className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer z-10">
           <X size={14} />
         </button>
 
         {/* title */}
-        <div className="flex items-center justify-center gap-2 mb-3">
+        <div className="flex items-center justify-center gap-2 mb-2">
           <CoinIcon size={16} />
           <span className="px-font px-shadow text-[12px] text-white tracking-widest">
             {stats.shopMerchantName?.toUpperCase() ?? 'MERCHANT'}
           </span>
         </div>
 
-        {/* tooltip strip — matches inventory tooltip */}
-        <div className="h-8 px-2 flex items-center mc-book-slot overflow-hidden mb-3">
-          {hoveredEntry ? (
-            <div className="flex items-center gap-2">
-              <Package size={11} className="text-[#8ab4ff]" />
-              <span className="px-font text-[8px] text-white">{hoveredEntry.name}</span>
-              <span className="px-font text-[7px] text-white/50">
-                ×{hoveredEntry.goods.count}
-              </span>
-              <span className="px-font text-[6px] text-white/30 ml-2">{hoveredEntry.desc}</span>
+        {/* Buy / Sell tabs */}
+        <div className="flex gap-1 mb-2">
+          <button
+            onClick={() => engineRef.current?.toggleShopSell(false)}
+            className={`px-font text-[9px] tracking-wider px-4 py-1.5 rounded-sm cursor-pointer transition-all flex items-center gap-1.5
+              ${!isSell ? 'bg-[#ffd23e]/20 text-[#ffd23e] border border-[#ffd23e]/40' : 'bg-white/5 text-white/40 border border-white/10 hover:text-white/60'}`}>
+            <Package size={11} /> BUY
+          </button>
+          <button
+            onClick={() => engineRef.current?.toggleShopSell(true)}
+            className={`px-font text-[9px] tracking-wider px-4 py-1.5 rounded-sm cursor-pointer transition-all flex items-center gap-1.5
+              ${isSell ? 'bg-[#6dc24a]/20 text-[#6dc24a] border border-[#6dc24a]/40' : 'bg-white/5 text-white/40 border border-white/10 hover:text-white/60'}`}>
+            <ArrowDownUp size={11} /> SELL
+          </button>
+        </div>
+
+        {/* Coin info — right after tabs */}
+        <div className="mc-book-slot flex items-center justify-center gap-3 px-3 py-1.5 mb-2 rounded-sm">
+          <div className="flex items-center gap-2">
+            <CoinIcon size={16} />
+            <span className="px-font px-shadow-sm text-[10px] text-[#ffd23e] tracking-wider">YOUR PURSE</span>
+          </div>
+          <div className="w-px h-4 bg-white/15" />
+          <span className="px-font px-shadow text-[16px] text-[#ffe08a] tabular-nums">{stats.coins}</span>
+          <span className="px-font text-[6px] text-white/35">COINS</span>
+        </div>
+
+        {/* tooltip strip */}
+        <div className="h-8 px-2 flex items-center mc-book-slot overflow-hidden mb-2 rounded-sm">
+          {!isSell && hoveredEntry ? (
+            <div className="flex items-center gap-2 truncate">
+              <Package size={11} className="text-[#8ab4ff] flex-shrink-0" />
+              <span className="px-font text-[8px] text-white truncate">{hoveredEntry.name}</span>
+              <span className="px-font text-[7px] text-white/50">×{hoveredEntry.goods.count}</span>
+              <span className="px-font text-[6px] text-white/30 ml-1 truncate">{hoveredEntry.desc}</span>
             </div>
-          ) : (
+          ) : !isSell ? (
             <span className="px-font text-[7px] text-white/30">HOVER TO INSPECT · CLICK TO BUY</span>
+          ) : hoverSellSlot ? (
+            <span className="px-font text-[7px] text-white/50">LEFT-CLICK SELL 1 · RIGHT-CLICK SELL ALL</span>
+          ) : (
+            <span className="px-font text-[7px] text-white/30">CLICK AN ITEM TO SELL IT FOR COINS</span>
           )}
         </div>
 
-        {/* goods grid — matching mc-book-slot styling like crafting recipe strip */}
-        <div className="grid grid-cols-4 sm:grid-cols-6 gap-[3px] mb-4">
-          {SHOP_ITEMS.map((item) => {
-            const affordable = stats.coins >= item.price;
-            const isFlash = flash === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => buy(item.id)}
-                onMouseEnter={() => setHoverItem(item.id)}
-                onMouseLeave={() => setHoverItem((h) => (h === item.id ? null : h))}
-                disabled={!affordable}
-                className={`mc-book-slot mc-book-slot-hoverable w-full aspect-square flex flex-col items-center justify-center gap-1 relative cursor-pointer transition-all duration-75
-                  ${isFlash ? 'mc-book-picked !bg-[#3f5a34]/80' : ''}
-                  ${!affordable ? 'opacity-45 cursor-not-allowed' : ''}
-                  ${affordable && !isFlash ? 'hover:!bg-[#5a6070]/90' : ''}`}
-              >
-                {/* item icon */}
-                <ShopItemIcon item={item} size={28} />
-                {/* count badge */}
-                <span className="px-font px-shadow absolute bottom-0.5 right-1 text-[7px] text-white">
-                  {item.goods.count}
-                </span>
-                {/* price badge */}
-                <div className="flex items-center gap-0.5 absolute top-0.5 left-0.5">
-                  <CoinIcon size={8} />
-                  <span className={`px-font text-[6px] ${affordable ? 'text-[#ffd23e]' : 'text-[#ff5347]'}`}>
-                    {item.price}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* bottom: purse + inventory preview side by side */}
-        <div className="flex gap-4">
-          {/* purchase detail panel */}
-          <div className="mc-book-slot flex-1 p-3">
-            <div className="flex items-center justify-center gap-2 mb-3">
-              <CoinIcon size={13} />
-              <span className="px-font px-shadow-sm text-[9px] text-[#ffd23e] tracking-wider">
-                YOUR PURSE
-              </span>
-            </div>
-            <div className="flex items-center justify-center gap-4">
-              <div className="flex items-center gap-2">
-                <CoinIcon size={20} />
-                <span className="px-font px-shadow text-[18px] text-[#ffe08a] tabular-nums">
-                  {stats.coins}
-                </span>
+        {/* List content with custom scrollbar */}
+        <div className="mc-book-slot p-2 max-h-[320px] overflow-y-auto scroll-shop space-y-1 rounded-sm">
+          {!isSell ? (
+            /* BUY list — list layout like sell tab */
+            stockedItems.map(({ item, stock }) => {
+              const affordable = stats.coins >= item.price;
+              const isFlash = flash === item.id;
+              const soldOut = stock.quantity <= 0;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => !soldOut && buy(item.id)}
+                  onMouseEnter={() => setHoverItem(item.id)}
+                  onMouseLeave={() => setHoverItem((h) => (h === item.id ? null : h))}
+                  disabled={!affordable || soldOut}
+                  className={`w-full text-left flex items-center gap-3 px-2 py-2 rounded-sm border transition-all duration-75
+                    ${isFlash ? 'bg-[#3f5a34]/70 border-[#5a8c54]/60' : 'bg-white/[0.03] border-white/10 hover:bg-white/[0.08] hover:border-white/25'}
+                    ${soldOut ? 'opacity-30 cursor-not-allowed grayscale' : ''}
+                    ${!soldOut && !affordable ? 'opacity-45 cursor-not-allowed' : ''}`}
+                >
+                  {/* icon */}
+                  <div className="w-9 h-9 flex items-center justify-center flex-shrink-0 mc-book-slot rounded-sm">
+                    <ShopItemIcon item={item} size={24} />
+                  </div>
+                  {/* info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="px-font text-[8px] text-white truncate">{item.name}</span>
+                      <span className="px-font text-[7px] text-white/40">×{item.goods.count}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="px-font text-[6px] text-white/40 truncate">{item.desc}</span>
+                      <span className="px-font text-[6px] text-white/30">· stock: {soldOut ? '0' : stock.quantity}</span>
+                    </div>
+                  </div>
+                  {/* price + buy */}
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <div className="flex items-center gap-0.5 bg-[#1a1408]/80 px-1.5 py-0.5 rounded-sm border border-white/10">
+                      <CoinIcon size={8} />
+                      <span className={`px-font text-[7px] ${affordable ? 'text-[#ffd23e]' : 'text-[#ff5347]'}`}>{item.price}</span>
+                    </div>
+                    <span className="px-font text-[6px] text-white/30">BUY</span>
+                  </div>
+                </button>
+              );
+            })
+          ) : (
+            /* SELL list */
+            sellableInventory.length === 0 ? (
+              <div className="flex items-center justify-center py-10">
+                <span className="px-font text-[8px] text-white/30">NO SELLABLE ITEMS — MINE BLOCKS OR GATHER FOOD</span>
               </div>
-            </div>
-            <div className="flex items-center justify-center gap-3 mt-3 pt-2 border-t border-white/10">
-              <span className="px-font text-[6px] text-white/35">
-                EARN COINS BY CLEARING CAMPS
-              </span>
-            </div>
-          </div>
-
-          {/* inventory preview — matches crafting/furnace style */}
-          <div className="mc-book-slot w-[430px] p-3">
-            <div className="flex items-center justify-center gap-2 mb-3">
-              <Package size={11} className="text-[#8ab4ff]" />
-              <span className="px-font px-shadow-sm text-[9px] text-white/80 tracking-wider">INVENTORY</span>
-            </div>
-            <div className="grid grid-cols-9 gap-[3px] mb-2">
-              {(engineRef.current?.inventory.mainInv ?? Array(27).fill(null)).map((item, i) => (
-                <div key={i} className="mc-book-slot w-[40px] h-[40px] flex items-center justify-center">
-                  {item && <RenderSlotItem item={item} />}
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
-              {(engineRef.current?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => (
-                <div key={i} className={`mc-book-slot w-[40px] h-[40px] flex items-center justify-center ${stats.slot === i ? 'mc-book-picked' : ''}`}>
-                  {item && <RenderSlotItem item={item} />}
-                </div>
-              ))}
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div key={`h${i}`} className="mc-book-slot w-[40px] h-[40px] opacity-60" />
-              ))}
-            </div>
-          </div>
+            ) : (
+              sellableInventory.map(({ ref, item, pricePerUnit, totalValue }) => {
+                const key = `${ref.isHotbar ? 'h' : 'm'}${ref.index}`;
+                const isFlashing = sellFlash === key;
+                const name = item.kind === 'block'
+                  ? (BLOCK_NAMES[item.blockId] ?? `Block #${item.blockId}`)
+                  : (FOODS[item.foodId]?.name ?? item.foodId);
+                const icon = item.kind === 'block'
+                  ? <BlockIcon blockId={item.blockId} size={20} />
+                  : <DrumstickIcon size={20} />;
+                return (
+                  <div key={key} className="flex items-center gap-3 px-2 py-2 rounded-sm border bg-white/[0.03] border-white/10">
+                    <div className="w-9 h-9 flex items-center justify-center flex-shrink-0 mc-book-slot rounded-sm">
+                      {icon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="px-font text-[8px] text-white truncate">{name}</span>
+                        <span className="px-font text-[7px] text-white/40">×{item.count}</span>
+                      </div>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <CoinIcon size={7} />
+                        <span className="px-font text-[7px] text-[#ffd23e]">{pricePerUnit}/ea</span>
+                        <span className="px-font text-[6px] text-white/30">=</span>
+                        <CoinIcon size={7} />
+                        <span className="px-font text-[7px] text-[#6dc24a]">{totalValue}</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-1 flex-shrink-0">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); sellItem(ref, 1); }}
+                        onMouseEnter={() => setHoverSellSlot(key)}
+                        onMouseLeave={() => setHoverSellSlot(null)}
+                        className={`px-font text-[7px] px-2 py-1 rounded-sm border cursor-pointer transition-all
+                          ${isFlashing ? 'bg-[#6dc24a]/30 border-[#6dc24a]/50 text-[#6dc24a]' : 'bg-white/5 border-white/15 text-white/60 hover:bg-[#6dc24a]/15 hover:border-[#6dc24a]/30 hover:text-[#6dc24a]'}`}
+                      >+{pricePerUnit}</button>
+                      {item.count > 1 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); sellItem(ref, 0); }}
+                          onMouseEnter={() => setHoverSellSlot(key)}
+                          onMouseLeave={() => setHoverSellSlot(null)}
+                          className={`px-font text-[7px] px-2 py-1 rounded-sm border cursor-pointer transition-all
+                            ${isFlashing ? 'bg-[#6dc24a]/30 border-[#6dc24a]/50 text-[#6dc24a]' : 'bg-white/5 border-white/15 text-white/60 hover:bg-[#6dc24a]/15 hover:border-[#6dc24a]/30 hover:text-[#6dc24a]'}`}
+                        >ALL +{totalValue}</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )
+          )}
         </div>
 
-        {/* key hints — same style as crafting/furnace */}
-        <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">
+        {/* bottom key hints */}
+        <div className="flex items-center gap-4 mt-2 px-font px-shadow-sm text-[7px] text-white/55">
           <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
-          <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> BUY</span>
-          <span>ITEMS ADDED TO INVENTORY ON PURCHASE</span>
+          {!isSell && <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> BUY</span>}
+          {isSell && <>
+            <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> SELL 1</span>
+            <span className="flex items-center gap-1.5"><span className="mc-book-key">RIGHT-CLICK</span> SELL ALL</span>
+          </>}
         </div>
       </div>
     </div>

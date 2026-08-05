@@ -38,7 +38,7 @@ import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
 import { Enemy, EnemyManager } from './fps/Enemy';
 import { Effects } from './fps/effects';
-import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE } from './fps/shop';
+import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
 import { session, saveCoins } from './session';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
@@ -132,6 +132,10 @@ export interface HudStats {
   nearMerchant: boolean;
   shopOpen: boolean;
   shopMerchantName: string | null;
+  /** the items this merchant currently stocks (empty = use full catalogue) */
+  shopStock: { itemId: string; quantity: number; maxQuantity: number }[];
+  /** true when the sell tab is active in the shop */
+  shopSellOpen: boolean;
 }
 
 export interface EngineEvents {
@@ -270,6 +274,10 @@ export class GameEngine {
   private nearMerchantEnemy: Enemy | null = null;
   /** the merchant whose shop UI is currently open (null = closed) */
   private shopEnemy: Enemy | null = null;
+  /** items this specific merchant currently has on their shelf */
+  private shopStock: MerchantStock[] = [];
+  /** whether the sell tab is currently active in the shop UI */
+  private shopSellOpen = false;
   private time = 0;
   private spaceExited = false;
 
@@ -955,6 +963,9 @@ export class GameEngine {
     const m = this.nearMerchantEnemy;
     if (!m || this.shopEnemy) return;
     this.shopEnemy = m;
+    // Generate this merchant's random shelf (1-3 items with limited stock)
+    this.shopStock = generateMerchantStock(() => Math.random());
+    this.shopSellOpen = false;
     m.tradeFaceT = 1e5;               // hold eye contact for the whole visit
     this.inventoryOpen = false;
     this.craftingOpen = false;
@@ -976,6 +987,11 @@ export class GameEngine {
     const item = SHOP_ITEMS.find((i) => i.id === id);
     const m = this.shopEnemy;
     if (!item || !m || !m.alive || m.state !== 'idle') return false;
+
+    // Check merchant stock (limited shelf)
+    const stock = this.shopStock.find((s) => s.itemId === id);
+    if (stock && stock.quantity <= 0) { this.fpsAudio.deny(); return false; }
+
     if (this.coins < item.price) { this.fpsAudio.deny(); return false; }
 
     const inv = this.inventory;
@@ -983,11 +999,60 @@ export class GameEngine {
     if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
     inv.addItem(goods);
 
+    // Reduce merchant stock
+    if (stock) stock.quantity--;
+
     this.coins -= item.price;
     saveCoins(this.coins);
     this.coinSeq++;
     this.lastCoinGain = -item.price;
     this.fpsAudio.purchase();
+    this.events.onStats(this.buildStats());
+    return true;
+  }
+
+  /** Toggle the sell tab inside the shop UI. */
+  toggleShopSell(open?: boolean): void {
+    if (!this.shopEnemy) return;
+    this.shopSellOpen = open !== undefined ? open : !this.shopSellOpen;
+    this.events.onStats(this.buildStats());
+  }
+
+  /** HUD → engine: sell an item from inventory to the merchant. */
+  sellShopItem(ref: { isHotbar: boolean; index: number }, amount: number): boolean {
+    const m = this.shopEnemy;
+    if (!m || !m.alive || m.state !== 'idle') return false;
+
+    const inv = this.inventory;
+    const arr = ref.isHotbar ? inv.hotbar : inv.mainInv;
+    const item = arr[ref.index];
+    if (!item) return false;
+
+    // Only blocks and food are sellable (not weapons)
+    if (item.kind === 'weapon') return false;
+
+    let pricePerUnit: number;
+    let sellCount: number;
+    if (item.kind === 'block') {
+      pricePerUnit = getBlockSellPrice(item.blockId);
+      sellCount = amount === 0 ? item.count : Math.min(amount, item.count);
+    } else {
+      pricePerUnit = getFoodSellPrice(item.foodId);
+      sellCount = amount === 0 ? item.count : Math.min(amount, item.count);
+    }
+    if (sellCount <= 0 || pricePerUnit <= 0) return false;
+
+    const totalGain = sellCount * pricePerUnit;
+
+    // Remove items from inventory
+    item.count -= sellCount;
+    if (item.count <= 0) arr[ref.index] = null;
+
+    this.coins += totalGain;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = totalGain;
+    this.fpsAudio.coin();
     this.events.onStats(this.buildStats());
     return true;
   }
@@ -2533,6 +2598,8 @@ export class GameEngine {
       nearMerchant: this.nearMerchant,
       shopOpen: !!this.shopEnemy,
       shopMerchantName: this.shopEnemy ? this.shopEnemy.cfg.name : null,
+      shopStock: this.shopStock.map((s) => ({ ...s })),
+      shopSellOpen: this.shopSellOpen,
     };
   }
 

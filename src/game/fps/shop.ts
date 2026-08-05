@@ -99,3 +99,71 @@ export const STARTING_COINS = 40;
 export const TRADE_DISTANCE = 4.2;
 
 export const MERCHANT_PRESET_ID = 'merchant';
+
+// ---------------------------------------------------------------- sell prices
+/** How many coins the merchant pays per unit when the player sells an item. */
+export const BLOCK_SELL_PRICES: Record<number, number> = {
+  [B.GRASS]: 1,
+  [B.DIRT]: 1,
+  [B.STONE]: 1,
+  [B.SAND]: 1,
+  [B.SANDSTONE]: 2,
+  [B.LOG]: 1,
+  [B.LEAVES]: 0,
+  [B.CACTUS]: 1,
+  [B.PLANK]: 1,
+  [B.ORE]: 3,
+  [B.COBBLE]: 1,
+  [B.WOOL]: 1,
+  [B.CRAFTING_TABLE]: 15,
+  [B.GLASS]: 2,
+  [B.FURNACE]: 18,
+  // gemstone ores (fps ids 50-57)
+  50: 4,  // ruby
+  51: 3,  // amber
+  52: 3,  // luminescence
+  53: 5,  // diamond
+  54: 3,  // gold
+  55: 2,  // silver
+  56: 3,  // jade
+  57: 4,  // emerald
+};
+
+export const FOOD_SELL_PRICES: Record<string, number> = {
+  'chicken-drum': 2,
+};
+
+/** Get the sell price for a single unit of a shop item. */
+export function getShopSellPrice(item: ShopItem): number {
+  if (item.goods.kind === 'block') return BLOCK_SELL_PRICES[item.goods.blockId] ?? 1;
+  return FOOD_SELL_PRICES[item.goods.foodId] ?? 1;
+}
+
+/** Get the sell price for a block id (per unit). */
+export function getBlockSellPrice(blockId: number): number {
+  return BLOCK_SELL_PRICES[blockId] ?? 1;
+}
+
+/** Get the sell price for a food id (per unit). */
+export function getFoodSellPrice(foodId: string): number {
+  return FOOD_SELL_PRICES[foodId] ?? 1;
+}
+
+// ---------------------------------------------------------------- merchant stock
+/** A single stocked item on a specific merchant's shelf. */
+export interface MerchantStock {
+  itemId: string;
+  quantity: number;
+  maxQuantity: number;
+}
+
+/** Generate a randomised shelf for a merchant (1-3 items, each with limited stock). */
+export function generateMerchantStock(rng: () => number): MerchantStock[] {
+  const count = 1 + Math.floor(rng() * 3); // 1..3
+  const shuffled = [...SHOP_ITEMS].sort(() => rng() - 0.5);
+  return shuffled.slice(0, count).map((item) => ({
+    itemId: item.id,
+    quantity: 3 + Math.floor(rng() * 8), // 3..10
+    maxQuantity: 10,
+  }));
+}
