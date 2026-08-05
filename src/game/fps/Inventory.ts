@@ -43,6 +43,9 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.CRAFTING_TABLE]: 'Crafting Table',
   [B.GLASS]: 'Glass',
   [B.FURNACE]: 'Furnace',
+  [B.COAL]: 'Coal',
+  [B.STICK]: 'Stick',
+  [B.TORCH]: 'Torch',
   // gemstones (fps ids 50-57)
   50: 'Ruby Ore',
   51: 'Amber Ore',

@@ -137,6 +137,31 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
 
         if (d.cross) {
           if (id === B.TALLGRASS) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z);
+          else if (id === B.TORCH) {
+            // Detect which face the torch is leaning on — Minecraft attaches torches
+            // either to the floor (solid below) or to a side wall (solid horizontally).
+            // This gives us the visual offset and the flame anchor for lighting.
+            const below = localGet(x, y - 1, z);
+            let supX = 0, supY = -1, supZ = 0;
+            if (below !== -1 && below !== B.AIR && DEFS[below]?.solid) {
+              supY = -1;
+            } else {
+              // scan walls: +X, -X, +Z, -Z
+              const e = localGet(x + 1, y, z);
+              const w = localGet(x - 1, y, z);
+              const s = localGet(x, y, z + 1);
+              const n = localGet(x, y, z - 1);
+              if (e !== -1 && e !== B.AIR && DEFS[e]?.solid) { supX = 1; supY = 0; supZ = 0; }
+              else if (w !== -1 && w !== B.AIR && DEFS[w]?.solid) { supX = -1; supY = 0; supZ = 0; }
+              else if (s !== -1 && s !== B.AIR && DEFS[s]?.solid) { supX = 0; supY = 0; supZ = 1; }
+              else if (n !== -1 && n !== B.AIR && DEFS[n]?.solid) { supX = 0; supY = 0; supZ = -1; }
+              else {
+                // floating fallback — treat as floor so it still renders instead of vanishing
+                supX = 0; supY = -1; supZ = 0;
+              }
+            }
+            emitTorch(cutoutB, x, y, z, d.icon, supX, supY, supZ);
+          }
           else emitCross(cutoutB, x, y, z, d.side, id === B.FLOWER_RED || id === B.FLOWER_YELLOW ? 0.018 : 0.028, baseX + x, baseZ + z);
           continue;
         }
@@ -356,6 +381,80 @@ function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number
       phase, swayStrength, 1, 0.5,
       phase, swayStrength, 0, 0,
     );
+    bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
+    bucket.base += 4;
+  }
+}
+
+/**
+ * Torch: two thin crossed quads. Floor torches stand upright in the centre;
+ * wall torches cling to their support side and lean outward like in Minecraft,
+ * so they never float in the centre of air. Full-bright vertex colour makes
+ * the flame emissive even deep underground — the atlas alpha cutout gives it
+ * the flame + shaft silhouette.
+ *
+ * supX/supY/supZ = offset to the solid support cell (e.g. +1,0,0 = attached to east).
+ */
+function emitTorch(
+  bucket: Bucket, x: number, y: number, z: number, tile: number,
+  supX = 0, supY = -1, supZ = 0,
+): void {
+  const [u0, v0, u1, v1] = tileUV(tile);
+  const horiz = 0.5, up = 0.866;
+
+  let bx: number, bz: number, tx: number, tz: number, bottom: number, top: number;
+
+  if (supY === -1) {
+    // floor torch — upright in the middle
+    bx = x + 0.5; bz = z + 0.5;
+    tx = bx; tz = bz;
+    bottom = y + 0.06; top = y + 0.72;
+  } else if (supX === 1) {
+    // support to east (+X): torch on east wall, leaning west
+    bx = x + 1 - 0.12; bz = z + 0.5;
+    tx = bx - 0.26;    tz = bz;
+    bottom = y + 0.20; top = y + 0.82;
+  } else if (supX === -1) {
+    // support to west (-X)
+    bx = x + 0.12;     bz = z + 0.5;
+    tx = bx + 0.26;    tz = bz;
+    bottom = y + 0.20; top = y + 0.82;
+  } else if (supZ === 1) {
+    // support to south (+Z)
+    bx = x + 0.5;      bz = z + 1 - 0.12;
+    tx = bx;           tz = bz - 0.26;
+    bottom = y + 0.20; top = y + 0.82;
+  } else if (supZ === -1) {
+    // support to north (-Z)
+    bx = x + 0.5;      bz = z + 0.12;
+    tx = bx;           tz = bz + 0.26;
+    bottom = y + 0.20; top = y + 0.82;
+  } else {
+    // fallback
+    bx = x + 0.5; bz = z + 0.5; tx = bx; tz = bz; bottom = y + 0.06; top = y + 0.72;
+  }
+
+  const r = supY === -1 ? 0.13 : 0.10;
+  const diags: { ax: number; az: number; n: [number, number, number] }[] = [
+    { ax: r, az: r, n: [-horiz * 0.707, up, horiz * 0.707] },
+    { ax: r, az: -r, n: [horiz * 0.707, up, horiz * 0.707] },
+  ];
+
+  for (const q of diags) {
+    const vbase = bucket.base;
+    bucket.pos.push(
+      bx - q.ax, bottom, bz - q.az,
+      tx - q.ax, top,    tz - q.az,
+      tx + q.ax, top,    tz + q.az,
+      bx + q.ax, bottom, bz + q.az,
+    );
+    for (let i = 0; i < 4; i++) bucket.nrm.push(q.n[0], q.n[1], q.n[2]);
+    bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
+    // full-bright vertex colour (texture is the sole source of shade)
+    for (let i = 0; i < 4; i++) bucket.col.push(1, 1, 1);
+    // aSway.y = -1 marks this as an UNLIT torch for the cutout shader
+    // (grass uses aSway.y > 0 for wind strength, so -1 is unambiguous)
+    for (let i = 0; i < 4; i++) bucket.sway.push(0, -1, 0, 0);
     bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
     bucket.base += 4;
   }

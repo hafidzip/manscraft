@@ -126,6 +126,9 @@ function blockTile(blockId: number): number {
     case 55: return T.ORE_SILVER;
     case 56: return T.ORE_JADE;
     case 57: return T.ORE_EMERALD;
+    case B.COAL: return T.COAL;
+    case B.STICK: return T.STICK;
+    case B.TORCH: return T.TORCH;
     default: return T.STONE;
   }
 }
@@ -505,7 +508,7 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
         </div>
 
         {/* List content with custom scrollbar */}
-        <div className="mc-book-slot p-2 max-h-[320px] overflow-y-auto scroll-shop space-y-1 rounded-sm">
+        <div className="mc-book-slot p-2 h-[320px] overflow-y-auto scroll-shop space-y-1 rounded-sm">
           {!isSell ? (
             /* BUY list — list layout like sell tab */
             stockedItems.map(({ item, stock }) => {

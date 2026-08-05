@@ -42,6 +42,11 @@ export const B = {
   ORE_SILVER: 45,
   ORE_JADE: 46,
   ORE_EMERALD: 47,
+  COAL_ORE: 48,
+  TORCH: 49,
+  // item-only pseudo blocks (held/dropped icons, never generated or placed)
+  COAL_ITEM: 50,
+  STICK_ITEM: 51,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -68,6 +73,8 @@ export interface BlockDef {
   sound: SoundMat;
   /** particle palette for break VFX */
   colors: number[];
+  /** emits point light (torches). 0 = none */
+  light?: number;
 }
 
 interface DefSpec {
@@ -84,6 +91,7 @@ interface DefSpec {
   hardness?: number;
   sound?: SoundMat;
   colors?: number[];
+  light?: number;
 }
 
 function def(p: DefSpec): BlockDef {
@@ -102,6 +110,7 @@ function def(p: DefSpec): BlockDef {
     hardness: p.hardness ?? 0.5,
     sound: p.sound ?? 'stone',
     colors: p.colors ?? [0x888888],
+    light: p.light ?? 0,
   };
 }
 
@@ -228,6 +237,28 @@ DEFS[B.ORE_JADE] = def({
 DEFS[B.ORE_EMERALD] = def({
   name: 'Emerald Ore', top: TILES.ore_emerald, hardness: 3.2, sound: 'stone',
   colors: [0x1ea050, 0x50ff78, 0x7a7a80],
+});
+DEFS[B.COAL_ORE] = def({
+  name: 'Coal Ore', top: TILES.coal_ore, hardness: 1.6, sound: 'stone',
+  colors: [0x2c2c30, 0x808085, 0x1a1a1e],
+});
+DEFS[B.TORCH] = def({
+  name: 'Torch', top: TILES.torch, icon: TILES.torch,
+  solid: false, opaque: false, cutout: true, cross: true,
+  hardness: 0.05, sound: 'wood', light: 1,
+  colors: [0xffd65c, 0xffa028, 0x6b5136],
+});
+// item-only pseudo blocks — never generated/placed, just a tile source for
+// the held item + floating drop meshes so coal & sticks read correctly.
+DEFS[B.COAL_ITEM] = def({
+  name: 'Coal', top: TILES.coal, icon: TILES.coal,
+  solid: false, opaque: false, cutout: true,
+  hardness: 0, sound: 'stone', colors: [0x26262c, 0x44444a],
+});
+DEFS[B.STICK_ITEM] = def({
+  name: 'Stick', top: TILES.stick, icon: TILES.stick,
+  solid: false, opaque: false, cutout: true,
+  hardness: 0, sound: 'wood', colors: [0x8a643a, 0xa67c4a],
 });
 
 /** hotbar pseudo-item: the water bucket (not a placeable block id) */

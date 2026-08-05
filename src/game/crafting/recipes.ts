@@ -62,6 +62,8 @@ const P = {
   TABLE: blk(B.CRAFTING_TABLE),
   LEAVES: blk(B.LEAVES),
   COBBLE: blk(B.COBBLE),
+  COAL: blk(B.COAL),
+  STICK: blk(B.STICK),
 };
 
 const DIRT = blk(B.DIRT);
@@ -97,6 +99,22 @@ export const RECIPES: Recipe[] = [
       [P.PLANK, P.PLANK, P.PLANK],
     ],
     output: { kind: 'block', blockId: B.CRAFTING_TABLE, count: 3 },
+  },
+  {
+    id: 'stick', name: 'Sticks', grid: 3, group: 'building',
+    shaped: [
+      [P.PLANK],
+      [P.PLANK],
+    ],
+    output: { kind: 'block', blockId: B.STICK, count: 4 },
+  },
+  {
+    id: 'torch', name: 'Torch', grid: 3, group: 'glass',
+    shaped: [
+      [P.COAL],
+      [P.STICK],
+    ],
+    output: { kind: 'block', blockId: B.TORCH, count: 4 },
   },
   {
     id: 'glass', name: 'Glass', grid: 2, group: 'glass',

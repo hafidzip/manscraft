@@ -109,6 +109,37 @@ export class WeaponSystem {
   get rig(): WeaponRig { return this.rigs.get(this.currentId)!; }
   get def(): WeaponDef { return this.rig.def; }
 
+  /**
+   * Upload every weapon texture and compile every hidden rig while the loading
+   * screen is still up. Without this, Three.js defers the work until a rig is
+   * made visible for its first swap, producing a multi-second gameplay hitch.
+   */
+  async warmup(renderer: THREE.WebGLRenderer, scene: THREE.Scene): Promise<void> {
+    const visibility = new Map<THREE.Object3D, boolean>();
+    const textures = new Set<THREE.Texture>();
+
+    for (const rig of this.rigs.values()) {
+      visibility.set(rig.root, rig.root.visible);
+      rig.root.visible = true;
+      rig.root.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const material of materials) {
+          const map = (material as THREE.MeshLambertMaterial).map;
+          if (map) textures.add(map);
+        }
+      });
+    }
+
+    try {
+      // compileAsync uses KHR_parallel_shader_compile where available.
+      for (const texture of textures) renderer.initTexture(texture);
+      await renderer.compileAsync(scene, this.camera);
+    } finally {
+      for (const [root, visible] of visibility) root.visible = visible;
+    }
+  }
+
   /** unified engine HUD: current weapon ammo / magazine */
   get ammoInfo(): { ammo: number; mag: number } {
     return { ammo: this.ammo[this.currentId], mag: this.def.magSize };

@@ -311,6 +311,12 @@ export class TerrainGenerator {
         for (let y = 2; y < Math.min(h, H - 8); y++) {
           if (data[chunkIndex(lx, y, lz)] !== B.STONE) continue;
           const oreRoll = this.decoHash(0x07e0 + y, px, pz);
+          // Coal (common, wide range): Y 3-55 — fuel + torches
+          const coalRoll = this.decoHash(0x0c0a + y, px, pz);
+          if (y >= 3 && coalRoll < 0.045) {
+            data[chunkIndex(lx, y, lz)] = B.COAL_ORE;
+            continue;
+          }
           // Luminescence (rarest, deepest): Y 2-15
           if (y <= 15 && oreRoll < 0.008) {
             data[chunkIndex(lx, y, lz)] = B.ORE_LUMINESCENCE;

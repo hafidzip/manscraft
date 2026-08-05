@@ -26,6 +26,8 @@ const TILE_NAMES = [
   // gemstone ores
   'ore_ruby', 'ore_amber', 'ore_luminescence', 'ore_diamond',
   'ore_gold', 'ore_silver', 'ore_jade', 'ore_emerald',
+  // coal / crafting materials / torch
+  'coal_ore', 'coal', 'stick', 'torch',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -546,6 +548,60 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       }
       return vary([118, 118, 124], 14, r);
     }),
+
+  // ---- coal ore: stone base with black coal chunks ----
+  coal_ore: (img, r) =>
+    tileRegion(img, TILES.coal_ore, (x, y) => {
+      const chunk = (x * 5 + y * 3) % 9 < 3 && r() < 0.55;
+      if (chunk) {
+        const bright = r() < 0.25;
+        return bright ? vary([64, 64, 68], 10, r) : vary([26, 26, 30], 8, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+
+  // ---- coal lump item: rounded black nugget on transparent bg ----
+  coal: (img, r) =>
+    tileRegion(img, TILES.coal, (x, y) => {
+      const dx = x - 8, dy = y - 8;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 6.2) return null;
+      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r); // sheen
+      return vary([28, 28, 32], 10, r);
+    }),
+
+  // ---- stick item: two crossed brown twigs ----
+  stick: (img, r) =>
+    tileRegion(img, TILES.stick, (x, y) => {
+      // diagonal stick from bottom-left to top-right
+      if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58], 14, r);
+      if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38], 10, r);
+      return null;
+    }),
+
+  // ---- torch: wooden shaft with a glowing flame head (alpha cutout) ----
+  torch: (img, r) => {
+    void r;
+    return tileRegion(img, TILES.torch, (x, y) => {
+      const cx = x >= 6 && x <= 9;
+      // shaft (lower 2/3)
+      if (cx && y >= 6) {
+        if (y === 6) return [120, 88, 50];
+        return (x === 6) ? [96, 68, 38] : (x === 9 ? [80, 56, 32] : [138, 100, 58]);
+      }
+      // ember block at top of shaft
+      if (x >= 6 && x <= 9 && y >= 4 && y <= 5) return [40, 30, 24];
+      // flame
+      const fx = x - 7.5, fy = y - 2;
+      const df = Math.sqrt(fx * fx + fy * fy * 0.6);
+      if (y <= 5) {
+        if (df < 1.3) return [255, 246, 200];
+        if (df < 2.4) return [255, 200, 70];
+        if (df < 3.4) return [240, 130, 30];
+      }
+      return null;
+    });
+  },
 };
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ import { mulberry32 } from './noise';
 
 const TILE = 32;          // pixels per tile
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 7;     // grew from 5 to fit the 8 gemstone ore tiles
+const ATLAS_ROWS = 8;     // grew to fit coal/stick/torch tiles
 
 function mkCanvas(w: number, h: number) {
   const c = document.createElement('canvas');
@@ -47,6 +47,7 @@ export const T = {
   // gemstone ores (match the world-atlas gem set)
   ORE_RUBY: 19, ORE_AMBER: 20, ORE_LUMI: 21, ORE_DIAMOND: 22,
   ORE_GOLD: 23, ORE_SILVER: 24, ORE_JADE: 25, ORE_EMERALD: 26,
+  COAL_ORE: 27, COAL: 28, STICK: 29, TORCH: 30,
 } as const;
 
 let atlasTex: THREE.CanvasTexture | null = null;
@@ -233,6 +234,51 @@ export function buildAtlas(): THREE.CanvasTexture {
   oreTile(T.ORE_SILVER,  406, '#9aa0a6', '#e6ebf0', '#ffffff');
   oreTile(T.ORE_JADE,    407, '#3f8a52', '#8cdc9f', '#d8ffe2');
   oreTile(T.ORE_EMERALD, 408, '#178c46', '#50ff78', '#c8ffd8');
+
+  // coal ore: stone base with black coal chunks
+  tile(T.COAL_ORE, (ox, oy) => {
+    noisyTile(g, ox, oy, '#82858a', 12, 431, ['#75787d', '#8f9297']);
+    const rand = mulberry32(431);
+    for (let i = 0; i < 6; i++) {
+      const x = 3 + Math.floor(rand() * 22), y = 3 + Math.floor(rand() * 22);
+      px(ox, oy, x, y, 6, 5, '#1c1c20');
+      px(ox, oy, x + 1, y + 1, 2, 2, '#44444a');
+    }
+  });
+  // coal lump item
+  tile(T.COAL, (ox, oy) => {
+    const rand = mulberry32(432);
+    g.clearRect(ox, oy, TILE, TILE);
+    for (let y = 0; y < TILE; y++) for (let x = 0; x < TILE; x++) {
+      const dx = x - 16, dy = y - 16;
+      if (dx * dx + dy * dy > 144) continue;
+      g.fillStyle = shade('#26262c', Math.floor((rand() - 0.5) * 26));
+      g.fillRect(ox + x, oy + y, 1, 1);
+    }
+    px(ox, oy, 11, 11, 4, 4, '#55555c');
+  });
+  // stick item: diagonal twig
+  tile(T.STICK, (ox, oy) => {
+    g.clearRect(ox, oy, TILE, TILE);
+    for (let i = 0; i < TILE; i++) {
+      px(ox, oy, i, TILE - 1 - i, 3, 3, '#8a643a');
+      px(ox, oy, i, TILE - 1 - i, 2, 2, '#a67c4a');
+    }
+  });
+  // torch item: shaft + glowing flame
+  tile(T.TORCH, (ox, oy) => {
+    g.clearRect(ox, oy, TILE, TILE);
+    // shaft
+    px(ox, oy, 13, 12, 6, 18, '#8a643a');
+    px(ox, oy, 13, 12, 2, 18, '#a67c4a');
+    px(ox, oy, 17, 12, 2, 18, '#6b4c2c');
+    // ember base
+    px(ox, oy, 12, 8, 8, 5, '#2a2020');
+    // flame
+    px(ox, oy, 13, 2, 6, 8, '#f0821e');
+    px(ox, oy, 14, 1, 4, 8, '#ffc846');
+    px(ox, oy, 15, 3, 2, 5, '#fff6c8');
+  });
 
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
@@ -457,6 +503,9 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 55: return T.ORE_SILVER;
     case 56: return T.ORE_JADE;
     case 57: return T.ORE_EMERALD;
+    case 58: return T.COAL;
+    case 59: return T.STICK;
+    case 60: return T.TORCH;
     default: return T.STONE;
   }
 }
@@ -550,6 +599,52 @@ export function paintDrumstick(g: CanvasRenderingContext2D): void {
     [12,11,Bo],
   ];
   for (const [x, y, c] of bone) px(x, y, c);
+}
+
+export function paintTorch(g: CanvasRenderingContext2D): void {
+  g.clearRect(0, 0, 16, 16);
+  const px = (x: number, y: number, col: string) => {
+    g.fillStyle = col;
+    g.fillRect(x, y, 1, 1);
+  };
+
+  // Minecraft torch palette — matches the block's atlas painter colours
+  // wood
+  const Wh = '#c49a5a'; // highlight
+  const Wm = '#8a643a'; // mid
+  const Wd = '#5a3a1e'; // dark
+  const Wc = '#3a2a18'; // charred ember base
+  // flame inner -> outer
+  const Fw = '#ffffd0'; // white core
+  const Fy = '#ffe86a'; // bright yellow
+  const Fo = '#ffb62a'; // orange mid
+  const Fr = '#e85a10'; // red-orange outer
+  const Fd = '#a03008'; // dark ember
+
+  // ---- Minecraft-style item: 2px wide handle, 6px tall flame ----
+  // Flame (centered top)
+  // y=1
+  px(7, 1, Fw); px(8, 1, Fw);
+  // y=2
+  px(6, 2, Fo); px(7, 2, Fy); px(8, 2, Fw); px(9, 2, Fo);
+  // y=3
+  px(6, 3, Fr); px(7, 3, Fo); px(8, 3, Fy); px(9, 3, Fr);
+  // y=4
+  px(5, 4, Fd); px(6, 4, Fr); px(7, 4, Fo); px(8, 4, Fo); px(9, 4, Fr); px(10, 4, Fd);
+  // y=5 - ember base (charred)
+  px(6, 5, Fd); px(7, 5, Wc); px(8, 5, Wc); px(9, 5, Fd);
+
+  // Handle — 2px wide, with left highlight / right shade like MC sticks
+  // y=6..13
+  for (let y = 6; y <= 13; y++) {
+    // slight checker for MC shading
+    px(7, y, y % 2 === 0 ? Wh : Wm);
+    px(8, y, Wd);
+  }
+  // charred top under flame
+  px(7, 6, Wc); px(8, 6, Wc);
+  // bottom tip darker
+  px(7, 13, Wd); px(8, 13, Wc);
 }
 
 /**

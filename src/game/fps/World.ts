@@ -8,6 +8,7 @@ export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, SANDSTONE: 5,
   LOG: 6, LEAVES: 7, CACTUS: 8, PLANK: 9, ORE: 10, COBBLE: 11, WOOL: 12, BEDROCK: 13,
   CRAFTING_TABLE: 14, GLASS: 15, FURNACE: 16,
+  COAL: 58, STICK: 59, TORCH: 60,
 } as const;
 
 const SIZE = 96;         // x/z extent

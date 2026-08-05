@@ -45,6 +45,7 @@ import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
 import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
 import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
+import { TorchLights } from './world/torchLights';
 import {
   newFurnace, tickFurnace, furnaceIdle, furnaceKey, isFuel, smeltResult, SMELT_TIME,
   type FurnaceState,
@@ -170,6 +171,8 @@ const TO_FPS: Record<number, number> = {
   [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
   [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
   [B.COBBLE]: 11,
+  // coal ore mines into a coal lump; torch places back as a torch
+  [B.COAL_ORE]: 58, [B.TORCH]: 60,
   // gemstones map to unused high ids in the fps inventory
   [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
   [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
@@ -178,6 +181,17 @@ const TO_FPS: Record<number, number> = {
 const FROM_FPS: Record<number, number> = Object.fromEntries(
   Object.entries(TO_FPS).map(([k, v]) => [v, Number(k)])
 );
+// FROM_FPS reverses TO_FPS, but coal ore must place back as a torch/nothing —
+// coal (58) should never place a Coal Ore block, so override the reverse map.
+// Coal & stick are not placeable (guarded in placeBlock); their world ids only
+// exist so the held-item / drop meshes show the right tile.
+FROM_FPS[58] = B.COAL_ITEM;
+FROM_FPS[59] = B.STICK_ITEM;
+FROM_FPS[60] = B.TORCH;
+
+/** fps inventory ids for non-placeable crafting materials */
+const B_COAL = 58;
+const B_STICK = 59;
 
 /** weapon hotbar icon palette (index -> accent color) */
 const GUN_ICON_COLORS = ['#9aa4ae', '#565b3c', '#3f4650', '#6b5136', '#5d6142', '#ff8a3c'];
@@ -207,6 +221,7 @@ export class GameEngine {
   camps: { site: CampSite; build: CampBuild }[] = [];
   private fx!: Effects;
   private heldBlock!: HeldBlockTool;
+  private torchLights!: TorchLights;
   private toolMode: 'weapon' | 'laser' | 'block' | 'food' = 'weapon';
   /** unified inventory (voxel-fps): 6-slot hotbar + 3x9 storage */
   public inventory!: Inventory;
@@ -419,11 +434,14 @@ export class GameEngine {
            attribute vec4 aSway;
            uniform float uGrassTime;
            uniform vec3 uGrassCam;
-           uniform vec2 uGrassFade;`
+           uniform vec2 uGrassFade;
+           varying float vTorchUnlit;`
         )
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
+           // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass sway strength
+           vTorchUnlit = step(aSway.y, -0.5);
            float gPlant = step(0.001, aSway.y);
            float gTw = aSway.z;
            float gH = aSway.w;
@@ -437,11 +455,27 @@ export class GameEngine {
            transformed = mix(position, gP, gPlant);`
         );
       // upward-biased normals kill angle-dependent black back faces while
-      // still answering the shadow map exactly like the grass_top surface
+      // still answering the shadow map exactly like the grass_top surface.
+      // Torches force outgoingLight = diffuseColor after lighting so the
+      // flame is fully UNLIT (self-emissive texture, ignores point lights /
+      // sun / shadows) — matching Minecraft's torch fire look.
       shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+           varying float vTorchUnlit;`
+        )
         .replace(
           '#include <normal_fragment_begin>',
           `vec3 normal = normalize( vec3( vNormal.x * 0.25, abs(vNormal.y) + 0.9, vNormal.z * 0.25 ) );`
+        )
+        .replace(
+          '#include <opaque_fragment>',
+          `if (vTorchUnlit > 0.5) {
+             // pure atlas colour — no Lambert, no shadows, no point-light wash
+             outgoingLight = diffuseColor.rgb;
+           }
+           #include <opaque_fragment>`
         );
     };
 
@@ -640,8 +674,11 @@ export class GameEngine {
       const sp = this.player.pos;
       this.enemies.spawnWanderingMerchant(sp.x + 7, sp.z + 5, sp.y);
     }
-    this.heldBlock = new HeldBlockTool(this.scene, this.camera, new THREE.MeshLambertMaterial({ map: this.textures.atlas }));
+    this.heldBlock = new HeldBlockTool(this.scene, this.camera, new THREE.MeshLambertMaterial({ map: this.textures.atlas, alphaTest: 0.4, side: THREE.DoubleSide }));
     this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
+
+    // dynamic point-lights for placed torches (illuminate deep mines)
+    this.torchLights = new TorchLights(this.scene);
 
     // floating voxel item drops (mined blocks magnetize back to the player)
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
@@ -667,6 +704,40 @@ export class GameEngine {
       child.layers.set(2);
     });
     this.scene.add(this.bodyGroup);
+
+    // Hidden weapon/item rigs and the fixed torch-light shader variant must
+    // reach the GPU before gameplay. Otherwise the first weapon swap / first
+    // torch placement pays this upload + program-link cost in a visible frame.
+    this.events.onProgress(1, 'Warming up equipment');
+    await this.nextFrame();
+    if (this.disposed) return;
+
+    // Guarantee the alpha-cutout shader is represented even on a planet whose
+    // loaded spawn chunks happen to contain no foliage. The mesh is never
+    // rendered; compileAsync only needs a visible material/geometry pair.
+    const cutoutWarmGeo = new THREE.PlaneGeometry(0.01, 0.01);
+    const warmCount = cutoutWarmGeo.getAttribute('position').count;
+    cutoutWarmGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Array(warmCount * 3).fill(1), 3));
+    cutoutWarmGeo.setAttribute('aSway', new THREE.Float32BufferAttribute(new Array(warmCount * 4).fill(0), 4));
+    const cutoutWarmMesh = new THREE.Mesh(cutoutWarmGeo, mats.cutout);
+    cutoutWarmMesh.frustumCulled = false;
+    this.scene.add(cutoutWarmMesh);
+
+    // Held torch and food are normally hidden, so expose them only to the
+    // compiler. No frame is rendered while this temporary state is active.
+    this.heldBlock.showTorch();
+    this.heldBlock.group.visible = true;
+    this.heldFood.visible = true;
+    try {
+      await this.weapons.warmup(this.renderer, this.scene);
+    } finally {
+      this.scene.remove(cutoutWarmMesh);
+      cutoutWarmGeo.dispose();
+      this.heldBlock.group.visible = false;
+      this.heldFood.visible = false;
+      this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
+    }
+    if (this.disposed) return;
 
     this.addListeners();
 
@@ -794,10 +865,27 @@ export class GameEngine {
       // Full-cube blocks like leaves or logs support themselves visually.
       if (!d || d.cross !== true) return;
       this.world.setBlock(x, cy, z, B.AIR);
+      if (id === B.TORCH) this.torchLights.remove(x, cy, z);
       this.particles.burst(x + 0.5, cy + 0.5, z + 0.5, d.colors, 8, 1.6);
       this.sound.playBreak(d.sound);
       this.dropBlock(id, new THREE.Vector3(x + 0.5, cy + 0.5, z + 0.5));
       cy++;
+    }
+  }
+
+  /**
+   * Pop every torch that was attached to (placed against) the block that just
+   * got destroyed. Covers wall/side torches that the "strip block directly
+   * above" pass misses, so a torch never hangs in mid-air with its light still
+   * on after its support is mined or blown up.
+   */
+  private detachTorchesSupportedBy(bx: number, by: number, bz: number, drop: boolean): void {
+    const popped = this.torchLights.detachSupportedBy(bx, by, bz);
+    for (const [tx, ty, tz] of popped) {
+      if (this.world.getBlockRaw(tx, ty, tz) === B.TORCH) this.world.setBlock(tx, ty, tz, B.AIR);
+      this.particles.burst(tx + 0.5, ty + 0.55, tz + 0.5, DEFS[B.TORCH].colors, 10, 2);
+      this.sound.playBreak('wood');
+      if (drop) this.dropBlock(B.TORCH, new THREE.Vector3(tx + 0.5, ty + 0.5, tz + 0.5));
     }
   }
 
@@ -1223,7 +1311,9 @@ export class GameEngine {
     } else if (item && item.kind === 'block') {
       this.toolMode = 'block';
       this.weapons.setHolstered(true);
-      this.heldBlock.setGeometry(this.blockGeometry(FROM_FPS[item.blockId] ?? B.STONE));
+      const worldId = FROM_FPS[item.blockId] ?? B.STONE;
+      if (worldId === B.TORCH) this.heldBlock.showTorch();
+      else this.heldBlock.setGeometry(this.blockGeometry(worldId));
     } else if (item && item.kind === 'food') {
       this.toolMode = 'food';
       this.weapons.setHolstered(true);
@@ -1943,6 +2033,9 @@ export class GameEngine {
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
 
+    // re-target the torch light pool onto the torches nearest the camera
+    this.torchLights.update(dt, this.camera.position);
+
     // ---- practice targets wobble ----
     for (const t of this.targets) {
       t.wobbleX.update(dt);
@@ -2077,6 +2170,9 @@ export class GameEngine {
 
     const { x, y, z, id } = this.target;
     this.world.setBlock(x, y, z, B.AIR);
+    if (id === B.TORCH) this.torchLights.remove(x, y, z);
+    // a torch leaning on the block we just mined pops off too (sides + above)
+    this.detachTorchesSupportedBy(x, y, z, true);
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
     this.sound.playBreak(d.sound);
     this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
@@ -2123,6 +2219,8 @@ export class GameEngine {
   private placeBlock(): void {
     const item = this.inventory.hotbar[this.sel];
     if (!item || item.kind !== 'block' || item.count <= 0) return;
+    // Coal / sticks are crafting materials, not placeable blocks.
+    if (item.blockId === B_COAL || item.blockId === B_STICK) return;
     const hit = this.target;
     if (!hit || !this.mouse.right || this.placeCd > 0) return;
 
@@ -2140,8 +2238,14 @@ export class GameEngine {
     const ourId = FROM_FPS[item.blockId] ?? B.STONE;
     const d = DEFS[ourId];
     if (d.solid && this.playerIntersectsBlock(x, y, z)) return;
+    // Torch must cling to a solid face (Minecraft rule) — otherwise it would float.
+    if (ourId === B.TORCH && !atPlant) {
+      const supportDef = DEFS[hit.id];
+      if (!supportDef?.solid) return;
+    }
 
     this.world.setBlock(x, y, z, ourId);
+    if (ourId === B.TORCH) this.torchLights.add(x, y, z, x - hit.nx, y - hit.ny, z - hit.nz);
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 8, 1.7);
     this.sound.playPlace(d.sound);
     this.heldBlock.triggerPlace();
@@ -2483,6 +2587,8 @@ export class GameEngine {
       // Rocket blasts can nibble the crater rim without touching the plant
       // directly above — clear any leftover cross-quad so nothing hangs.
       this.removeFloatingPlantsAbove(x, y, z);
+      if (id === B.TORCH) this.torchLights.remove(x, y, z);
+      this.detachTorchesSupportedBy(x, y, z, false);
       if (drops >= MAX_BLAST_DROPS || Math.random() > 0.28) return;
       drops++;
       this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
