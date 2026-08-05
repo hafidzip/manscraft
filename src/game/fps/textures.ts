@@ -1,6 +1,6 @@
 // Procedural pixel-art textures (Minecraft-style block atlas + weapon/sfx textures).
 import * as THREE from 'three';
-import { mulberry32 } from './noise';
+import { mulberry32 } from '../core/noise';
 
 const TILE = 32;          // pixels per tile
 const ATLAS_COLS = 4;

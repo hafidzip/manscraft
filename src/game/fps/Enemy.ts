@@ -15,7 +15,14 @@ import type { CampBuild, CampSite } from '../world/camps';
 import { Biome } from '../world/biomes';
 import { B, isWaterId } from '../world/blocks';
 import { mulberry32 } from '../core/noise';
-import { CAMP_CONFIG } from './camps';
+
+const CAMP_CONFIG = {
+  squadSize: [3, 5] as [number, number],
+  respawnDelay: 20,
+  repopulateDelay: 90,
+  patrolSpeedFactor: 0.55,
+  maxLeash: 70,
+};
 
 /**
  * Shared per-frame pathfinding budget. The manager refills it each frame so

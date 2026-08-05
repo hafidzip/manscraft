@@ -11,12 +11,12 @@
  *   4. Additively combine the shafts onto the main scene.
  *
  * This never touches the renderer's real depth/color buffers and needs no
- * depth-texture plumbing through the composer, so it drops into any
- * EffectComposer chain as a single extra pass.
+ * external render-target plumbing, so it drops into any post-process pipeline
+ * as a single self-contained stage.
  */
 
 import * as THREE from 'three';
-import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
 // More samples = smoother, longer rays but slightly more expensive.
 // 52 samples gives visible rays even at moderate density without banding.
@@ -94,11 +94,11 @@ function makeSunDiscTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Drop-in EffectComposer pass. Owner sets `lightWorldPosition` and
+ * Standalone post-process stage. Owner sets `lightWorldPosition` and
  * `intensity` once per frame (e.g. from the sky's sun position and its
  * day/night factor); the pass handles everything else internally.
  */
-export class VolumetricLightPass extends Pass {
+export class VolumetricLightPass {
   /** world-space position to treat as the light source (the sun billboard). */
   readonly lightWorldPosition = new THREE.Vector3();
   /** 0 = off, ~0.4-0.8 = a believable shaft intensity. */
@@ -143,7 +143,6 @@ export class VolumetricLightPass extends Pass {
   private uv = new THREE.Vector2(0.5, 0.5);
 
   constructor(scene: THREE.Scene, camera: THREE.Camera, width: number, height: number) {
-    super();
     this.scene = scene;
     this.camera = camera;
 
@@ -265,12 +264,7 @@ export class VolumetricLightPass extends Pass {
     c.uIntensity.value = active ? this.intensity : 0;
     this.fsQuad.material = this.combineMat;
 
-    if (this.renderToScreen) {
-      renderer.setRenderTarget(null);
-    } else {
-      renderer.setRenderTarget(writeBuffer);
-      if (this.clear) renderer.clear();
-    }
+    renderer.setRenderTarget(writeBuffer);
     this.fsQuad.render(renderer);
   }
 

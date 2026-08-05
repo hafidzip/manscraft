@@ -26,12 +26,10 @@ import { raycastVoxel, type RayHit } from './player/raycast';
 import { Particles } from './vfx/particles';
 import { Sky } from './vfx/sky';
 import { LaserTool } from './vfx/laserTool';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { DepthFogPass } from './vfx/depthFog';
 import { VolumetricLightPass } from './vfx/volumetric';
+import { OutputStage } from './vfx/output';
 import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
@@ -230,12 +228,14 @@ export class GameEngine {
   private prevLeft = false;
   private placeCd = 0;
 
-  // ---- post-processing pipeline (built in init, disposed in dispose) ----
-  private composer: EffectComposer | null = null;
-  private composerRT: THREE.WebGLRenderTarget | null = null;
+  // ---- post-processing pipeline (raw WebGLRenderTarget chain) ----
+  private mainRT: THREE.WebGLRenderTarget | null = null;
+  private fogRT: THREE.WebGLRenderTarget | null = null;
+  private volumetricRT: THREE.WebGLRenderTarget | null = null;
   private depthFogPass: DepthFogPass | null = null;
   private bloom: UnrealBloomPass | null = null;
   private volumetricLight: VolumetricLightPass | null = null;
+  private outputStage: OutputStage | null = null;
   /** camera-mounted night torch */
   private flashlight: THREE.SpotLight | null = null;
   private flashlightTarget = new THREE.Object3D();
@@ -528,34 +528,32 @@ export class GameEngine {
       light.shadow.radius = 2;
     }
 
-    // ---- post pipeline: depth fog -> bloom -> god rays -> output ----
+    // ---- post pipeline (raw render-target chain):
+    //   scene → mainRT → depth fog → fogRT → bloom (in place)
+    //   → volumetric → volumetricRT → output → screen
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-    this.composerRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+
+    this.mainRT = new THREE.WebGLRenderTarget(size.x, size.y, {
       type: THREE.HalfFloatType,
     });
-    this.composerRT.depthTexture = new THREE.DepthTexture(size.x, size.y);
-    this.composerRT.depthTexture.type = THREE.UnsignedIntType;
+    this.mainRT.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    this.mainRT.depthTexture.type = THREE.UnsignedIntType;
 
-    this.composer = new EffectComposer(this.renderer, this.composerRT);
-    // RenderPass draws the scene into the composer's *read* buffer (the
-    // cloned second RT), so that buffer also needs a depth texture for the
-    // fog pass to reconstruct world positions.
-    const rt2 = this.composer.renderTarget2;
-    rt2.depthTexture = new THREE.DepthTexture(size.x, size.y);
-    rt2.depthTexture.type = THREE.UnsignedIntType;
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.fogRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+    this.volumetricRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
 
     this.depthFogPass = new DepthFogPass(this.camera);
-    this.depthFogPass.material.uniforms.tDepth.value = this.composerRT.depthTexture;
-    this.composer.addPass(this.depthFogPass);
+    this.depthFogPass.material.uniforms.tDepth.value = this.mainRT.depthTexture;
 
     this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.3, 0.55, 0.82);
-    this.composer.addPass(this.bloom);
 
     this.volumetricLight = new VolumetricLightPass(this.scene, this.camera, size.x, size.y);
-    this.composer.addPass(this.volumetricLight);
 
-    this.composer.addPass(new OutputPass());
+    this.outputStage = new OutputStage();
 
     // ---- camera-mounted flashlight for night exploration ----
     // Slightly warm, tighter cone: reads as a carried torch cutting through
@@ -1519,7 +1517,10 @@ export class GameEngine {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
-    this.composer?.setSize(w, h);
+    this.mainRT?.setSize(w, h);
+    this.fogRT?.setSize(w, h);
+    this.volumetricRT?.setSize(w, h);
+    this.volumetricLight?.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
@@ -1728,8 +1729,26 @@ export class GameEngine {
 
     this.reportStats(dt);
 
-    if (this.composer) this.composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    if (this.mainRT) {
+      // 1) Render scene into the main target (carries the depth texture).
+      this.renderer.setRenderTarget(this.mainRT);
+      this.renderer.render(this.scene, this.camera);
+
+      // 2) Depth fog: reads mainRT + its depth, writes fogRT.
+      this.depthFogPass!.render(this.renderer, this.fogRT!, this.mainRT);
+
+      // 3) Bloom: reads fogRT and blends back into it IN PLACE — UnrealBloomPass
+      // writes to readBuffer, not writeBuffer. fogRT now holds scene + bloom.
+      this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, dt, false);
+
+      // 4) Volumetric light (god rays): reads fogRT, writes volumetricRT.
+      this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+
+      // 5) Output pass: reads volumetricRT → screen (tone-mapping + sRGB).
+      this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
 
     // keep a fresh frame grab ready for the seamless space handoff
     this.captureSnapshot(dt);
@@ -2741,8 +2760,10 @@ export class GameEngine {
     this.depthFogPass?.dispose();
     this.bloom?.dispose();
     this.volumetricLight?.dispose();
-    this.composer?.dispose();
-    this.composerRT?.dispose();
+    this.outputStage?.dispose();
+    this.mainRT?.dispose();
+    this.fogRT?.dispose();
+    this.volumetricRT?.dispose();
     for (const g of this.blockGeomCache.values()) g.dispose();
     this.blockGeomCache.clear();
     this.scene.traverse((o) => {

@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three';
-import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { FOG_UNIFORMS } from './heightFog';
 
 const VERT = /* glsl */ `
@@ -136,14 +136,13 @@ const FRAG = /* glsl */ `
   }
 `;
 
-export class DepthFogPass extends Pass {
+export class DepthFogPass {
   readonly material: THREE.ShaderMaterial;
   private fsQuad: FullScreenQuad;
   private camera: THREE.Camera;
   private inv = new THREE.Matrix4();
 
   constructor(camera: THREE.Camera) {
-    super();
     this.camera = camera;
     this.material = new THREE.ShaderMaterial({
       uniforms: {
@@ -160,10 +159,7 @@ export class DepthFogPass extends Pass {
       depthWrite: false,
     });
     this.fsQuad = new FullScreenQuad(this.material);
-    this.needsSwap = true;
   }
-
-  setSize(): void { /* resolution-independent; nothing to resize */ }
 
   render(
     renderer: THREE.WebGLRenderer,
@@ -174,7 +170,7 @@ export class DepthFogPass extends Pass {
     u.tDiffuse.value = readBuffer.texture;
     u.tDepth.value = readBuffer.depthTexture;
 
-    // camera matrices are fresh at this point (RenderPass has already drawn)
+    // Camera matrices are fresh after the scene render into the main target.
     this.inv.copy(this.camera.projectionMatrix)
       .multiply(this.camera.matrixWorldInverse)
       .invert();
@@ -185,12 +181,7 @@ export class DepthFogPass extends Pass {
       (this.camera as THREE.PerspectiveCamera).far,
     );
 
-    if (this.renderToScreen) {
-      renderer.setRenderTarget(null);
-    } else {
-      renderer.setRenderTarget(writeBuffer);
-      if (this.clear) renderer.clear();
-    }
+    renderer.setRenderTarget(writeBuffer);
     this.fsQuad.render(renderer);
   }
 
