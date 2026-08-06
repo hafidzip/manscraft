@@ -4,10 +4,10 @@
  * readout and ship prompt are layered on top for the unified game.
  */
 
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import {
-  Bomb, ChevronUp, Crosshair as CrosshairIcon, Hammer, Moon, Mountain,
-  Rocket, Shield, Skull, Sun, Swords, Volume2, VolumeX, X, Package, Apple, ArrowRight, Flame,
+  ChevronUp, Hammer,
+  Rocket, Shield, Swords, X, Package, Apple, ArrowRight, Flame,
   ArrowDownUp,
 } from 'lucide-react';
 import type { GameEngine, HotbarItem, HudStats } from '../game/engine';
@@ -237,54 +237,6 @@ function PixelHeart({ mode = 'full' }: { mode?: 'full' | 'half' | 'empty' }) {
 // ---------------------------------------------------------- pieces kept from the minecraft HUD
 const LABELS: Record<string, string> = { handgun: 'P9', smg: 'KV-9', rifle: 'AR-77', sniper: 'LW-50', bazooka: 'RPG-9', laser: 'MK-7' };
 
-function StatChip({ stats, seed }: { stats: HudStats; seed: number }) {
-  return (
-    <div className="pointer-events-none absolute left-4 top-4 z-20 flex flex-col gap-1.5 font-vt text-sm leading-none text-white/90">
-      <span className="flex items-center gap-2">
-        <span className="text-emerald-300">{stats.fps} FPS</span>
-        <span className="text-white/50">|</span>
-        <span>XYZ {stats.x} / {stats.y} / {stats.z}</span>
-      </span>
-      <span className="flex items-center gap-2 rounded bg-black/40 px-2.5 py-1.5 backdrop-blur-sm">
-        <Mountain className="h-3.5 w-3.5 text-amber-300" />
-        <span>{stats.biome}</span>
-        <span className="text-white/50">|</span>
-        {stats.isDay ? <Sun className="h-3.5 w-3.5 text-yellow-300" /> : <Moon className="h-3.5 w-3.5 text-indigo-300" />}
-        <span>{stats.isDay ? 'Day' : 'Night'}</span>
-        <span className="text-white/50">|</span>
-        {stats.muted ? <VolumeX className="h-3.5 w-3.5 text-red-300" /> : <Volume2 className="h-3.5 w-3.5 text-sky-300" />}
-        <span className="text-white/40">seed {seed}</span>
-      </span>
-      <span className="flex items-center gap-2 rounded bg-black/40 px-2.5 py-1.5 font-pixel text-[9px] text-white/90 backdrop-blur-sm">
-        <Swords size={11} className="text-[#ff5347]" />
-        <span className="text-[#ff8bb0]">CAMPS {stats.campsCleared}/{stats.campsTotal} CLEARED</span>
-        <span className="text-white/40">·</span>
-        <Skull size={11} className="text-white/70" />
-        <span className="text-[#ffd23e]">{stats.kills}</span>
-        <span className="text-white/40">·</span>
-        <span className={stats.enemiesAlive > 0 ? 'text-[#ff5347]' : 'text-[#6dc24a]'}>{stats.enemiesAlive} LEFT</span>
-        {stats.targetsHit > 0 && (<><span className="text-white/40">·</span><CrosshairIcon size={11} className="text-white/70" /><span className="text-[#ffd23e]">{stats.targetsHit}</span></>)}
-        {stats.demolition > 0 && (<><span className="text-white/40">·</span><Bomb size={11} className="text-white/70" /><span className="text-[#ff8b4e]">{stats.demolition}</span></>)}
-      </span>
-    </div>
-  );
-}
-
-/** training-protocol session bar (voxel-fps boss bar) */
-function SessionBar({ stats }: { stats: HudStats }) {
-  return (
-    <div className="absolute top-3 left-1/2 z-20 -translate-x-1/2 pointer-events-none flex flex-col items-center gap-1.5">
-      <div className="px-font px-shadow text-[8px] text-[#ffb7ec] tracking-widest">TRAINING PROTOCOL</div>
-      <div className="bossbar w-[min(420px,60vw)] h-[10px]">
-        <div
-          className="bossbar-fill h-full transition-[width] duration-500 ease-linear"
-          style={{ width: `${(stats.session ?? 1) * 100}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 /** cockpit readout while flying */
 function PilotChip({ stats }: { stats: HudStats }) {
   return (
@@ -338,41 +290,6 @@ function CoinIcon({ size = 16 }: { size?: number }) {
 function ShopItemIcon({ item, size = 32 }: { item: typeof SHOP_ITEMS[0]; size?: number }) {
   if (item.goods.kind === 'food') return <DrumstickIcon size={size} />;
   return <BlockIcon blockId={item.goods.blockId} size={size} />;
-}
-
-/** the player's purse — pulses when coins come in or go out */
-function CoinChip({ stats }: { stats: HudStats }) {
-  const [pop, setPop] = useState(0);
-  const [delta, setDelta] = useState<{ v: number; id: number } | null>(null);
-  const prevSeq = useRef(stats.coinSeq);
-
-  useEffect(() => {
-    if (stats.coinSeq !== prevSeq.current) {
-      prevSeq.current = stats.coinSeq;
-      setPop((p) => p + 1);
-      if (stats.lastCoinGain !== 0) setDelta({ v: stats.lastCoinGain, id: stats.coinSeq });
-    }
-  }, [stats.coinSeq, stats.lastCoinGain]);
-
-  return (
-    <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-1">
-      <div
-        key={pop}
-        className="coin-pop flex items-center gap-2 rounded-md border-2 border-[#f2c14e]/60 bg-[#1a1408]/85 px-3 py-1.5 font-pixel text-[11px] leading-none text-[#ffe08a] backdrop-blur-sm"
-      >
-        <CoinIcon size={15} />
-        <span className="tabular-nums">{stats.coins}</span>
-      </div>
-      {delta && (
-        <div
-          key={delta.id}
-          className={`coin-float px-font text-[10px] ${delta.v > 0 ? 'text-[#6dc24a]' : 'text-[#ff5347]'}`}
-        >
-          {delta.v > 0 ? `+${delta.v}` : delta.v}
-        </div>
-      )}
-    </div>
-  );
 }
 
 /** "press E to trade" prompt above an idle merchant */
@@ -646,7 +563,7 @@ function LoadingScreen({ progress, label }: { progress: number; label: string })
 }
 
 // ---------------------------------------------------------- app
-export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stats, seed, onPlay, onCloseInventory, engineRef }: HudProps) {
+export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stats, onPlay, onCloseInventory, engineRef }: HudProps) {
   const playing = phase === 'ready' && locked;
 
   // The pause/title menu only appears after the "unlocked, no modal" state
@@ -886,9 +803,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </div>
       )}
 
-      {/* session boss bar */}
-      {playing && stats && !stats.dead && <SessionBar stats={stats} />}
-
       {/* crosshair */}
       {playing && stats && !stats.dead && !stats.scoped && stats.toolMode !== 'laser' && stats.ads < 0.5 && !stats.piloting && (
         <div className="absolute left-1/2 top-1/2 z-20 pointer-events-none" style={{ transform: 'translate(-50%,-50%)' }}>
@@ -1003,8 +917,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
           )}
           {stats.shipNear && !stats.piloting && !stats.nearMerchant && <BoardPrompt />}
           {stats.nearMerchant && !stats.shopOpen && !stats.piloting && !stats.dead && <TradePrompt />}
-          <StatChip stats={stats} seed={seed} />
-          <CoinChip stats={stats} />
         </>
       )}
 

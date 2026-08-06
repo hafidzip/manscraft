@@ -9,7 +9,7 @@ import { WORLD_SIZE, WORLD_HEIGHT, wrapDelta } from '../core/constants';
 import { Effects } from './effects';
 import { AudioSynth } from './audio';
 import { box, MATS } from './models';
-import { faceTexture, pixelTexture } from './textures';
+import { pixelTexture } from './textures';
 import { findPath } from './Pathfinder';
 import type { CampBuild, CampSite } from '../world/camps';
 import { Biome } from '../world/biomes';
@@ -88,19 +88,19 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
   grunt: {
     id: 'grunt', name: 'GRUNT', hp: 40, speed: 4.6, sightRange: 9999, attackRange: 26,
     preferredRange: 10, attackCooldown: 1.6, burst: 3, burstDelay: 0.16,
-    accuracy: 0.72, damage: 7, skin: '#c98f5f', shirt: '#4a5d3a', pants: '#3a3f4a', seed: 12,
+    accuracy: 0.72, damage: 7, skin: '#86a08e', shirt: '#33463c', pants: '#26313b', seed: 12,
     behavior: 'patrol',
   },
   runner: {
     id: 'runner', name: 'RUNNER', hp: 26, speed: 6.2, sightRange: 9999, attackRange: 20,
     preferredRange: 6, attackCooldown: 1.1, burst: 4, burstDelay: 0.11,
-    accuracy: 0.6, damage: 5, skin: '#a9764b', shirt: '#7a3030', pants: '#2c2c30', seed: 31,
+    accuracy: 0.6, damage: 5, skin: '#b0766a', shirt: '#54302e', pants: '#2e2327', seed: 31,
     behavior: 'patrol',
   },
   heavy: {
     id: 'heavy', name: 'HEAVY', hp: 90, speed: 3.6, sightRange: 9999, attackRange: 34,
     preferredRange: 14, attackCooldown: 2.1, burst: 6, burstDelay: 0.13,
-    accuracy: 0.8, damage: 10, skin: '#b9825a', shirt: '#2f3a4a', pants: '#23262c', seed: 55,
+    accuracy: 0.8, damage: 10, skin: '#8b98bd', shirt: '#313a58', pants: '#232838', seed: 55,
     behavior: 'idle',
   },
   /**
@@ -114,6 +114,11 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
     accuracy: 0, damage: 0, skin: '#c98f5f', shirt: '#8a5a2e', pants: '#46403a', seed: 77,
     behavior: 'idle', peaceful: true,
   },
+};
+
+/** Per-caste eye / antenna glow — HDR-bright so the bloom pass makes them shine. */
+const EYE_COLORS: Record<string, number> = {
+  grunt: 0x62ffa8, runner: 0xffb03a, heavy: 0x54d8ff, merchant: 0xffe08a,
 };
 
 /** Extra speed while sprinting after a player who is out of firing position. */
@@ -266,6 +271,10 @@ export class Enemy {
   private weaponKick = 0;
   private aimPitch = 0;
   private bodyMats: THREE.MeshLambertMaterial[] = [];
+  /** shared HDR glow material (eyes, antenna tips, sternum node) */
+  private eyeMat: THREE.MeshBasicMaterial | null = null;
+  private eyeBase = new THREE.Color();
+  private eyeSeed = Math.random() * Math.PI * 2;
 
   // ---- patrol / leash
   patrolPoints: { x: number; z: number }[] = [];
@@ -316,51 +325,81 @@ export class Enemy {
   // ------------------------------------------------------------ model
   private build() {
     const c = this.cfg;
+    // Alien combatant: chitinous carapace, oversized cranium, digitigrade
+    // legs and a shared HDR glow for eyes / antenna tips / sternum node.
+    // The material layout (skin / shirt / pants) is unchanged, so the
+    // hit-flash and death code keeps working untouched.
     const skinMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.skin, 14, 16, c.seed) });
-    const faceMat = new THREE.MeshLambertMaterial({ map: faceTexture(c.skin, c.seed) });
     const shirtMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.shirt, 16, 16, c.seed + 1) });
     const pantsMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.pants, 14, 16, c.seed + 2) });
     this.bodyMats = [skinMat, shirtMat, pantsMat];
 
+    // toneMapped:false lets the colour run past 1.0 in the HDR target, which
+    // is exactly what the bloom pass needs to turn the eyes into real light.
+    this.eyeBase.set(EYE_COLORS[c.id] ?? 0x7dffb8);
+    this.eyeMat = new THREE.MeshBasicMaterial({
+      color: this.eyeBase.clone().multiplyScalar(1.8),
+      toneMapped: false,
+    });
+
     this.group.add(this.bodyRoot);
 
-    // legs (model faces +Z)
-    this.legL.position.set(-0.13, 0.78, 0);
-    this.legR.position.set(0.13, 0.78, 0);
-    box(this.legL, 0.2, 0.78, 0.22, 0, -0.39, 0, pantsMat);
-    box(this.legR, 0.2, 0.78, 0.22, 0, -0.39, 0, pantsMat);
-    box(this.legL, 0.21, 0.1, 0.3, 0, -0.75, 0.04, MATS.boot);
-    box(this.legR, 0.21, 0.1, 0.3, 0, -0.75, 0.04, MATS.boot);
+    // ---- digitigrade legs (model faces +Z)
+    this.legL.position.set(-0.12, 0.8, 0);
+    this.legR.position.set(0.12, 0.8, 0);
+    box(this.legL, 0.16, 0.8, 0.18, 0, -0.4, 0, pantsMat);
+    box(this.legR, 0.16, 0.8, 0.18, 0, -0.4, 0, pantsMat);
+    box(this.legL, 0.18, 0.09, 0.36, 0, -0.76, 0.07, MATS.boot);   // three-toed claw
+    box(this.legR, 0.18, 0.09, 0.36, 0, -0.76, 0.07, MATS.boot);
     this.bodyRoot.add(this.legL, this.legR);
 
-    // torso
-    box(this.bodyRoot, 0.46, 0.56, 0.24, 0, 1.06, 0, shirtMat);
-    box(this.bodyRoot, 0.48, 0.14, 0.26, 0, 0.85, 0, MATS.black); // belt
-    box(this.bodyRoot, 0.44, 0.2, 0.27, 0, 1.18, 0, MATS.vest);   // chest rig
+    // ---- narrow ribcage torso with a glowing sternum node
+    box(this.bodyRoot, 0.4, 0.52, 0.22, 0, 1.08, 0, shirtMat);
+    box(this.bodyRoot, 0.3, 0.18, 0.2, 0, 0.86, 0, skinMat);        // abdomen
+    box(this.bodyRoot, 0.34, 0.1, 0.16, 0, 1.32, -0.02, shirtMat);  // shoulder ridge
+    box(this.bodyRoot, 0.1, 0.44, 0.08, 0, 1.08, -0.14, pantsMat);  // spine ridge
+    box(this.bodyRoot, 0.08, 0.08, 0.02, 0, 1.12, 0.12, this.eyeMat); // sternum node
 
-    // Neck and head (face on +Z). The bottom of the head exactly meets the
-    // top of the torso, so the NPC reads as one connected Minecraft body.
-    box(this.bodyRoot, 0.16, 0.13, 0.16, 0, 1.38, 0, skinMat);
+    // ---- oversized cranium on a thin neck (face on +Z)
+    box(this.bodyRoot, 0.12, 0.1, 0.12, 0, 1.39, 0, skinMat);
     const head = new THREE.Group();
     head.position.set(0, 1.34, 0);
     this.bodyRoot.add(head);
-    const headMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.42, 0.42, 0.42),
-      [skinMat, skinMat, skinMat, skinMat, faceMat, skinMat]
-    );
-    headMesh.position.y = 0.21;
-    head.add(headMesh);
+    box(head, 0.28, 0.18, 0.3, 0, 0.11, 0.01, skinMat);             // jaw / lower face
+    box(head, 0.46, 0.26, 0.44, 0, 0.34, 0, skinMat);               // cranium
+    box(head, 0.36, 0.14, 0.34, 0, 0.52, -0.02, skinMat);           // cranium crown
 
-    // Two independent Minecraft arms. In combat both rotate forward to grip
-    // the rifle; when moving out of combat the support arm resumes a swing.
-    this.armL.position.set(-0.28, 1.28, -0.015);
-    box(this.armL, 0.18, 0.62, 0.18, 0, -0.28, 0, shirtMat);
-    box(this.armL, 0.16, 0.16, 0.16, 0, -0.62, 0, skinMat);
+    // Slanted glowing eyes — the alien signature, readable across the map.
+    const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.055, 0.03), this.eyeMat);
+    eyeL.position.set(-0.1, 0.3, 0.225);
+    eyeL.rotation.z = 0.42;
+    const eyeR = eyeL.clone();
+    eyeR.position.x = 0.1;
+    eyeR.rotation.z = -0.42;
+    head.add(eyeL, eyeR);
+
+    // Antennae whose tips share the eye glow (they pulse together).
+    const antL = new THREE.Group();
+    antL.position.set(-0.09, 0.58, 0);
+    antL.rotation.z = 0.28;
+    box(antL, 0.022, 0.2, 0.022, 0, 0.1, 0, pantsMat);
+    const tipL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.05), this.eyeMat);
+    tipL.position.y = 0.22;
+    antL.add(tipL);
+    const antR = antL.clone();
+    antR.position.x = 0.09;
+    antR.rotation.z = -0.28;
+    head.add(antL, antR);
+
+    // ---- long slender arms ending in claws
+    this.armL.position.set(-0.26, 1.28, -0.015);
+    box(this.armL, 0.13, 0.66, 0.13, 0, -0.3, 0, shirtMat);
+    box(this.armL, 0.11, 0.18, 0.1, 0, -0.68, 0.02, skinMat);
     this.bodyRoot.add(this.armL);
 
-    this.armR.position.set(0.28, 1.28, -0.015);
-    box(this.armR, 0.18, 0.62, 0.18, 0, -0.28, 0, shirtMat);
-    box(this.armR, 0.16, 0.16, 0.16, 0, -0.62, 0, skinMat);
+    this.armR.position.set(0.26, 1.28, -0.015);
+    box(this.armR, 0.13, 0.66, 0.13, 0, -0.3, 0, shirtMat);
+    box(this.armR, 0.11, 0.18, 0.1, 0, -0.68, 0.02, skinMat);
     this.bodyRoot.add(this.armR);
 
     // Dedicated SMG rig. It is parented to the torso rather than a wrist so
@@ -395,9 +434,12 @@ export class Enemy {
     this.muzzle.position.set(0, 0.01, 0.86);
     this.weapon.add(this.muzzle);
 
+    // Heavies are a full head taller than the other castes.
+    if (c.id === 'heavy') this.bodyRoot.scale.setScalar(1.12);
+
     // health bar billboard
     this.hpBar = new THREE.Group();
-    this.hpBar.position.set(0, 2.25, 0);
+    this.hpBar.position.set(0, 2.38, 0);
     const bg = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 0.1), new THREE.MeshBasicMaterial({ color: '#14060f', transparent: true, opacity: 0.85, depthWrite: false }));
     this.hpFill = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.055), new THREE.MeshBasicMaterial({ color: '#e84fc0', depthWrite: false }));
     this.hpFill.position.z = 0.001;
@@ -413,16 +455,16 @@ export class Enemy {
       const bandMat = new THREE.MeshLambertMaterial({ color: '#a33b2e' });
       const packMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#7a5a34', 10, 10, c.seed + 4) });
       const crateMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#8a6a3f', 8, 8, c.seed + 5) });
-      box(this.bodyRoot, 0.62, 0.05, 0.62, 0, 1.56, 0, strawMat);        // hat brim
-      box(this.bodyRoot, 0.34, 0.16, 0.34, 0, 1.66, 0, strawMat);        // hat crown
-      box(this.bodyRoot, 0.36, 0.045, 0.36, 0, 1.6, 0, bandMat);         // hat band
+      box(this.bodyRoot, 0.62, 0.05, 0.62, 0, 1.98, 0, strawMat);        // hat brim
+      box(this.bodyRoot, 0.34, 0.16, 0.34, 0, 2.08, 0, strawMat);        // hat crown
+      box(this.bodyRoot, 0.36, 0.045, 0.36, 0, 2.02, 0, bandMat);        // hat band
       box(this.bodyRoot, 0.4, 0.5, 0.22, 0, 1.08, -0.24, packMat);       // supply pack
       box(this.bodyRoot, 0.3, 0.22, 0.24, 0, 1.42, -0.25, crateMat);     // crate on top
       box(this.bodyRoot, 0.42, 0.05, 0.06, 0, 1.22, -0.1, MATS.black);   // pack strap
       // the rifle rig stays, but a peaceful trader never draws it
 
       const badge = new THREE.Group();
-      badge.position.set(0, 2.24, 0);
+      badge.position.set(0, 2.5, 0);
       const coinMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#f2c14e', 6, 6, c.seed + 6) });
       const rimMat = new THREE.MeshLambertMaterial({ color: '#b8860b' });
       const coin = new THREE.Group();
@@ -458,12 +500,45 @@ export class Enemy {
     if (tmpV.lengthSq() < 0.001) tmpV.set(Math.random() - 0.5, 0, Math.random() - 0.5);
     tmpV.normalize().multiplyScalar(headshot ? 2.2 : 1.2);
     this.vel.x += tmpV.x; this.vel.z += tmpV.z;
-    // hit sparks
+    // hit sparks — green ichor for aliens, red for the (human) merchant
+    const ichor = this.cfg.peaceful ? 0xd0342c : 0x56e08a;
     for (let i = 0; i < 4; i++) {
       tmpV2.set((Math.random() - 0.5) * 3, Math.random() * 3, (Math.random() - 0.5) * 3);
-      this.deps.effects.spawnParticle(point, tmpV2, 0xd0342c, 0.035 + Math.random() * 0.02, 0.4, true);
+      this.deps.effects.spawnParticle(point, tmpV2, ichor, 0.035 + Math.random() * 0.02, 0.4, true);
     }
     if (this.hp <= 0) this.die(point);
+  }
+
+  /**
+   * Sunrise: the alien evaporates. Unlike `die()` this grants no kill credit
+   * and no loot — the body simply boils away into motes of light. The agent
+   * is flagged dead immediately so it stops shooting the same frame, and the
+   * corpse timer is pre-advanced so the manager prunes it within a second.
+   */
+  dissolve() {
+    if (!this.alive) return;
+    this.state = 'dead';
+    this.stateT = 1.15;
+    this.hpFill.visible = false;
+    this.hpBar.visible = false;
+    if (this.coinBadge) this.coinBadge.visible = false;
+    if (this.eyeMat) this.eyeMat.color.setRGB(0.04, 0.07, 0.05);
+    const base = this.pos;
+    for (let i = 0; i < 18; i++) {
+      tmpV.set((Math.random() - 0.5) * 0.9, 1.4 + Math.random() * 2.2, (Math.random() - 0.5) * 0.9);
+      this.deps.effects.spawnParticle(
+        tmpV2.set(
+          base.x + (Math.random() - 0.5) * 0.5,
+          base.y + Math.random() * 1.8,
+          base.z + (Math.random() - 0.5) * 0.5,
+        ),
+        tmpV, [0x7dffb8, 0x2fae7a, 0xcfffe6][i % 3],
+        0.03 + Math.random() * 0.04, 0.6 + Math.random() * 0.5, true,
+      );
+    }
+    this.deps.effects.puff(
+      tmpV2.set(base.x, base.y + 0.9, base.z), tmpV.set(0, 1, 0), 0.7, 0.9, '#8ff0c0',
+    );
   }
 
   private die(point: THREE.Vector3) {
@@ -476,7 +551,11 @@ export class Enemy {
       tmpV.set((Math.random() - 0.5) * 5, Math.random() * 5 + 1, (Math.random() - 0.5) * 5);
       this.deps.effects.spawnParticle(
         point.clone().add(tmpV2.set((Math.random() - 0.5) * 0.4, 0.3 + Math.random() * 0.8, (Math.random() - 0.5) * 0.4)),
-        tmpV, [0xd0342c, 0x6e1a14, 0x2a2a2e][i % 3], 0.05 + Math.random() * 0.05, 0.7 + Math.random() * 0.4, true
+        tmpV,
+        this.cfg.peaceful
+          ? [0xd0342c, 0x6e1a14, 0x2a2a2e][i % 3]
+          : [0x56e08a, 0x1f7a4a, 0x2a3a2e][i % 3],
+        0.05 + Math.random() * 0.05, 0.7 + Math.random() * 0.4, true
       );
     }
     this.deps.effects.puff(point, tmpV.set(0, 1, 0), 0.6, 1.0, '#9a948a');
@@ -643,6 +722,8 @@ export class Enemy {
     this.stateT += dt;
 
     if (this.state === 'dead') {
+      // the glow dies with the alien — eyes go dark before the body sinks
+      if (this.eyeMat) this.eyeMat.color.setRGB(0.04, 0.07, 0.05);
       // topple, then sink and flag removal
       this.bodyRoot.rotation.x = THREE.MathUtils.lerp(this.bodyRoot.rotation.x, -Math.PI / 2, Math.min(1, dt * 7));
       if (this.stateT > 1.1) this.group.position.y -= dt * 0.9;
@@ -665,6 +746,12 @@ export class Enemy {
     this.strafeTimer -= dt;
     this.recoilT = Math.max(0, this.recoilT - dt);
     this.weaponKick = Math.max(0, this.weaponKick - dt * 15);
+    // Living glow: eyes, antenna tips and the sternum node breathe while the
+    // alien is active — and burn noticeably brighter once it starts hunting.
+    if (this.eyeMat) {
+      const pulse = 1.5 + Math.sin(this.stateT * 4.5 + this.eyeSeed) * 0.45 + (this.alerted ? 0.6 : 0);
+      this.eyeMat.color.copy(this.eyeBase).multiplyScalar(pulse);
+    }
     if (this.strafeTimer <= 0) {
       this.strafeTimer = 1.4 + Math.random() * 2;
       this.strafeDir = Math.random() > 0.5 ? 1 : -1;
@@ -1556,6 +1643,17 @@ export interface EnemyHit { enemy: Enemy; point: THREE.Vector3; headshot: boolea
  */
 const SIM_RADIUS = 112;
 
+// ---------------------------------------------------------------------------
+// WILD SPAWNS — camps are gone; aliens drop in at random around the player.
+// A soft population cap plus a per-tick cooldown keeps the pressure constant
+// without ever materializing more than one rig every couple of seconds, and
+// the spawn ring sits well inside the streamed terrain so ground probes never
+// force chunk generation.
+// ---------------------------------------------------------------------------
+const WILD_CAP = 12;
+const WILD_RING_MIN = 30;
+const WILD_RING_MAX = 68;
+
 export class EnemyManager {
   enemies: Enemy[] = [];
   kills = 0;
@@ -1568,6 +1666,14 @@ export class EnemyManager {
   campsCleared = 0;
   /** true once the manager has ticked at least once */
   private primed = false;
+  /** countdown to the next wild alien drop-in */
+  private wildTimer = 2.5;
+  /**
+   * Aliens are nocturnal. While this is false no hostile will ever spawn, and
+   * the moment it flips false every living hostile dissolves. The engine
+   * drives it from the sky clock.
+   */
+  private night = true;
   private scene: THREE.Object3D | null = null;
   private deps: EnemyDeps;
   private player: EnemyPlayer;
@@ -1669,6 +1775,7 @@ export class EnemyManager {
     }
 
     this.respawnTick(dt);
+    this.wildTick(dt);
 
     // ---- camp proximity aggro: player entering a camp radius triggers squad
     for (const camp of this.camps) {
@@ -1886,6 +1993,50 @@ export class EnemyManager {
     }
   }
 
+  /**
+   * Random wild spawns: aliens materialize on standable ground inside a ring
+   * around the player, already hunting. The rise-from-ground 'spawn' intro
+   * plays first, so a drop-in reads as a teleport-in rather than a pop.
+   */
+  private wildTick(dt: number) {
+    if (!this.night) return;
+    this.wildTimer -= dt;
+    if (this.wildTimer > 0) return;
+    this.wildTimer = 1.4 + Math.random() * 1.4;
+
+    // soft cap counts hostiles only — the merchant never blocks a drop-in
+    let hostiles = 0;
+    for (const e of this.enemies) if (e.alive && !e.cfg.peaceful) hostiles++;
+    if (hostiles >= WILD_CAP) return;
+
+    const w = this.deps.world;
+    const pp = this.player.pos;
+    for (let tries = 0; tries < 8; tries++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = WILD_RING_MIN + Math.random() * (WILD_RING_MAX - WILD_RING_MIN);
+      const fx = ((Math.floor(pp.x + Math.cos(a) * r) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+      const fz = ((Math.floor(pp.z + Math.sin(a) * r) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+      const h = w.highestY(fx, fz);
+      if (h < 2 || h >= WORLD_HEIGHT - 3) continue;
+      const floor = w.get(fx, h - 1, fz);
+      if (isWaterId(floor) || floor === B.LEAVES || floor === B.AIR) continue;
+      if (w.solid(fx, h, fz) || w.solid(fx, h + 1, fz)) continue;
+
+      const roll = Math.random();
+      const preset = roll < 0.5 ? 'grunt' : roll < 0.82 ? 'runner' : 'heavy';
+      const p = new THREE.Vector3(fx + 0.5, h, fz + 0.5);
+      const e = new Enemy(preset, p, this.deps, {
+        behavior: Math.random() < 0.5 ? 'patrol' : 'idle',
+      });
+      e.home = { x: p.x, z: p.z };
+      this.enemies.push(e);
+      this.attach(e);
+      // wild aliens are hunters: provoked from the moment they materialize
+      e.alert(new THREE.Vector3(pp.x, pp.y, pp.z));
+      return;
+    }
+  }
+
   /** Hitscan test from the player's weapon against all living enemies. */
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): EnemyHit | null {
     let best: EnemyHit | null = null;
@@ -2044,6 +2195,26 @@ export class EnemyManager {
     this.campsCleared = cleared;
     this.primed = false;
   }
+
+  /**
+   * Day/night gate for the whole hostile population.
+   *
+   * Dawn: every living alien dissolves on the spot and nothing respawns.
+   * Dusk: the drop-in clock restarts and the night's hunt begins.
+   * Peaceful traders are unaffected — they keep their stall around the clock.
+   */
+  setNight(night: boolean) {
+    if (night === this.night) return;
+    this.night = night;
+    if (night) {
+      this.wildTimer = 0.8;
+    } else {
+      for (const e of this.enemies) if (e.alive && !e.cfg.peaceful) e.dissolve();
+    }
+  }
+
+  /** true while the nocturnal population is allowed to exist */
+  get isNight(): boolean { return this.night; }
 
   /** Enable/disable spawning. */
   setEnabled(enabled: boolean) {

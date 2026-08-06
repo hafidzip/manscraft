@@ -16,7 +16,7 @@ import * as C from './core/constants';
 import { createTextures, tileUV, type TextureSet } from './core/textures';
 import { B, DEFS, isWaterId, applyThemeToBlockColors } from './world/blocks';
 import { World } from './world/world';
-import { generateCamps, buildCamp, type CampSite, type CampBuild } from './world/camps';
+import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
 import { FluidSim } from './world/fluid';
@@ -159,6 +159,18 @@ const LOAD_LABELS = [
 ];
 
 const UNDERWATER_FOG = new THREE.Color(0x0a2a5e);
+
+/**
+ * Colour the whole world converges to on a foggy night.
+ *
+ * Night fog used to be invisible: the fog colour was pinned to the sky, and
+ * the night sky is nearly black, so "dense fog" just read as darkness. Only
+ * at dawn/dusk — when the sky briefly turns bright orange — did the fog
+ * become visible, which is exactly the bug this fixes. Lifting the night fog
+ * to a moonlit blue-grey makes the murk readable for the ENTIRE night, and
+ * the sky is pushed toward the same colour so the horizon stays seamless.
+ */
+const NIGHT_MIST = new THREE.Color(0x39465e);
 
 const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
@@ -330,6 +342,8 @@ export class GameEngine {
   private prevVelY = 0;
   private wasInWater = false;
   private disposed = false;
+  /** scratch colour for the per-frame night-mist blend */
+  private fogScratch = new THREE.Color();
   /** rolling snapshot of the last rendered frame (seamless scene handoff) */
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
@@ -486,11 +500,9 @@ export class GameEngine {
     this.world = new World(seed, mats);
     this.scene.add(this.world.group);
 
-    // Generate camps for every planet type. Ocean worlds still receive camps
-    // on their deterministic dry islands; the generator itself filters out
-    // underwater footprints using the active planet sea level.
-    const sites = generateCamps(this.world.gen, seed);
-    this.camps = sites.map((site) => ({ site, build: buildCamp(this.world, site, seed) }));
+    // Camps are gone — no fixed sites, no garrison structures. Aliens now
+    // drop in at random around the player instead (EnemyManager.wildTick).
+    this.camps = [];
 
     // dynamic water: revalidate flow whenever blocks change near water
     this.fluid = new FluidSim(this.world);
@@ -1616,35 +1628,48 @@ export class GameEngine {
       if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
     }
     this.sound.update(dt, this.sky.isDay);
+    // Aliens are nocturnal: they only ever drop in after dark, and every
+    // survivor boils away at sunrise (see EnemyManager.setNight).
+    this.enemies.setNight(this.sky.sunElev < 0.02);
 
     // ---- atmosphere: drive the shared fog uniforms from the sky ----
     // (Underwater overrides run AFTER this so they win for the frame.)
-    const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.08, 0.42);
+    //
+    // `nightFog` is driven straight off SUN ELEVATION, not dayFactor. The old
+    // dayFactor ramp only reached full strength around the horizon crossings,
+    // so the thick fog showed up at dusk/dawn and then quietly faded out for
+    // the rest of the night. This curve is flat 1 across the WHOLE night and
+    // flat 0 across the whole day, with a short crossfade at sunrise/sunset.
+    const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.sunElev, -0.05, 0.11);
     const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
     const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
 
-    // CRITICAL: fog colour MUST equal the sky background exactly, or distant
-    // terrain never dissolves into the sky (hard silhouettes). No night-mist
-    // offset — that desync is what left black ridges floating against a
-    // different-coloured sky.
-    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor);
-    FOG_UNIFORMS.uSkyFogColor.value.copy(this.sky.skyColor);
-    // Soft sky murk at night only (stars fade into the same sky colour).
-    FOG_UNIFORMS.uSkyFog.value = nightFog * 0.55;
+    // The horizon must stay seamless: distant terrain has to fade into exactly
+    // the colour the sky has at the horizon. The sky pass mixes the background
+    // toward uSkyFogColor by uSkyFog (full strength at the horizon line), so
+    // pre-computing that same mix here keeps terrain and sky identical by
+    // construction — while still letting the night be a bright, readable mist
+    // instead of the invisible near-black fog it used to be.
+    const mistK = nightFog * 0.85;
+    const mist = this.fogScratch.copy(NIGHT_MIST).lerp(this.sky.skyColor, 0.25);
+    FOG_UNIFORMS.uSkyFogColor.value.copy(mist);
+    FOG_UNIFORMS.uSkyFog.value = mistK;
+    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(mist, mistK);
 
     FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
     FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
       .sub(this.camera.position).normalize();
 
-    // Density + falloff. Night is thicker near the ground; day keeps a gentle
-    // atmospheric haze. Falloff is tall enough that flying still has fog.
-    FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.045;
+    // Density + falloff. Nights are properly socked in from dusk to dawn; day
+    // keeps a gentle atmospheric haze. Falloff stays tall enough that flying
+    // still has fog.
+    FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.072;
     FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
-    FOG_UNIFORMS.uFogFalloff.value = 28 + this.sky.dayFactor * 18;
+    FOG_UNIFORMS.uFogFalloff.value = 46 - nightFog * 18;
     // In-scatter is a DAY effect (sun glare through haze). Kill it at night
     // so the moon never paints the fog white.
-    FOG_UNIFORMS.uFogInscatter.value = 0.04 + this.sky.dayFactor * 0.55;
-    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 2, nightFog);
+    FOG_UNIFORMS.uFogInscatter.value = 0.04 + (1 - nightFog) * 0.55;
+    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 1.5, nightFog);
 
     // Far-fog ramp: dissolve terrain BEFORE the mesh cutoff. View radius is a
     // CIRCLE of VIEW_DISTANCE chunks, so the farthest visible column is about
@@ -2738,7 +2763,8 @@ export class GameEngine {
   }
 
   getCamps(): { x: number; z: number; cleared: boolean }[] {
-    return this.enemies.camps.map((c) => ({
+    const camps = this.enemies?.camps ?? [];
+    return camps.map((c) => ({
       x: c.site.cx,
       z: c.site.cz,
       cleared: c.cleared,
@@ -2747,7 +2773,7 @@ export class GameEngine {
 
   /** Return the IDs of camps that have been cleared (for cross-planet persistence). */
   getClearedCampIds(): number[] {
-    return this.enemies.getClearedCampIds();
+    return this.enemies?.getClearedCampIds() ?? [...(this.initialClearedCamps ?? [])];
   }
 
   dispose(): void {
