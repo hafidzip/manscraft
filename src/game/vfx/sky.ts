@@ -10,7 +10,9 @@ import { DAY_LENGTH, VIEW_DISTANCE, CHUNK_SIZE } from '../core/constants';
 import { mulberry32 } from '../core/noise';
 
 // base (earth-like) palette; per-planet tint blends on top of these
-const DAY_SKY_BASE = new THREE.Color(0x78a7ff);
+// The "day" band is deliberately a soft, warm-leaning blue: this world only
+// ever sees golden hour, so the zenith never reaches hard midday cyan.
+const DAY_SKY_BASE = new THREE.Color(0x8fb0e6);
 // Deep, near-black and slightly cold. The night sky doubles as the fog colour,
 // so anything brighter than this turns the whole screen into grey milk.
 const NIGHT_SKY_BASE = new THREE.Color(0x04060b);
@@ -20,6 +22,55 @@ const DUSK_SKY_BASE = new THREE.Color(0xff9a56);
 const TINT_DAY = 0.78;
 const TINT_DUSK = 0.42;
 const TINT_NIGHT = 0.22;
+
+// ---------------------------------------------------------------------------
+// Perpetual golden hour
+// ---------------------------------------------------------------------------
+// The sun never climbs to a harsh midday angle. Instead it rises to a low
+// plateau and *stays there* for the whole day, so daylight is permanently the
+// warm, long-shadowed, low-angle light of golden hour.
+//
+// Everything below is C1-continuous (smootherstep has zero first derivative at
+// both ends), which is what makes the night→day→night handover impossible to
+// catch: there is no frame where the rate of change of light, colour or shadow
+// direction suddenly jumps.
+
+/** sine of the sun's altitude while parked at the golden plateau (~12.7°) */
+const GOLDEN_ELEV = 0.22;
+/** how far through the rise the sun reaches the plateau (in sin-of-phase) */
+const GOLDEN_RISE = 0.38;
+/** how far below the horizon the sun sinks at solar midnight */
+const NIGHT_DEPTH = 0.55;
+/** how far through the descent the sun reaches full night depth */
+const NIGHT_FALL = 0.55;
+
+/** warm sun tints — peach-amber grazing, warm gold on the plateau
+ *  (between pure orange and near-white — reads as golden hour sun) */
+const SUN_GOLD_LOW = new THREE.Color(0xffa870);
+const SUN_GOLD_HIGH = new THREE.Color(0xffddb0);
+/** warm hemisphere fill — pulled toward champagne, not orange */
+const HEMI_GOLD = new THREE.Color(0xffe0c0);
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/** smootherstep — C2 continuous, zero slope AND zero curvature at both ends */
+const smoother = (t: number): number => {
+  const x = clamp01(t);
+  return x * x * x * (x * (x * 6 - 15) + 10);
+};
+
+/**
+ * Sun altitude (as a sine) for a given orbital phase sine.
+ *
+ * Day  : eases up to GOLDEN_ELEV and holds — a flat golden plateau.
+ * Night: eases down to -NIGHT_DEPTH and holds.
+ * Both branches meet at exactly 0 with zero slope, so sunrise and sunset are
+ * long, gentle grazes rather than a horizon crossing the player can time.
+ */
+const goldenElevation = (rawSin: number): number =>
+  rawSin >= 0
+    ? GOLDEN_ELEV * smoother(rawSin / GOLDEN_RISE)
+    : -NIGHT_DEPTH * smoother(-rawSin / NIGHT_FALL);
 
 function makeSpriteTexture(draw: (ctx: CanvasRenderingContext2D, s: number) => void, size = 64): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -210,10 +261,35 @@ export class Sky {
     this.skyNight.copy(NIGHT_SKY_BASE).lerp(t, TINT_NIGHT).multiplyScalar(0.9);
   }
 
-  /** sun direction from the time of day (unit-ish vector) */
+  /**
+   * Jump the day/night cycle to early morning (sun just risen).
+   * Used on player respawn so the night — and its hostiles — are skipped.
+   */
+  skipToMorning(): void {
+    // Just past sunrise: the sun is already climbing the golden ramp, so the
+    // player wakes into full daylight and then eases the rest of the way onto
+    // the plateau instead of being dropped into a static, already-settled sky.
+    this.time = 0.045;
+  }
+
+  /**
+   * Unit sun direction for the current time.
+   *
+   * The altitude is shaped by goldenElevation(), and the horizontal component
+   * is scaled to preserve unit length so `dir.y` IS the true sine of the sun's
+   * altitude. (The old version normalised a vector whose y was the raw sine,
+   * which made the effective altitude swing wildly with azimuth — the sun
+   * would have drifted off the golden plateau around solar noon.)
+   */
   private sunDir(): THREE.Vector3 {
     const a = this.time * Math.PI * 2;
-    return new THREE.Vector3(Math.cos(a), Math.sin(a), 0.35).normalize();
+    const elev = goldenElevation(Math.sin(a));
+    const horiz = Math.sqrt(Math.max(0, 1 - elev * elev));
+    // azimuth sweeps east→west, tilted so the arc is not perfectly overhead
+    const hx = Math.cos(a);
+    const hz = 0.35;
+    const hl = Math.hypot(hx, hz) || 1;
+    return new THREE.Vector3((hx / hl) * horiz, elev, (hz / hl) * horiz);
   }
 
   get isDay(): boolean {
@@ -226,28 +302,36 @@ export class Sky {
     const elev = dir.y;
     this.sunElev = elev;
 
-    // continuous day/dusk curves — no hard thresholds, so the sky, fog,
-    // bloom, flashlight and sun colour never snap at the end of day
-    this.dayFactor = THREE.MathUtils.smoothstep(elev, -0.12, 0.28);
+    // Day/night blend driven by altitude through a smootherstep, so the
+    // handover has zero slope and zero curvature at both ends — the eye has
+    // nothing to latch onto and the transition reads as "it just got dark".
+    this.dayFactor = smoother((elev + 0.06) / 0.24);
     const day = this.dayFactor;
-    const duskTent = Math.max(0, 1 - Math.abs(elev) * 4.2);
-    const duskGate = THREE.MathUtils.smoothstep(elev, -0.20, -0.04);
-    const dusk = duskTent * duskGate * 0.85;
+    // 0 while grazing the horizon, 1 while parked on the golden plateau
+    const plateau = clamp01(elev / GOLDEN_ELEV);
+
+    // Golden warmth is present for the ENTIRE day, not just at the edges.
+    // It only eases from "deep amber" to "soft gold" as the sun settles onto
+    // the plateau, so the colour drift across the whole day is gentle.
+    const warmth = day * (0.72 - 0.30 * plateau);
 
     // sky + fog color (scene.background IS this colour, refreshed each frame)
     this.skyColor.copy(this.skyNight).lerp(this.daySky, day);
-    if (dusk > 0) this.skyColor.lerp(this.duskSky, dusk * 0.55);
+    this.skyColor.lerp(this.duskSky, warmth * 0.5);
     this.fog.color.copy(this.skyColor);
     this.fog.near = this.fogNear;
     this.fog.far = this.fogFar;
 
-    // lights
-    const moonFade = 1 - THREE.MathUtils.smoothstep(elev, -0.02, 0.16);
+    // lights — golden key light, smootherstep handovers everywhere
+    const moonFade = 1 - smoother((elev + 0.02) / 0.18);
     const moonDir = this.tmpV.copy(dir).multiplyScalar(-1);
-    this.sunColor.setHex(0xfff3d0).lerp(this.tmp.setHex(0xff8844), Math.min(1, dusk * 1.4));
+    // Always golden: deep amber while grazing, soft gold on the plateau.
+    this.sunColor.copy(SUN_GOLD_LOW).lerp(SUN_GOLD_HIGH, plateau);
     this.sun.color.copy(this.sunColor);
     // Day = sun is the direct light. Night = moon is the direct light.
-    this.sun.intensity = day * 1.18;
+    // Golden-hour punch: 4.8 base, 5.2 near zenith for a subtle kick.
+    const sunBoost = 1.0 + THREE.MathUtils.smoothstep(elev, 0.05, 0.45) * 0.08;
+    this.sun.intensity = day * (4.8 * sunBoost);
     // Cold steel-blue moonlight. Anything near white reads as daylight and
     // kills the mood the moment it hits pale terrain like snow or sand.
     this.moonColor.setHex(0x7f9ad0).lerp(this.tmp.setHex(0x9fb6e6), Math.min(1, moonFade * 0.5));
@@ -257,10 +341,13 @@ export class Sky {
     this.moon.intensity = moonFade * 0.95;
     // Ambient collapses after dusk. This is what makes night READ as night:
     // unlit faces fall to near-black instead of staying evenly grey.
-    this.hemi.intensity = 0.035 + day * 0.75;
+    // Day ambient is kept low so the sun's contrast isn't washed out.
+    this.hemi.intensity = 0.02 + day * 0.45;
     // ground bounce goes cold and dark at night instead of warm dirt brown
     this.hemi.groundColor.setHex(0x8a6f4d).lerp(this.tmp.setHex(0x0b1018), 1 - day);
-    this.hemi.color.copy(this.daySky).lerp(this.tmp.setHex(0xbdd7ff), 0.25);
+    // Ambient fill is pulled toward gold during the day so bounce light agrees
+    // with the golden key light instead of fighting it with cold sky blue.
+    this.hemi.color.copy(this.daySky).lerp(HEMI_GOLD, 0.30 + warmth * 0.35);
     this.sun.position.copy(camPos).addScaledVector(dir, 140);
     this.sun.target.position.copy(camPos);
     this.sun.target.updateMatrixWorld();
@@ -272,8 +359,7 @@ export class Sky {
 
     // billboards follow the camera — opacity fades, never boolean visibility
     this.sunSprite.position.copy(camPos).addScaledVector(dir, 420);
-    (this.sunSprite.material as THREE.SpriteMaterial).opacity =
-      THREE.MathUtils.smoothstep(elev, -0.14, 0.02);
+    (this.sunSprite.material as THREE.SpriteMaterial).opacity = smoother((elev + 0.10) / 0.16);
     this.moonSprite.position.copy(camPos).addScaledVector(moonDir, 400);
     (this.moonSprite.material as THREE.SpriteMaterial).opacity = moonFade;
     this.stars.position.copy(camPos);
@@ -284,7 +370,8 @@ export class Sky {
     this.clouds.position.set(camPos.x, 100, camPos.z);
     this.cloudTex.offset.x += dt * 0.0035;
     this.cloudTex.offset.y += dt * 0.0009;
-    this.cloudMat.color.setHex(0xffffff).lerp(this.tmp.setHex(0x2c3350), 1 - day);
+    // clouds catch the golden key light by day, go cold and dim at night
+    this.cloudMat.color.setHex(0xffe4c2).lerp(this.tmp.setHex(0x2c3350), 1 - day);
     this.cloudMat.opacity = 0.25 + day * 0.35;
   }
 }

@@ -72,6 +72,23 @@ export function getActivePlanetTheme(): PlanetTheme | null { return ACTIVE_THEME
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
+/**
+ * Coarse landform classification exposed by the terrain generator.
+ * Values are stable (persisted into a per-column cache), so they are safe to
+ * store, compare and serialize.
+ */
+export enum TerrainArea {
+  WATER = 0,     // column surface lies below sea level
+  FLAT = 1,      // dry land with gentle local slope — buildable plains
+  HILLS = 2,     // dry land, rolling relief
+  MOUNTAIN = 3,  // inside a masked mountain range or high-altitude rock
+}
+
+/** flat = every 2-block-step neighbour differs by at most this many blocks */
+const FLAT_MAX_STEP = 2;
+/** columns whose masked mountain signal exceeds this are mountain area */
+const MOUNTAIN_MASK_MIN = 115; // ≈ 0.45 in the 0..255 quantized mask
+
 interface FieldSet {
   cont: number;  // continentalness ~[-1, 1]  (land-biased)
   mount: number; // ridged mountain signal [0, 1]
@@ -161,13 +178,20 @@ export class TerrainGenerator {
   // after eviction — becomes a single array read.
   private colHeight: Int16Array | null = null;
   private colBiome: Uint8Array | null = null;
+  /** masked mountain signal per column, quantized to 0..255 (free byproduct
+   *  of computeColumn — lets area classification skip a full field re-eval) */
+  private colMount: Uint8Array | null = null;
+  /** lazily-filled area classification, 0 = not yet computed, else area + 1 */
+  private colArea: Uint8Array | null = null;
 
   private computeColumn(px: number, pz: number): number {
     let hCache = this.colHeight;
     let bCache = this.colBiome;
-    if (!hCache || !bCache) {
+    let mCache = this.colMount;
+    if (!hCache || !bCache || !mCache) {
       hCache = this.colHeight = new Int16Array(W * W).fill(-1);
       bCache = this.colBiome = new Uint8Array(W * W);
+      mCache = this.colMount = new Uint8Array(W * W);
     }
     const k = pz * W + px;
     const cached = hCache[k];
@@ -184,15 +208,19 @@ export class TerrainGenerator {
 
     let h = this.base + f.cont * 6;                // continent raise
     if (f.cont < -0.18) h += (f.cont + 0.18) * 22; // descend into ocean basins
-    h += f.hills * bDef.hill * this.hillAmp;       // rounded biome detail
+    // rounded biome detail — global 0.6 damping favours broad flat plains
+    h += f.hills * bDef.hill * this.hillAmp * 0.6;
 
     // mountain ranges: masked ridged signal, squared for sharp massifs,
-    // peaks/valleys modulate crest jaggedness
-    const m = smoothstep(0.55, 0.86, f.mount);
-    if (m > 0) h += this.mountAmp * (m * m * 26 + m * f.hills * 3 + m * Math.abs(f.pv) * 7);
+    // peaks/valleys modulate crest jaggedness. The mask window starts higher
+    // (0.64 vs 0.55) and the amplitude is damped (18 vs 26) so ranges are
+    // rarer and lower — most of the world reads as walkable flatland.
+    const m = smoothstep(0.64, 0.9, f.mount);
+    if (m > 0) h += this.mountAmp * (m * m * 18 + m * f.hills * 2 + m * Math.abs(f.pv) * 5);
 
     hCache[k] = Math.max(3, Math.min(H - 16, Math.floor(h)));
     bCache[k] = biome;
+    mCache[k] = Math.min(255, Math.round(m * 255));
     return k;
   }
 
@@ -209,6 +237,86 @@ export class TerrainGenerator {
   heightAt(x: number, z: number): number {
     const k = this.computeColumn(wrapBlock(x), wrapBlock(z));
     return this.colHeight![k];
+  }
+
+  // ------------------------------------------------------- area detection
+  /**
+   * Classify a column as WATER / FLAT / HILLS / MOUNTAIN.
+   *
+   * Performance: results are memoized in a flat Uint8Array (one byte per
+   * torus column, 256 KB total), so after the first query every call is a
+   * single array read. The first query per column reuses the height + masked
+   * mountain signal already cached by computeColumn — no noise fields are
+   * ever re-evaluated — and flatness costs only four cached height lookups.
+   *
+   * Reliability: derived from the exact same memoized data populateChunk
+   * builds terrain from, so the classification can never disagree with the
+   * blocks actually placed in the world (same seam-safe torus wrapping too).
+   */
+  areaAt(x: number, z: number): TerrainArea {
+    const px = wrapBlock(x), pz = wrapBlock(z);
+    const k = pz * W + px;
+    let aCache = this.colArea;
+    if (!aCache) aCache = this.colArea = new Uint8Array(W * W);
+    const cached = aCache[k];
+    if (cached !== 0) return (cached - 1) as TerrainArea;
+
+    this.computeColumn(px, pz);
+    const h = this.colHeight![k];
+    let area: TerrainArea;
+
+    if (h < this.sea) {
+      area = TerrainArea.WATER;
+    } else if (this.colMount![k] >= MOUNTAIN_MASK_MIN || h > 50 + this.dSea) {
+      area = TerrainArea.MOUNTAIN;
+    } else {
+      // local slope from the 4 axis neighbours at a 2-block step (memoized)
+      const s = 2;
+      const dxa = Math.abs(this.heightAt(px + s, pz) - h);
+      const dxb = Math.abs(this.heightAt(px - s, pz) - h);
+      const dza = Math.abs(this.heightAt(px, pz + s) - h);
+      const dzb = Math.abs(this.heightAt(px, pz - s) - h);
+      const maxStep = Math.max(dxa, dxb, dza, dzb);
+      area = maxStep <= FLAT_MAX_STEP ? TerrainArea.FLAT : TerrainArea.HILLS;
+    }
+
+    aCache[k] = area + 1;
+    return area;
+  }
+
+  /** true if the column surface is below sea level */
+  isWaterAt(x: number, z: number): boolean {
+    return this.areaAt(x, z) === TerrainArea.WATER;
+  }
+
+  /** true for dry, gently-sloped, buildable ground */
+  isFlatAt(x: number, z: number): boolean {
+    return this.areaAt(x, z) === TerrainArea.FLAT;
+  }
+
+  /** true inside mountain ranges or high-altitude rock */
+  isMountainAt(x: number, z: number): boolean {
+    return this.areaAt(x, z) === TerrainArea.MOUNTAIN;
+  }
+
+  /**
+   * Spiral-scan for the nearest FLAT column around (x, z) within maxR blocks.
+   * Returns null when none exists in range. Cheap thanks to the column memo —
+   * ideal for placing structures, spawns or vehicles on level ground.
+   */
+  findNearestFlat(x: number, z: number, maxR = 48): [number, number] | null {
+    const ox = wrapBlock(x), oz = wrapBlock(z);
+    if (this.areaAt(ox, oz) === TerrainArea.FLAT) return [ox, oz];
+    for (let r = 2; r <= maxR; r += 2) {
+      const steps = Math.max(8, Math.floor(r * 1.5));
+      for (let i = 0; i < steps; i++) {
+        const a = (i / steps) * Math.PI * 2;
+        const px = wrapBlock(ox + Math.round(Math.cos(a) * r));
+        const pz = wrapBlock(oz + Math.round(Math.sin(a) * r));
+        if (this.areaAt(px, pz) === TerrainArea.FLAT) return [px, pz];
+      }
+    }
+    return null;
   }
 
   /**

@@ -23,6 +23,13 @@ export interface ChunkMaterials {
   opaque: THREE.Material;
   cutout: THREE.Material;
   water: THREE.Material;
+  /**
+   * Optional depth override for the alpha-cutout pass. Grass/foliage must be
+   * alpha-tested AND sway-transformed in the shadow depth pass, otherwise the
+   * blades would cast solid rectangular blobs that ignore the wind and the
+   * distance-collapse LOD.
+   */
+  cutoutDepth?: THREE.Material;
 }
 
 export interface MapColumn {
@@ -38,6 +45,8 @@ interface Chunk {
   data: Uint8Array;
   meshes: THREE.Mesh[];
   hasMesh: boolean;
+  /** the alpha-cutout (grass/foliage) mesh — shadow casting toggles by range */
+  grass: THREE.Mesh | null;
   /** nearest-image render offsets (multiples of WORLD_SIZE) — toroidal trick */
   kx: number;
   kz: number;
@@ -85,6 +94,11 @@ export class World {
 
   constructor(public readonly seed: number, private mats: ChunkMaterials) {
     this.gen = new TerrainGenerator(seed);
+  }
+
+  /** the shared chunk materials (engine owns their lifetime) */
+  get materials(): ChunkMaterials {
+    return this.mats;
   }
 
   // ---- unified-game adapter surface (fps systems expect this API) ----
@@ -225,7 +239,7 @@ export class World {
       const data = new Uint8Array(S * H * S);
       this.gen.populateChunk(data, cx, cz);
       c = {
-        cx, cz, data, meshes: [], hasMesh: false,
+        cx, cz, data, meshes: [], hasMesh: false, grass: null,
         kx: 0, kz: 0, dirty: false,
         colH: new Uint8Array(S * S),
         colC: new Uint32Array(S * S),
@@ -436,6 +450,7 @@ export class World {
       m.geometry.dispose();
     }
     c.meshes.length = 0;
+    c.grass = null;
 
     const geoms = buildChunkGeometry(this.boundGet, c.cx, c.cz, c.data);
     const [ox, oz] = this.renderOffset(c.cx, c.cz);
@@ -444,8 +459,8 @@ export class World {
     const add = (
       g: THREE.BufferGeometry | undefined, mat: THREE.Material, order: number,
       castShadow: boolean,
-    ) => {
-      if (!g) return;
+    ): THREE.Mesh | null => {
+      if (!g) return null;
       const mesh = new THREE.Mesh(g, mat);
       mesh.position.set(c.cx * S + ox, 0, c.cz * S + oz);
       mesh.renderOrder = order;
@@ -455,14 +470,53 @@ export class World {
       mesh.receiveShadow = true;
       this.group.add(mesh);
       c.meshes.push(mesh);
+      return mesh;
     };
-    // terrain casts + receives; foliage receives but never casts (dense
-    // alpha-tested blades would thrash the shadow map for no visual gain)
+    // Terrain always casts + receives. Foliage receives always, but only casts
+    // inside a small radius around the camera (see updateGrassShadowCasters) —
+    // dense alpha-tested blades are by far the most expensive thing that can
+    // enter a shadow depth pass, so they are budgeted by distance.
     add(geoms.opaque, this.mats.opaque, 0, true);
-    add(geoms.cutout, this.mats.cutout, 1, false);
+    const grass = add(geoms.cutout, this.mats.cutout, 1, false);
+    if (grass && this.mats.cutoutDepth) {
+      // Alpha-tested + wind-swayed depth so blade shadows match the blades.
+      grass.customDepthMaterial = this.mats.cutoutDepth;
+    }
+    c.grass = grass;
     add(geoms.water, this.mats.water, 2, false);
     c.hasMesh = true;
     this.dirtySet.delete(c);
+  }
+
+  /**
+   * Budgeted grass shadows: only foliage chunks whose nearest-image centre is
+   * within `radius` blocks of the camera are flagged as shadow casters.
+   *
+   * A shadow refresh re-renders every caster into the depth map. Terrain is
+   * cheap (merged opaque quads), but foliage is thousands of alpha-tested
+   * blade quads per chunk, and alpha-test forces per-fragment discards in the
+   * depth pass. Restricting casters to the handful of chunks the player can
+   * actually resolve blade shadows in keeps the cost flat regardless of view
+   * distance, while distant grass still *receives* shadows normally.
+   *
+   * Returns true when the caster set changed (caller should refresh the map).
+   */
+  updateGrassShadowCasters(camX: number, camZ: number, radius: number): boolean {
+    const r2 = radius * radius;
+    let changed = false;
+    for (const c of this.chunks.values()) {
+      const g = c.grass;
+      if (!g) continue;
+      // chunk centre in nearest-image render space
+      const dx = c.cx * S + c.kx + S * 0.5 - camX;
+      const dz = c.cz * S + c.kz + S * 0.5 - camZ;
+      const want = dx * dx + dz * dz <= r2;
+      if (g.castShadow !== want) {
+        g.castShadow = want;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   /**

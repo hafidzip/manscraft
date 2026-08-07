@@ -165,10 +165,11 @@ export class DepthFogPass {
     renderer: THREE.WebGLRenderer,
     writeBuffer: THREE.WebGLRenderTarget,
     readBuffer: THREE.WebGLRenderTarget,
+    depthTexture: THREE.Texture | null = readBuffer.depthTexture,
   ): void {
     const u = this.material.uniforms;
     u.tDiffuse.value = readBuffer.texture;
-    u.tDepth.value = readBuffer.depthTexture;
+    u.tDepth.value = depthTexture;
 
     // Camera matrices are fresh after the scene render into the main target.
     this.inv.copy(this.camera.projectionMatrix)

@@ -15,7 +15,7 @@ import * as THREE from 'three';
 import * as C from './core/constants';
 import { createTextures, tileUV, type TextureSet } from './core/textures';
 import { B, DEFS, isWaterId, applyThemeToBlockColors } from './world/blocks';
-import { World } from './world/world';
+import { World, type ChunkMaterials } from './world/world';
 import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
@@ -28,6 +28,7 @@ import { Sky } from './vfx/sky';
 import { LaserTool } from './vfx/laserTool';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { DepthFogPass } from './vfx/depthFog';
+import { LumenLitePass } from './vfx/lumenLite';
 import { VolumetricLightPass } from './vfx/volumetric';
 import { OutputStage } from './vfx/output';
 import { FOG_UNIFORMS } from './vfx/heightFog';
@@ -175,6 +176,18 @@ const NIGHT_MIST = new THREE.Color(0x39465e);
 const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
 
+/**
+ * Radius (blocks) inside which foliage chunks cast shadows.
+ *
+ * Grass is the single densest thing in the scene — a chunk of tall grass is
+ * thousands of alpha-tested quads, and alpha-test disables early-Z in the
+ * depth pass. Casting from the whole 92-block view radius would multiply the
+ * shadow pass cost by an order of magnitude for detail that is invisible past
+ * a few blocks. 22 blocks covers everything the player can actually resolve
+ * (and matches the start of the GRASS_FADE LOD collapse at 26).
+ */
+const GRASS_SHADOW_RADIUS = 22;
+
 /** map our world block ids to voxel-fps inventory ids (they diverge after SAND) */
 const TO_FPS: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,
@@ -242,8 +255,13 @@ export class GameEngine {
 
   // ---- post-processing pipeline (raw WebGLRenderTarget chain) ----
   private mainRT: THREE.WebGLRenderTarget | null = null;
+  private lightingRT: THREE.WebGLRenderTarget | null = null;
   private fogRT: THREE.WebGLRenderTarget | null = null;
   private volumetricRT: THREE.WebGLRenderTarget | null = null;
+  /** half-resolution SSGI + bilateral-blur targets feeding LumenLitePass */
+  private giRT: THREE.WebGLRenderTarget | null = null;
+  private blurRT: THREE.WebGLRenderTarget | null = null;
+  private lumenLite: LumenLitePass | null = null;
   private depthFogPass: DepthFogPass | null = null;
   private bloom: UnrealBloomPass | null = null;
   private volumetricLight: VolumetricLightPass | null = null;
@@ -257,6 +275,8 @@ export class GameEngine {
   private lastSunElev = 1e9;
   /** minimum seconds between two shadow-map re-renders */
   private shadowCooldown = 0;
+  /** countdown to the next grass shadow-caster re-evaluation */
+  private grassShadowT = 0;
   /** true while the moon is the scene's key (shadow-casting) light */
   private moonIsKey = false;
   private inventoryOpen = false;
@@ -344,6 +364,8 @@ export class GameEngine {
   private disposed = false;
   /** scratch colour for the per-frame night-mist blend */
   private fogScratch = new THREE.Color();
+  /** scratch direction for the GI/reflection pass; avoids per-frame Vector3 churn */
+  private lumenSunDir = new THREE.Vector3();
   /** rolling snapshot of the last rendered frame (seamless scene handoff) */
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
@@ -369,15 +391,15 @@ export class GameEngine {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    // ---- post pipeline: soft PCF sun shadows, Reinhard tone mapping ----
-    // Reinhard (not ACES) preserves grass/block/shadow mid-tones in this
-    // Lambert voxel renderer — ACES crushes the dark faces too hard.
+    // ---- post pipeline: soft PCF sun shadows, ACESFilmic tone mapping ----
+    // ACES keeps the warm golden highlights from clipping while preserving
+    // shadow detail. Exposure is tuned for ACES shoulder (lower than Reinhard).
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ReinhardToneMapping;
-    this.renderer.toneMappingExposure = 0.88;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
 
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 900);
     this.camera.rotation.order = 'YXZ';
@@ -396,7 +418,11 @@ export class GameEngine {
     this.textures = createTextures(this.theme);
     applyThemeToBlockColors(this.theme); // tint particle/minimap colours too
 
-    const mats = {
+    const mats: ChunkMaterials & {
+      opaque: THREE.MeshLambertMaterial;
+      cutout: THREE.MeshLambertMaterial;
+      water: THREE.MeshLambertMaterial;
+    } = {
       opaque: new THREE.MeshLambertMaterial({ map: this.textures.atlas, vertexColors: true }),
       cutout: new THREE.MeshLambertMaterial({
         map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
@@ -449,7 +475,8 @@ export class GameEngine {
            uniform float uGrassTime;
            uniform vec3 uGrassCam;
            uniform vec2 uGrassFade;
-           varying float vTorchUnlit;`
+           varying float vTorchUnlit;
+           varying float vIsGrass;`
         )
         .replace(
           '#include <begin_vertex>',
@@ -457,6 +484,7 @@ export class GameEngine {
            // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass sway strength
            vTorchUnlit = step(aSway.y, -0.5);
            float gPlant = step(0.001, aSway.y);
+           vIsGrass = gPlant;
            float gTw = aSway.z;
            float gH = aSway.w;
            float gDist = distance((modelMatrix * vec4(position, 1.0)).xz, uGrassCam.xz);
@@ -468,28 +496,96 @@ export class GameEngine {
            gP.y -= gTw * gH * (1.0 - gCol);
            transformed = mix(position, gP, gPlant);`
         );
-      // upward-biased normals kill angle-dependent black back faces while
-      // still answering the shadow map exactly like the grass_top surface.
-      // Torches force outgoingLight = diffuseColor after lighting so the
-      // flame is fully UNLIT (self-emissive texture, ignores point lights /
-      // sun / shadows) — matching Minecraft's torch fire look.
+      // Grass blades: replace normal with pure-up (0,1,0) so NdotL is always
+      // the sun's Y component — identical to the grass_top face. This is the
+      // ONLY reliable fix for foliage going black when the camera is opposite
+      // the low golden sun: the previous `abs(y)+0.9 + xz*0.25` normal still
+      // had ±0.26 horizontal contribution, which flipped NdotL negative at
+      // ~sun elev 0.22 whenever a blade's horizontal normal opposed the sun.
+      // Non-grass cutouts (leaves/flowers) keep the upward-biased normal.
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
           `#include <common>
-           varying float vTorchUnlit;`
+           varying float vTorchUnlit;
+           varying float vIsGrass;`
         )
         .replace(
           '#include <normal_fragment_begin>',
-          `vec3 normal = normalize( vec3( vNormal.x * 0.25, abs(vNormal.y) + 0.9, vNormal.z * 0.25 ) );`
+          `vec3 normal;
+           if (vIsGrass > 0.5) {
+             // Pure-up normal for grass blades. Lit exactly like the ground
+             // block below them, so blades never darken with orientation and
+             // both sides of the double-sided quad receive identical light.
+             normal = vec3(0.0, 1.0, 0.0);
+           } else {
+             // Leaves / flowers / other cutouts: upward-biased, back faces
+             // flipped horizontally to keep them lit from either side.
+             normal = normalize( vec3( vNormal.x * 0.25, abs(vNormal.y) + 0.9, vNormal.z * 0.25 ) );
+             if (!gl_FrontFacing) normal.xz *= -1.0;
+           }`
         )
         .replace(
           '#include <opaque_fragment>',
           `if (vTorchUnlit > 0.5) {
              // pure atlas colour — no Lambert, no shadows, no point-light wash
              outgoingLight = diffuseColor.rgb;
-           }
-           #include <opaque_fragment>`
+           } else {
+             #include <opaque_fragment>
+             // Foliage wrap-translucency: guarantees grass is never fully
+             // black even in cast shadows, which is the golden-hour look
+             // (backlit blades scatter warm sun through their surface).
+             if (vIsGrass > 0.5) {
+               outgoingLight = max(outgoingLight, diffuseColor.rgb * 0.22);
+             }
+           }`
+        );
+    };
+
+    // ---- grass shadow depth material --------------------------------------
+    // Three.js renders the shadow map with its own depth material, which knows
+    // nothing about our sway/collapse vertex work or the atlas alpha. Without
+    // this override every blade would cast a solid, static quad-shaped shadow
+    // that floats where the un-swayed geometry sits. This material re-applies
+    // the EXACT same vertex transform and alpha-tests against the atlas, so
+    // blade shadows track the wind and collapse with the LOD in lockstep.
+    //
+    // Cost control: the shadow pass only ever runs for chunks flagged by
+    // World.updateGrassShadowCasters(), and the map itself refreshes on demand
+    // (renderer.shadowMap.autoUpdate = false).
+    mats.cutoutDepth = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+      map: this.textures.atlas,
+      alphaTest: 0.4,
+      side: THREE.DoubleSide,
+    });
+    mats.cutoutDepth.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
+      shader.uniforms.uGrassTime = GRASS_TIME;
+      shader.uniforms.uGrassCam = GRASS_CAM;
+      shader.uniforms.uGrassFade = GRASS_FADE;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+           attribute vec4 aSway;
+           uniform float uGrassTime;
+           uniform vec3 uGrassCam;
+           uniform vec2 uGrassFade;`
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+           float gPlant = step(0.001, aSway.y);
+           float gTw = aSway.z;
+           float gH = aSway.w;
+           float gDist = distance((modelMatrix * vec4(position, 1.0)).xz, uGrassCam.xz);
+           float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
+           vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
+           float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
+           vec3 gP = position;
+           gP += gWind * (gSw * gTw);
+           gP.y -= gTw * gH * (1.0 - gCol);
+           transformed = mix(position, gP, gPlant);`
         );
     };
 
@@ -541,7 +637,8 @@ export class GameEngine {
     }
 
     // ---- post pipeline (raw render-target chain):
-    //   scene → mainRT → depth fog → fogRT → bloom (in place)
+    //   scene → mainRT → LumenLite GI/reflections → lightingRT
+    //   → depth fog → fogRT → bloom (in place)
     //   → volumetric → volumetricRT → output → screen
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
 
@@ -551,6 +648,9 @@ export class GameEngine {
     this.mainRT.depthTexture = new THREE.DepthTexture(size.x, size.y);
     this.mainRT.depthTexture.type = THREE.UnsignedIntType;
 
+    this.lightingRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
     this.fogRT = new THREE.WebGLRenderTarget(size.x, size.y, {
       type: THREE.HalfFloatType,
     });
@@ -560,6 +660,16 @@ export class GameEngine {
 
     this.depthFogPass = new DepthFogPass(this.camera);
     this.depthFogPass.material.uniforms.tDepth.value = this.mainRT.depthTexture;
+
+    // Half-res SSGI + blur targets. Half resolution keeps the diffuse bounce
+    // affordable (it is inherently low-frequency), while the SSR/composite
+    // pass that consumes it still runs at full resolution for crisp water.
+    const halfW = Math.max(1, Math.floor(size.x / 2));
+    const halfH = Math.max(1, Math.floor(size.y / 2));
+    this.giRT = new THREE.WebGLRenderTarget(halfW, halfH, { type: THREE.HalfFloatType });
+    this.blurRT = new THREE.WebGLRenderTarget(halfW, halfH, { type: THREE.HalfFloatType });
+
+    this.lumenLite = new LumenLitePass(this.camera, size.x, size.y);
 
     this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.3, 0.55, 0.82);
 
@@ -1530,8 +1640,14 @@ export class GameEngine {
     const h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
     this.mainRT?.setSize(w, h);
+    this.lightingRT?.setSize(w, h);
     this.fogRT?.setSize(w, h);
     this.volumetricRT?.setSize(w, h);
+    // giRT/blurRT are owned by the engine (not LumenLitePass) since they are
+    // shared across renderPipeline() calls; resize them at half resolution.
+    this.giRT?.setSize(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    this.blurRT?.setSize(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    this.lumenLite?.setSize(w, h);
     this.volumetricLight?.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -1731,6 +1847,20 @@ export class GameEngine {
       this.flashlight.intensity = canUse ? nightAmt * 2.4 : 0;
     }
 
+    // ---- grass shadow casters: budgeted by distance ----
+    // Re-evaluated on a slow cadence (the set only changes when the player
+    // crosses a chunk boundary) and only while on foot: from the cockpit the
+    // camera is far above the blades and their shadows are sub-pixel.
+    this.grassShadowT -= dt;
+    if (this.grassShadowT <= 0) {
+      this.grassShadowT = 0.25;
+      const radius = this.piloting ? 0 : GRASS_SHADOW_RADIUS;
+      if (this.world.updateGrassShadowCasters(this.camera.position.x, this.camera.position.z, radius)) {
+        this.shadowCooldown = 0;
+        if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+      }
+    }
+
     // ---- celestial shadow: refresh only when the player or active light moves ----
     const p = this.player.pos;
     const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
@@ -1759,17 +1889,29 @@ export class GameEngine {
       this.renderer.setRenderTarget(this.mainRT);
       this.renderer.render(this.scene, this.camera);
 
-      // 2) Depth fog: reads mainRT + its depth, writes fogRT.
-      this.depthFogPass!.render(this.renderer, this.fogRT!, this.mainRT);
+      // 2) LumenLite: half-res SSGI -> bilateral blur -> full-res SSR/composite.
+      // Reads mainRT depth but writes color only, so fog keeps using mainRT's
+      // original depth texture in the next pass.
+      this.lumenLite!.configure(
+        this.sky.skyColor,
+        this.sky.sunColor,
+        this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
+        this.sky.dayFactor,
+        this.world.gen.sea,
+      );
+      this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
 
-      // 3) Bloom: reads fogRT and blends back into it IN PLACE — UnrealBloomPass
+      // 3) Depth fog: reads lightingRT color + mainRT depth, writes fogRT.
+      this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture);
+
+      // 4) Bloom: reads fogRT and blends back into it IN PLACE — UnrealBloomPass
       // writes to readBuffer, not writeBuffer. fogRT now holds scene + bloom.
       this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, dt, false);
 
-      // 4) Volumetric light (god rays): reads fogRT, writes volumetricRT.
+      // 5) Volumetric light (god rays): reads fogRT, writes volumetricRT.
       this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
 
-      // 5) Output pass: reads volumetricRT → screen (tone-mapping + sRGB).
+      // 6) Output pass: reads volumetricRT → screen (tone-mapping + sRGB).
       this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
     } else {
       this.renderer.render(this.scene, this.camera);
@@ -2480,6 +2622,9 @@ export class GameEngine {
     this.dead = false;
     this.deadTimer = 0;
     this.hp = this.maxHp;
+    // Death costs the rest of the day: the world wakes up at sunrise, so the
+    // player never respawns straight back into the same hostile night.
+    this.sky.skipToMorning();
     this.invulnT = 1.5;
     this.hasDamageFrom = false;
     this.dmgFollowT = 0;
@@ -2783,13 +2928,19 @@ export class GameEngine {
     this.itemDrops?.clear();
     this.removeListeners();
     window.removeEventListener('resize', this.resize);
+    // customDepthMaterial is not reachable from scene.traverse material walks
+    this.world?.materials.cutoutDepth?.dispose();
+    this.lumenLite?.dispose();
     this.depthFogPass?.dispose();
     this.bloom?.dispose();
     this.volumetricLight?.dispose();
     this.outputStage?.dispose();
     this.mainRT?.dispose();
+    this.lightingRT?.dispose();
     this.fogRT?.dispose();
     this.volumetricRT?.dispose();
+    this.giRT?.dispose();
+    this.blurRT?.dispose();
     for (const g of this.blockGeomCache.values()) g.dispose();
     this.blockGeomCache.clear();
     this.scene.traverse((o) => {
