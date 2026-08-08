@@ -1689,11 +1689,27 @@ export class GameEngine {
     } else if (e.button === 2) this.mouse.right = false;
   };
 
+  /**
+   * A single physical flick of a wheel emits a burst of `wheel` events (high
+   * resolution trackpads emit dozens). Running the whole slot-change pipeline
+   * — click SFX, holster, rig swap, React hotbar re-render — once per event is
+   * what made scroll-swapping stutter. Accumulate the notches here and let the
+   * frame loop apply at most one step per frame.
+   */
+  private wheelAcc = 0;
+
   private onWheel = (e: WheelEvent): void => {
     if (!this.locked) return;
     e.preventDefault();
-    this.selectSlot((this.sel + (e.deltaY > 0 ? 1 : -1) + 6) % 6);
+    this.wheelAcc += e.deltaY > 0 ? 1 : -1;
   };
+
+  private flushWheel(): void {
+    if (this.wheelAcc === 0) return;
+    const step = this.wheelAcc > 0 ? 1 : -1;
+    this.wheelAcc = 0;
+    this.selectSlot((this.sel + step + 6) % 6);
+  }
 
   // -------------------------------------------------------------- main loop
 
@@ -3006,6 +3022,9 @@ export class GameEngine {
     this.blurRT?.dispose();
     for (const g of this.blockGeomCache.values()) g.dispose();
     this.blockGeomCache.clear();
+    // Idle weapon rigs are parked outside the scene graph (see WeaponSystem's
+    // `stow`), so the traversal below cannot reach their geometries.
+    this.weapons?.dispose();
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments || o instanceof THREE.Points) {
         o.geometry.dispose();
