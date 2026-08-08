@@ -81,6 +81,8 @@ export const GRASS_TIME = { value: 0 };
 export const GRASS_CAM = { value: new THREE.Vector3() };
 /** x = fade start distance, y = fully-collapsed distance (blocks) */
 export const GRASS_FADE = { value: new THREE.Vector2(26, 46) };
+/** camera yaw (radians) — drives grass blade billboard rotation */
+export const GRASS_YAW = { value: 0 };
 
 export interface ChunkGeoms {
   opaque?: THREE.BufferGeometry;
@@ -512,18 +514,15 @@ function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: nu
       cx + dx + lx, y + h * (0.9 + r1 * 0.14), cz + dz + lz,
       cx + dx, y, cz + dz,
     );
-    // Bias the blade normal STRONGLY upward. A horizontal normal reflects
-    // overhead sunlight poorly and — worse — makes Lambert's shadow-map
-    // response almost invisible on grass, so shadowed ground reads as dark
-    // while the blades on top stay bright. A mostly-up normal lets each
-    // blade respond to sun + shadows exactly like the grass_top surface.
-    const upBias = 0.82;
-    const horiz = 1 - upBias;
-    const nnx = Math.sin(ang) * horiz;
-    const nnz = -Math.cos(ang) * horiz;
-    const nlen = Math.hypot(nnx, upBias, nnz) || 1;
-    const nx = nnx / nlen, ny = upBias / nlen, nz = nnz / nlen;
-    for (let k = 0; k < 4; k++) bucket.nrm.push(nx, ny, nz);
+    // For grass blades the vertex shader overrides the normal to pure world-up
+    // (0,1,0) so lighting matches the ground face. We repurpose the normal
+    // attribute to carry the blade's local centre and original angle, which the
+    // shader uses to billboard-rotate each blade toward the camera.
+    //   normal.x = blade centre X (chunk-local)
+    //   normal.y = blade centre Z (chunk-local)  — NOT the usual Y component!
+    //   normal.z = blade original angle + 100.0 (offset marks this as grass
+    //              data rather than a real normal; the shader checks z > 10)
+    for (let k = 0; k < 4; k++) bucket.nrm.push(cx, cz, ang + 100.0);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
     // Root (vertices 0, 3) darker; tip (1, 2) at full tipShade.
     bucket.col.push(

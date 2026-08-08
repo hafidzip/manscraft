@@ -20,7 +20,7 @@ import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
 import { FluidSim } from './world/fluid';
-import { WATER_TIME, GRASS_TIME, GRASS_CAM, GRASS_FADE } from './world/mesher';
+import { WATER_TIME, GRASS_TIME, GRASS_CAM, GRASS_FADE, GRASS_YAW } from './world/mesher';
 import { Player, type InputState } from './player/player';
 import { raycastVoxel, type RayHit } from './player/raycast';
 import { Particles } from './vfx/particles';
@@ -183,10 +183,9 @@ const DEATH_DURATION = 4;
  * thousands of alpha-tested quads, and alpha-test disables early-Z in the
  * depth pass. Casting from the whole 92-block view radius would multiply the
  * shadow pass cost by an order of magnitude for detail that is invisible past
- * a few blocks. 22 blocks covers everything the player can actually resolve
- * (and matches the start of the GRASS_FADE LOD collapse at 26).
+ * a few blocks. Set to 0 to disable grass shadow casting entirely.
  */
-const GRASS_SHADOW_RADIUS = 22;
+const GRASS_SHADOW_RADIUS = 0;
 
 /** map our world block ids to voxel-fps inventory ids (they diverge after SAND) */
 const TO_FPS: Record<number, number> = {
@@ -458,15 +457,16 @@ export class GameEngine {
            diffuseColor *= sampledDiffuseColor;`
         );
     };
-    // grass blade sway + distance collapse. Blade geometry (root at the
-    // block base, tips at +h) is built by the mesher; aSway carries
-    // (phase, strength, topWeight, height). The shader only adds wind sway
-    // at the tips and folds distant blades down into the ground (cheap LOD,
-    // no re-mesh). Root/tip shading is already baked into vertex colours.
+    // grass blade sway + distance collapse + billboard rotation. Blade
+    // geometry (root at block base, tips at +h) is built by the mesher;
+    // aSway carries (phase, strength, topWeight, height). The normal
+    // attribute is repurposed: (bladeCentreX, bladeCentreZ, bladeAngle)
+    // since the vertex shader overrides the normal to pure world-up.
     mats.cutout.onBeforeCompile = (shader) => {
       shader.uniforms.uGrassTime = GRASS_TIME;
       shader.uniforms.uGrassCam = GRASS_CAM;
       shader.uniforms.uGrassFade = GRASS_FADE;
+      shader.uniforms.uGrassYaw = GRASS_YAW;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
@@ -475,34 +475,76 @@ export class GameEngine {
            uniform float uGrassTime;
            uniform vec3 uGrassCam;
            uniform vec2 uGrassFade;
+           uniform float uGrassYaw;
            varying float vTorchUnlit;
            varying float vIsGrass;`
         )
         .replace(
+          '#include <beginnormal_vertex>',
+          `#include <beginnormal_vertex>
+           // ALL cutout foliage (grass blades, leaves, flowers) is lit with a
+           // pure world-up normal, exactly like the grass_top terrain face.
+           // normalMatrix then produces the correct view-space up vector, so
+           // Lambert can never go black on sun-opposed or back-facing quads.
+           // Face-to-face shading variety is already baked into vertex colours
+           // by the mesher, and torches bypass lighting entirely in the
+           // fragment stage, so nothing is lost by unifying the normal here.
+           objectNormal = vec3(0.0, 1.0, 0.0);`
+        )
+        .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
-           // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass sway strength
+           // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass/foliage sway
            vTorchUnlit = step(aSway.y, -0.5);
+           // Grass blades: normal.z > 10 (encoded as ang+100 by mesher)
+           float gBlade = step(10.0, normal.z);
            float gPlant = step(0.001, aSway.y);
-           vIsGrass = gPlant;
+           vIsGrass = gBlade;
+
+           // ---- billboard rotation (grass blades only) ----
+           // The normal attribute stores (bladeCentreX, bladeCentreZ, bladeAngle+100)
+           // for grass verts. We rotate the vertex's XZ offset from the blade
+           // centre so the quad partially faces the camera.
+           if (gBlade > 0.5) {
+             float bCx = normal.x;   // blade centre X (chunk-local)
+             float bCz = normal.y;   // blade centre Z (chunk-local)
+             float bAng = normal.z - 100.0;  // original blade angle
+
+             // World-space blade centre for camera direction
+             vec3 bWorld = (modelMatrix * vec4(bCx, 0.0, bCz, 1.0)).xyz;
+             // Direction from blade to camera (XZ only)
+             vec2 toCamera = normalize(uGrassCam.xz - bWorld.xz);
+             // Target angle: face the camera
+             float camAng = atan(toCamera.y, toCamera.x);
+             // Blend 60% toward camera facing for a natural partial billboard
+             float blendedAng = bAng + 0.6 * sin(camAng - bAng);
+
+             float dAng = blendedAng - bAng;
+             float cosD = cos(dAng);
+             float sinD = sin(dAng);
+
+             // Rotate the vertex position offset from blade centre around Y
+             float offX = position.x - bCx;
+             float offZ = position.z - bCz;
+             transformed.x = bCx + offX * cosD - offZ * sinD;
+             transformed.z = bCz + offX * sinD + offZ * cosD;
+             transformed.y = position.y;
+           }
+
            float gTw = aSway.z;
            float gH = aSway.w;
-           float gDist = distance((modelMatrix * vec4(position, 1.0)).xz, uGrassCam.xz);
+           float gDist = distance((modelMatrix * vec4(transformed, 1.0)).xz, uGrassCam.xz);
            float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
            vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
            float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
-           vec3 gP = position;
-           gP += gWind * (gSw * gTw);
-           gP.y -= gTw * gH * (1.0 - gCol);
-           transformed = mix(position, gP, gPlant);`
+           vec3 gP = transformed;
+           gP += gWind * (gSw * gTw) * gPlant;
+           gP.y -= gTw * gH * (1.0 - gCol) * gPlant;
+           transformed = mix(transformed, gP, gPlant);`
         );
-      // Grass blades: replace normal with pure-up (0,1,0) so NdotL is always
-      // the sun's Y component — identical to the grass_top face. This is the
-      // ONLY reliable fix for foliage going black when the camera is opposite
-      // the low golden sun: the previous `abs(y)+0.9 + xz*0.25` normal still
-      // had ±0.26 horizontal contribution, which flipped NdotL negative at
-      // ~sun elev 0.22 whenever a blade's horizontal normal opposed the sun.
-      // Non-grass cutouts (leaves/flowers) keep the upward-biased normal.
+      // Fragment: vNormal already carries view-space world-up for every
+      // cutout vertex (vertex-stage objectNormal override). Also adds the
+      // grass wrap-translucency floor and the torch unlit bypass.
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
@@ -512,18 +554,15 @@ export class GameEngine {
         )
         .replace(
           '#include <normal_fragment_begin>',
-          `vec3 normal;
-           if (vIsGrass > 0.5) {
-             // Pure-up normal for grass blades. Lit exactly like the ground
-             // block below them, so blades never darken with orientation and
-             // both sides of the double-sided quad receive identical light.
-             normal = vec3(0.0, 1.0, 0.0);
-           } else {
-             // Leaves / flowers / other cutouts: upward-biased, back faces
-             // flipped horizontally to keep them lit from either side.
-             normal = normalize( vec3( vNormal.x * 0.25, abs(vNormal.y) + 0.9, vNormal.z * 0.25 ) );
-             if (!gl_FrontFacing) normal.xz *= -1.0;
-           }`
+          `float faceDirection = gl_FrontFacing ? 1.0 : -1.0;
+           // vNormal is the view-space world-up for EVERY cutout vertex (the
+           // vertex stage overrides objectNormal to (0,1,0)). Use it as-is:
+           // NO faceDirection flip — flipping by gl_FrontFacing made lighting
+           // depend on which side of the double-sided quad the camera saw,
+           // which blackened backlit grass blades and tree leaves whenever
+           // the player looked toward/away from the sun.
+           vec3 normal = normalize(vNormal);
+           vec3 nonPerturbedNormal = normal;`
         )
         .replace(
           '#include <opaque_fragment>',
@@ -563,6 +602,7 @@ export class GameEngine {
       shader.uniforms.uGrassTime = GRASS_TIME;
       shader.uniforms.uGrassCam = GRASS_CAM;
       shader.uniforms.uGrassFade = GRASS_FADE;
+      shader.uniforms.uGrassYaw = GRASS_YAW;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
@@ -570,22 +610,44 @@ export class GameEngine {
            attribute vec4 aSway;
            uniform float uGrassTime;
            uniform vec3 uGrassCam;
-           uniform vec2 uGrassFade;`
+           uniform vec2 uGrassFade;
+           uniform float uGrassYaw;`
         )
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
            float gPlant = step(0.001, aSway.y);
+           float gBlade = step(10.0, normal.z);
+
+           // Billboard rotation (grass blades only — must match main shader)
+           if (gBlade > 0.5) {
+             float bCx = normal.x;
+             float bCz = normal.y;
+             float bAng = normal.z - 100.0;
+             vec3 bWorld = (modelMatrix * vec4(bCx, 0.0, bCz, 1.0)).xyz;
+             vec2 toCamera = normalize(uGrassCam.xz - bWorld.xz);
+             float camAng = atan(toCamera.y, toCamera.x);
+             float blendedAng = bAng + 0.6 * sin(camAng - bAng);
+             float dAng = blendedAng - bAng;
+             float cosD = cos(dAng);
+             float sinD = sin(dAng);
+             float offX = position.x - bCx;
+             float offZ = position.z - bCz;
+             transformed.x = bCx + offX * cosD - offZ * sinD;
+             transformed.z = bCz + offX * sinD + offZ * cosD;
+             transformed.y = position.y;
+           }
+
            float gTw = aSway.z;
            float gH = aSway.w;
-           float gDist = distance((modelMatrix * vec4(position, 1.0)).xz, uGrassCam.xz);
+           float gDist = distance((modelMatrix * vec4(transformed, 1.0)).xz, uGrassCam.xz);
            float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
            vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
            float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
-           vec3 gP = position;
-           gP += gWind * (gSw * gTw);
-           gP.y -= gTw * gH * (1.0 - gCol);
-           transformed = mix(position, gP, gPlant);`
+           vec3 gP = transformed;
+           gP += gWind * (gSw * gTw) * gPlant;
+           gP.y -= gTw * gH * (1.0 - gCol) * gPlant;
+           transformed = mix(transformed, gP, gPlant);`
         );
     };
 
@@ -1804,9 +1866,10 @@ export class GameEngine {
     // Underwater wins last so background + fog stay a single deep-blue field.
     this.applyUnderwaterFx();
 
-    // ---- grass animation + distance LOD camera ----
+    // ---- grass animation + distance LOD camera + billboard yaw ----
     GRASS_TIME.value += dt;
     GRASS_CAM.value.copy(this.camera.position);
+    GRASS_YAW.value = this.player.yaw;
 
     // ---- god rays: sun shafts by day, moonbeams after dark ----
     // The pass used to track the sun unconditionally, so at night it aimed at

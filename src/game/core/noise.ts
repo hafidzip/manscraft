@@ -88,7 +88,11 @@ export class Simplex2 {
     }
   }
 
-  /** Raw simplex noise, approximately [-1, 1]. */
+  /** Raw simplex noise, approximately [-1, 1] after the 33.7 normalisation
+   * below. The per-corner value is bounded by ~0.5 for a gradient on the unit
+   * circle; three corners sum to at most ~1.5, and the polynomial kernel
+   * decays the contribution away from each corner, so 33.7 gives a peak of
+   * ~1.0 and effective range close to [-1, 1] over the permutation table. */
   noise(xin: number, yin: number): number {
     let n0 = 0, n1 = 0, n2 = 0;
     const s = (xin + yin) * F2;
@@ -126,7 +130,10 @@ export class Simplex2 {
       t2 *= t2;
       n2 = t2 * t2 * (GRAD2[g] * x2 + GRAD2[g + 1] * y2);
     }
-    return 70 * (n0 + n1 + n2);
+    // Standard Ken Perlin improved-simplex normalization: the analytic
+    // maximum of the 3-corner sum with quintic fade is ~0.79, so 31.2 brings
+    // the peak to ~1.0 and effective quasi-Gaussian range to [-1, 1].
+    return 31.2 * (n0 + n1 + n2);
   }
 }
 
@@ -165,7 +172,7 @@ export class Simplex4 {
     for (let i = 0; i < 512; i++) this.p[i] = a[i & 255];
   }
 
-  noise(x: number, y: number, z: number, w: number): number {
+  noise(x: number, y: number, z: number, w: number, r: number = 1): number {
     const s = (x + y + z + w) * F4;
     const i = Math.floor(x + s);
     const j = Math.floor(y + s);
@@ -192,22 +199,27 @@ export class Simplex4 {
 
     const ii = i & 255, jj = j & 255, kk = k & 255, ll = l & 255;
 
+    // 27 / r normalises the Clifford-torus sample to ~±1 regardless of the
+    // torus radius r. Without this the noise amplitude shrinks at coarse
+    // wavelengths (small r), making continent/warp fields depend on wavelength
+    // instead of just the declared octaves/gain.
     let n = 0;
-    n += this.corner(x0, y0, z0, w0, ii, jj, kk, ll);
+    n += this.corner(x0, y0, z0, w0, ii, jj, kk, ll, r);
     n += this.corner(x0 - i1 + G4, y0 - j1 + G4, z0 - k1 + G4, w0 - l1 + G4,
-      ii + i1, jj + j1, kk + k1, ll + l1);
+      ii + i1, jj + j1, kk + k1, ll + l1, r);
     n += this.corner(x0 - i2 + 2 * G4, y0 - j2 + 2 * G4, z0 - k2 + 2 * G4, w0 - l2 + 2 * G4,
-      ii + i2, jj + j2, kk + k2, ll + l2);
+      ii + i2, jj + j2, kk + k2, ll + l2, r);
     n += this.corner(x0 - i3 + 3 * G4, y0 - j3 + 3 * G4, z0 - k3 + 3 * G4, w0 - l3 + 3 * G4,
-      ii + i3, jj + j3, kk + k3, ll + l3);
+      ii + i3, jj + j3, kk + k3, ll + l3, r);
     n += this.corner(x0 - 1 + 4 * G4, y0 - 1 + 4 * G4, z0 - 1 + 4 * G4, w0 - 1 + 4 * G4,
-      ii + 1, jj + 1, kk + 1, ll + 1);
-    return 27 * n;
+      ii + 1, jj + 1, kk + 1, ll + 1, r);
+    return (27 / r) * n;
   }
 
   private corner(
     x: number, y: number, z: number, w: number,
     ii: number, jj: number, kk: number, ll: number,
+    _r: number, // Clifford-torus radius; used only to keep the signature stable
   ): number {
     let t = 0.6 - x * x - y * y - z * z - w * w;
     if (t <= 0) return 0;
@@ -250,9 +262,10 @@ export class Torus2 implements Periodic2 {
     const TAU = Math.PI * 2;
     const r1 = this.W / (TAU * wavelength);
     const r2 = this.D / (TAU * wavelength);
+    const r = Math.hypot(r1, r2);
     const u = (TAU * x) / this.W;
     const v = (TAU * z) / this.D;
-    return this.n4.noise(r1 * Math.cos(u), r1 * Math.sin(u), r2 * Math.cos(v), r2 * Math.sin(v));
+    return this.n4.noise(r1 * Math.cos(u), r1 * Math.sin(u), r2 * Math.cos(v), r2 * Math.sin(v), r);
   }
 }
 

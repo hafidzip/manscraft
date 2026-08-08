@@ -153,7 +153,7 @@ export class TerrainGenerator {
 
   /** landforms: every field sampled through the same domain warp */
   private fields(px: number, pz: number): FieldSet {
-    const [wx, wz] = warp2(this.srcWarp, px, pz, 128, 16, 2);
+    const [wx, wz] = warp2(this.srcWarp, px, pz, 128, 10, 2);
     const contRaw = fbm(this.srcCont, wx, wz, { wavelength: 320, octaves: 4 });
     // smoothstep re-map: mean-shifted -> ~70% land, deep basins below ~30%
     const cont = smoothstep(this.contLo, this.contHi, contRaw) * 2 - 1;
@@ -206,17 +206,16 @@ export class TerrainGenerator {
     }
     const bDef = BIOME_DEFS[biome];
 
-    let h = this.base + f.cont * 6;                // continent raise
+    let h = this.base + f.cont * 4;                // continent raise — reduced amplitude
     if (f.cont < -0.18) h += (f.cont + 0.18) * 22; // descend into ocean basins
-    // rounded biome detail — global 0.6 damping favours broad flat plains
-    h += f.hills * bDef.hill * this.hillAmp * 0.6;
+    // rounded biome detail — reduced 0.4 damping for gentler rolling hills
+    h += f.hills * bDef.hill * this.hillAmp * 0.4;
 
     // mountain ranges: masked ridged signal, squared for sharp massifs,
-    // peaks/valleys modulate crest jaggedness. The mask window starts higher
-    // (0.64 vs 0.55) and the amplitude is damped (18 vs 26) so ranges are
-    // rarer and lower — most of the world reads as walkable flatland.
+    // peaks/valleys modulate crest jaggedness. All sub-amplitudes reduced so
+    // ranges are rarer and lower — most of the world reads as walkable flatland.
     const m = smoothstep(0.64, 0.9, f.mount);
-    if (m > 0) h += this.mountAmp * (m * m * 18 + m * f.hills * 2 + m * Math.abs(f.pv) * 5);
+    if (m > 0) h += this.mountAmp * (m * m * 12 + m * f.hills * 2 + m * Math.abs(f.pv) * 5);
 
     hCache[k] = Math.max(3, Math.min(H - 16, Math.floor(h)));
     bCache[k] = biome;
