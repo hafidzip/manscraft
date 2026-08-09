@@ -177,6 +177,17 @@ const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
 
 /**
+ * Direct sun/moon shadow tuning for one-meter voxels.
+ *
+ * The previous normalBias (0.15) was large enough to detach blocker silhouettes
+ * from cube edges, and PCF filtering blended lit samples across those detached
+ * edges. That looked like sunlight leaking through sealed block corners. Voxel
+ * terrain wants tight, hard direct shadows; torch light and GI are separate.
+ */
+const CELESTIAL_SHADOW_SIZE = 1536;
+const CELESTIAL_SHADOW_HALF_EXTENT = 48;
+
+/**
  * Radius (blocks) inside which foliage chunks cast shadows.
  *
  * Grass is the single densest thing in the scene — a chunk of tall grass is
@@ -390,7 +401,7 @@ export class GameEngine {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    // ---- post pipeline: soft PCF sun shadows, ACESFilmic tone mapping ----
+    // ---- post pipeline: hard voxel sun shadows, ACESFilmic tone mapping ----
     // ACES keeps the warm golden highlights from clipping while preserving
     // shadow detail. Exposure is tuned for ACES shoulder (lower than Reinhard).
     this.renderer.shadowMap.enabled = true;
@@ -433,6 +444,11 @@ export class GameEngine {
         side: THREE.DoubleSide,
       }),
     };
+    // Merged chunk faces are one-sided by default. In the shadow depth pass,
+    // double-sided terrain prevents a backface/corner miss from opening a tiny
+    // directional-light hole along block and chunk edges.
+    mats.opaque.shadowSide = THREE.DoubleSide;
+    mats.cutout.shadowSide = THREE.DoubleSide;
     // shader injection: per-cell flow vectors scroll the water texture,
     // so streams visibly flow, waterfalls rush down, and pools stay still
     mats.water.onBeforeCompile = (shader) => {
@@ -683,19 +699,20 @@ export class GameEngine {
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
 
     // ---- celestial shadows: sun by day, moon by night. Both lights share
-    // the same compact PCF shadow settings; intensities cross-fade in Sky.
+    // hard-edged voxel settings; intensities cross-fade in Sky.
     for (const light of [this.sky.sun, this.sky.moon]) {
       light.castShadow = true;
-      light.shadow.mapSize.set(1024, 1024);
-      light.shadow.camera.left = -62;
-      light.shadow.camera.right = 62;
-      light.shadow.camera.top = 62;
-      light.shadow.camera.bottom = -62;
+      light.shadow.mapSize.set(CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_SIZE);
+      light.shadow.camera.left = -CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.right = CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.top = CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
       light.shadow.camera.near = 0.5;
       light.shadow.camera.far = 180;
-      light.shadow.bias = -0.0003;
-      light.shadow.normalBias = 0.15;
-      light.shadow.radius = 2;
+      light.shadow.bias = -0.00015;
+      light.shadow.normalBias = 0.05;
+      light.shadow.radius = 1.5;
+      light.shadow.camera.updateProjectionMatrix();
     }
 
     // ---- post pipeline (raw render-target chain):
@@ -1708,7 +1725,11 @@ export class GameEngine {
     if (this.wheelAcc === 0) return;
     const step = this.wheelAcc > 0 ? 1 : -1;
     this.wheelAcc = 0;
-    this.selectSlot((this.sel + step + 6) % 6);
+    if (this.toolMode === 'weapon') {
+      this.weapons.cycle(step);
+    } else {
+      this.selectSlot((this.sel + step + 6) % 6);
+    }
   }
 
   // -------------------------------------------------------------- main loop
@@ -1754,11 +1775,12 @@ export class GameEngine {
     }
 
     // water: per-cell flow is shader-driven (+ subtle global shimmer for pools)
-    WATER_TIME.value += dt;
-    this.textures.water.offset.x += dt * 0.003;
-    this.textures.water.offset.y += dt * 0.006;
-
-    this.fluid.update(dt);
+    if (this.locked) {
+      WATER_TIME.value += dt;
+      this.textures.water.offset.x += dt * 0.003;
+      this.textures.water.offset.y += dt * 0.006;
+      this.fluid.update(dt);
+    }
     // Streaming budget follows the frame clock: when a frame is already over
     // budget (heavy combat, lots of VFX) the streamer backs off instead of
     // stacking chunk builds on top of a frame that is running late.
@@ -1768,22 +1790,24 @@ export class GameEngine {
     // reacts late, so chunks land in bursts right in front of the cockpit.
     // Leading the stream centre along the velocity vector lets the ring build
     // ahead of the hull instead of chasing it.
-    let streamX = this.player.pos.x;
-    let streamZ = this.player.pos.z;
-    if (this.piloting && this.ship) {
-      // Ensure the streaming center matches the spaceship's actual position,
-      // led slightly ahead by the velocity vector to build chunks in advance.
-      // The original code was using `this.player.pos` (which stays stationary at
-      // the boarding spot), causing a massive desync where the wrong terrain heightmap
-      // columns were generated and shifted, resulting in floating islands, holes,
-      // and sheared cliffs at high speed.
-      streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
-      streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
+    if (this.locked) {
+      let streamX = this.player.pos.x;
+      let streamZ = this.player.pos.z;
+      if (this.piloting && this.ship) {
+        // Ensure the streaming center matches the spaceship's actual position,
+        // led slightly ahead by the velocity vector to build chunks in advance.
+        // The original code was using `this.player.pos` (which stays stationary at
+        // the boarding spot), causing a massive desync where the wrong terrain heightmap
+        // columns were generated and shifted, resulting in floating islands, holes,
+        // and sheared cliffs at high speed.
+        streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
+        streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
+      }
+      this.world.update(streamX, streamZ, dt > 0.024 ? 2.5 : 6);
+      // toroidal rendering: pull every meshed chunk to its nearest-image copy
+      this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
+      if (this.ship && !this.piloting) this.ship.updateParked(dt);
     }
-    this.world.update(streamX, streamZ, dt > 0.024 ? 2.5 : 6);
-    // toroidal rendering: pull every meshed chunk to its nearest-image copy
-    this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
-    if (this.ship && !this.piloting) this.ship.updateParked(dt);
     // Camps run on the main clock, not tickPlay: squads must materialize the
     // moment a planet loads (including right after a space landing, before
     // the first pointer lock) and keep respawning through pause/death.
@@ -1794,16 +1818,19 @@ export class GameEngine {
     // every newly-entered camp builds a whole squad (rigs + generated canvas
     // textures) inside one frame. That is the hitching felt while piloting
     // even when the averaged FPS counter still reads 60.
-    if (!this.piloting || this.shipAltitude() < 26) this.enemies.update(dt);
+    // Only update enemies when the game is active (locked) and not piloting high
+    if (this.locked && (!this.piloting || this.shipAltitude() < 26)) this.enemies.update(dt);
     // furnaces smelt on the main clock so they keep cooking while the player
     // walks away or has the UI open
-    this.updateFurnaces(dt);
-    if (this.openFurnaceKey) this.events.onStats(this.buildStats());
-    // merchant proximity prompt + shop staleness guard
-    this.updateMerchantProximity();
-    this.updateShop();
-    this.particles.update(dt);
-    this.sky.update(dt, this.camera.position);
+    if (this.locked) {
+      this.updateFurnaces(dt);
+      if (this.openFurnaceKey) this.events.onStats(this.buildStats());
+      // merchant proximity prompt + shop staleness guard
+      this.updateMerchantProximity();
+      this.updateShop();
+      this.particles.update(dt);
+      this.sky.update(dt, this.camera.position);
+    }
     const moonAsKey = this.sky.dayFactor < 0.32;
     if (moonAsKey !== this.moonIsKey) {
       // NOTE: do NOT toggle `castShadow` here.
@@ -1824,7 +1851,9 @@ export class GameEngine {
     this.sound.update(dt, this.sky.isDay);
     // Aliens are nocturnal: they only ever drop in after dark, and every
     // survivor boils away at sunrise (see EnemyManager.setNight).
-    this.enemies.setNight(this.sky.sunElev < 0.02);
+    if (this.locked) {
+      this.enemies.setNight(this.sky.sunElev < 0.02);
+    }
 
     // ---- atmosphere: drive the shared fog uniforms from the sky ----
     // (Underwater overrides run AFTER this so they win for the frame.)
@@ -1834,64 +1863,68 @@ export class GameEngine {
     // so the thick fog showed up at dusk/dawn and then quietly faded out for
     // the rest of the night. This curve is flat 1 across the WHOLE night and
     // flat 0 across the whole day, with a short crossfade at sunrise/sunset.
-    const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.sunElev, -0.05, 0.11);
-    const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
-    const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
+    if (this.locked) {
+      const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.sunElev, -0.05, 0.11);
+      const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
+      const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
 
-    // The horizon must stay seamless: distant terrain has to fade into exactly
-    // the colour the sky has at the horizon. The sky pass mixes the background
-    // toward uSkyFogColor by uSkyFog (full strength at the horizon line), so
-    // pre-computing that same mix here keeps terrain and sky identical by
-    // construction — while still letting the night be a bright, readable mist
-    // instead of the invisible near-black fog it used to be.
-    const mistK = nightFog * 0.85;
-    const mist = this.fogScratch.copy(NIGHT_MIST).lerp(this.sky.skyColor, 0.25);
-    FOG_UNIFORMS.uSkyFogColor.value.copy(mist);
-    FOG_UNIFORMS.uSkyFog.value = mistK;
-    FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(mist, mistK);
+      // The horizon must stay seamless: distant terrain has to fade into exactly
+      // the colour the sky has at the horizon. The sky pass mixes the background
+      // toward uSkyFogColor by uSkyFog (full strength at the horizon line), so
+      // pre-computing that same mix here keeps terrain and sky identical by
+      // construction — while still letting the night be a bright, readable mist
+      // instead of the invisible near-black fog it used to be.
+      const mistK = nightFog * 0.85;
+      const mist = this.fogScratch.copy(NIGHT_MIST).lerp(this.sky.skyColor, 0.25);
+      FOG_UNIFORMS.uSkyFogColor.value.copy(mist);
+      FOG_UNIFORMS.uSkyFog.value = mistK;
+      FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(mist, mistK);
 
-    FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
-    FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
-      .sub(this.camera.position).normalize();
+      FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
+      FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
+        .sub(this.camera.position).normalize();
 
-    // Density + falloff. Nights are properly socked in from dusk to dawn; day
-    // keeps a gentle atmospheric haze. Falloff stays tall enough that flying
-    // still has fog.
-    FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.072;
-    FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
-    FOG_UNIFORMS.uFogFalloff.value = 46 - nightFog * 18;
-    // In-scatter is a DAY effect (sun glare through haze). Kill it at night
-    // so the moon never paints the fog white.
-    FOG_UNIFORMS.uFogInscatter.value = 0.04 + (1 - nightFog) * 0.55;
-    FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 1.5, nightFog);
+      // Density + falloff. Nights are properly socked in from dusk to dawn; day
+      // keeps a gentle atmospheric haze. Falloff stays tall enough that flying
+      // still has fog.
+      FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.072;
+      FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
+      FOG_UNIFORMS.uFogFalloff.value = 46 - nightFog * 18;
+      // In-scatter is a DAY effect (sun glare through haze). Kill it at night
+      // so the moon never paints the fog white.
+      FOG_UNIFORMS.uFogInscatter.value = 0.04 + (1 - nightFog) * 0.55;
+      FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 1.5, nightFog);
 
-    // Far-fog ramp: dissolve terrain BEFORE the mesh cutoff. View radius is a
-    // CIRCLE of VIEW_DISTANCE chunks, so the farthest visible column is about
-    // (VIEW_DISTANCE+0.75)*CHUNK_SIZE (~92), not the axis-aligned 80. Ending
-    // the ramp short of that left hard silhouettes on the diagonal.
-    const maxRange = (C.VIEW_DISTANCE + 0.75) * C.CHUNK_SIZE;
-    const flyAmt = this.piloting
-      ? THREE.MathUtils.smoothstep(this.shipAltitude(), 10, 40)
-      : THREE.MathUtils.smoothstep(this.camera.position.y - this.world.gen.sea, 16, 46);
-    const blend = Math.max(nightFog, flyAmt);
-    // Start the dissolve earlier when flying/night; always hit full fog by ~0.9
-    // of the mesh radius so nothing hard remains against the sky.
-    FOG_UNIFORMS.uFarFogStart.value = THREE.MathUtils.lerp(maxRange * 0.48, maxRange * 0.32, blend);
-    FOG_UNIFORMS.uFarFogEnd.value = THREE.MathUtils.lerp(maxRange * 0.92, maxRange * 0.78, blend);
+      // Far-fog ramp: dissolve terrain BEFORE the mesh cutoff. View radius is a
+      // CIRCLE of VIEW_DISTANCE chunks, so the farthest visible column is about
+      // (VIEW_DISTANCE+0.75)*CHUNK_SIZE (~92), not the axis-aligned 80. Ending
+      // the ramp short of that left hard silhouettes on the diagonal.
+      const maxRange = (C.VIEW_DISTANCE + 0.75) * C.CHUNK_SIZE;
+      const flyAmt = this.piloting
+        ? THREE.MathUtils.smoothstep(this.shipAltitude(), 10, 40)
+        : THREE.MathUtils.smoothstep(this.camera.position.y - this.world.gen.sea, 16, 46);
+      const blend = Math.max(nightFog, flyAmt);
+      // Start the dissolve earlier when flying/night; always hit full fog by ~0.9
+      // of the mesh radius so nothing hard remains against the sky.
+      FOG_UNIFORMS.uFarFogStart.value = THREE.MathUtils.lerp(maxRange * 0.48, maxRange * 0.32, blend);
+      FOG_UNIFORMS.uFarFogEnd.value = THREE.MathUtils.lerp(maxRange * 0.92, maxRange * 0.78, blend);
 
-    // Underwater wins last so background + fog stay a single deep-blue field.
-    this.applyUnderwaterFx();
+      // Underwater wins last so background + fog stay a single deep-blue field.
+      this.applyUnderwaterFx();
+    }
 
     // ---- grass animation + distance LOD camera + billboard yaw ----
-    GRASS_TIME.value += dt;
-    GRASS_CAM.value.copy(this.camera.position);
-    GRASS_YAW.value = this.player.yaw;
+    if (this.locked) {
+      GRASS_TIME.value += dt;
+      GRASS_CAM.value.copy(this.camera.position);
+      GRASS_YAW.value = this.player.yaw;
+    }
 
     // ---- god rays: sun shafts by day, moonbeams after dark ----
     // The pass used to track the sun unconditionally, so at night it aimed at
     // a light that was below the horizon and faded to nothing — there was no
     // way to ever see a moonbeam. Hand it the moon once the moon is the key.
-    if (this.volumetricLight) {
+    if (this.locked && this.volumetricLight) {
       if (moonAsKey) {
         this.volumetricLight.lightWorldPosition.copy(this.sky.moonWorldPos);
         const moonUp = THREE.MathUtils.clamp(-this.sky.sunElev, 0, 1);
@@ -1912,12 +1945,12 @@ export class GameEngine {
     }
 
     // ---- bloom fades out at night so the dark scene stays clean ----
-    if (this.bloom) {
+    if (this.locked && this.bloom) {
       this.bloom.strength = 0.30 * THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.0, 0.35);
     }
 
     // ---- flashlight: camera torch after dark, off while flying/dead ----
-    if (this.flashlight) {
+    if (this.locked && this.flashlight) {
       const canUse = !this.dead && !this.piloting;
       const nightAmt = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.05, 0.3);
       // Ambient is near-zero at night now, so the torch carries the scene and
@@ -1930,38 +1963,42 @@ export class GameEngine {
     // Re-evaluated on a slow cadence (the set only changes when the player
     // crosses a chunk boundary) and only while on foot: from the cockpit the
     // camera is far above the blades and their shadows are sub-pixel.
-    this.grassShadowT -= dt;
-    if (this.grassShadowT <= 0) {
-      this.grassShadowT = 0.25;
-      const radius = this.piloting ? 0 : GRASS_SHADOW_RADIUS;
-      if (this.world.updateGrassShadowCasters(this.camera.position.x, this.camera.position.z, radius)) {
-        this.shadowCooldown = 0;
-        if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+    if (this.locked) {
+      this.grassShadowT -= dt;
+      if (this.grassShadowT <= 0) {
+        this.grassShadowT = 0.25;
+        const radius = this.piloting ? 0 : GRASS_SHADOW_RADIUS;
+        if (this.world.updateGrassShadowCasters(this.camera.position.x, this.camera.position.z, radius)) {
+          this.shadowCooldown = 0;
+          if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+        }
+      }
+
+      // ---- celestial shadow: refresh only when the player or active light moves ----
+      const p = this.player.pos;
+      const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
+      const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
+      const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087; // ~0.5°
+      // A shadow refresh is a full extra depth pass over every chunk mesh.
+      // Sprinting crosses the 2-block threshold ~3x a second, and the sun test
+      // fires on its own cadence, so the two together were re-rendering the map
+      // far more often than the soft, low-frequency shadows actually need.
+      this.shadowCooldown -= dt;
+      if (this.renderer.shadowMap && (moved || lightMoved) && this.shadowCooldown <= 0) {
+        this.lastShadowX = p.x;
+        this.lastShadowZ = p.z;
+        this.lastSunElev = activeElev;
+        // Flying crosses the 2-block trigger every frame, so the shadow map
+        // would re-render a full depth pass 5x a second while nothing on the
+        // ground is being inspected up close. Back it right off in the air.
+        this.shadowCooldown = this.piloting ? 0.75 : 0.2;
+        this.renderer.shadowMap.needsUpdate = true;
       }
     }
 
-    // ---- celestial shadow: refresh only when the player or active light moves ----
-    const p = this.player.pos;
-    const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
-    const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
-    const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087; // ~0.5°
-    // A shadow refresh is a full extra depth pass over every chunk mesh.
-    // Sprinting crosses the 2-block threshold ~3x a second, and the sun test
-    // fires on its own cadence, so the two together were re-rendering the map
-    // far more often than the soft, low-frequency shadows actually need.
-    this.shadowCooldown -= dt;
-    if (this.renderer.shadowMap && (moved || lightMoved) && this.shadowCooldown <= 0) {
-      this.lastShadowX = p.x;
-      this.lastShadowZ = p.z;
-      this.lastSunElev = activeElev;
-      // Flying crosses the 2-block trigger every frame, so the shadow map
-      // would re-render a full depth pass 5x a second while nothing on the
-      // ground is being inspected up close. Back it right off in the air.
-      this.shadowCooldown = this.piloting ? 0.75 : 0.2;
-      this.renderer.shadowMap.needsUpdate = true;
+    if (this.locked) {
+      this.reportStats(dt);
     }
-
-    this.reportStats(dt);
 
     if (this.mainRT) {
       // 1) Render scene into the main target (carries the depth texture).
@@ -2189,6 +2226,7 @@ export class GameEngine {
   }
 
   private tickPlay(dt: number): void {
+    this.flushWheel();
     if (this.piloting) {
       this.tickPilot(dt);
       return;
