@@ -57,14 +57,17 @@ export class Effects {
   private particles: Particle[] = [];
   private particlePool: THREE.Mesh[] = [];
   private particleMats = new Map<number, THREE.MeshBasicMaterial>();
+  private particleGeo = new THREE.BoxGeometry(1, 1, 1);
 
   private casings: CasE[] = [];
   private casingPool: THREE.Mesh[] = [];
   private casingMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#d8b345', 30, 8, 21) });
+  private casingGeo = new THREE.BoxGeometry(0.012, 0.012, 0.026);
 
   private tracers: { mesh: THREE.Mesh; life: number; anchor: THREE.Object3D | null; end: THREE.Vector3 }[] = [];
   private tracerPool: THREE.Mesh[] = [];
   private tracerMat = new THREE.MeshBasicMaterial({ color: '#ffe9a8', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+  private tracerGeo = new THREE.BoxGeometry(0.014, 0.014, 1);
 
   private decals: Decal[] = [];
   private decalPool: PooledDecal[] = [];
@@ -86,6 +89,7 @@ export class Effects {
 
   // rocket
   private rocket: { mesh: THREE.Group; vel: THREE.Vector3; life: number } | null = null;
+  private rocketTemplate: THREE.Group | null = null;
   private onExplode: (pos: THREE.Vector3) => void;
   private playerPos: THREE.Vector3;
 
@@ -107,6 +111,27 @@ export class Effects {
       scene.add(s);
       this.flashSprites.push(s);
     }
+  }
+
+  /** Reserve the maximum common combat burst before gameplay to avoid first
+   * shot/explosion geometry, sprite and material allocation stalls. */
+  prewarm(colors: Iterable<number>): void {
+    for (const color of colors) this.particleMaterial(color);
+    while (this.particlePool.length < 96) this.particlePool.push(new THREE.Mesh(this.particleGeo));
+    while (this.casingPool.length < 24) this.casingPool.push(new THREE.Mesh(this.casingGeo, this.casingMat));
+    while (this.tracerPool.length < 24) this.tracerPool.push(new THREE.Mesh(this.tracerGeo, this.tracerMat));
+    while (this.smokePool.length < 32) this.smokePool.push(new THREE.Sprite(this.smokeMatBase.clone()));
+    while (this.decalPool.length < 48) {
+      const mat = new THREE.MeshBasicMaterial({
+        transparent: true, depthWrite: false, depthTest: true,
+        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+        side: THREE.DoubleSide, toneMapped: false,
+      });
+      const mesh = new THREE.Mesh(this.decalGeo, mat);
+      mesh.renderOrder = 6;
+      this.decalPool.push({ mesh, mat });
+    }
+    this.rocketTemplate = this.makeRocketModel();
   }
 
   // ------------------------------------------------------------ muzzle flash
@@ -153,7 +178,7 @@ export class Effects {
    */
   tracer(from: THREE.Vector3, to: THREE.Vector3, anchor?: THREE.Object3D) {
     let m = this.tracerPool.pop();
-    if (!m) m = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.014, 1), this.tracerMat);
+    if (!m) m = new THREE.Mesh(this.tracerGeo, this.tracerMat);
     const len = from.distanceTo(to);
     m.position.lerpVectors(from, to, 0.5);
     m.scale.set(1, 1, Math.max(0.06, len));
@@ -168,7 +193,7 @@ export class Effects {
   /** `inherit` is the shooter's velocity so brass arcs naturally when moving. */
   casing(pos: THREE.Vector3, right: THREE.Vector3, big = false, inherit?: THREE.Vector3) {
     let m = this.casingPool.pop();
-    if (!m) m = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.012, 0.026), this.casingMat);
+    if (!m) m = new THREE.Mesh(this.casingGeo, this.casingMat);
     m.scale.setScalar(big ? 2.4 : 1);
     m.position.copy(pos);
     m.visible = true;
@@ -215,7 +240,7 @@ export class Effects {
 
   spawnParticle(pos: THREE.Vector3, vel: THREE.Vector3, color: number, size: number, life: number, bounce: boolean, grow = 0) {
     let mesh = this.particlePool.pop();
-    if (!mesh) mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), undefined);
+    if (!mesh) mesh = new THREE.Mesh(this.particleGeo, undefined);
     mesh.material = this.particleMaterial(color);
     mesh.position.copy(pos);
     mesh.scale.setScalar(size);
@@ -386,6 +411,14 @@ export class Effects {
 
   // ------------------------------------------------------------ rocket + explosion
   launchRocket(from: THREE.Vector3, dir: THREE.Vector3) {
+    const g = (this.rocketTemplate ??= this.makeRocketModel()).clone(true);
+    g.position.copy(from);
+    g.lookAt(tmpV.copy(from).add(dir));
+    this.scene.add(g);
+    this.rocket = { mesh: g, vel: dir.clone().multiplyScalar(30), life: 6 };
+  }
+
+  private makeRocketModel(): THREE.Group {
     const g = new THREE.Group();
     const mat = new THREE.MeshLambertMaterial({ map: pixelTexture('#5d6142', 16, 12, 30) });
     const tipMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#33352a', 12, 12, 31) });
@@ -399,10 +432,7 @@ export class Effects {
     const fin2 = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.014, 0.08), tipMat);
     fin2.position.z = 0.16;
     g.add(body, head, tip, fin1, fin2);
-    g.position.copy(from);
-    g.lookAt(tmpV.copy(from).add(dir));
-    this.scene.add(g);
-    this.rocket = { mesh: g, vel: dir.clone().multiplyScalar(30), life: 6 };
+    return g;
   }
 
   get rocketActive() { return this.rocket !== null; }

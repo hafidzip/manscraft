@@ -63,7 +63,7 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
     let readySent = false;
     scene.onHud = (h) => {
       setHud(h);
-      if (!readySent) {
+      if (!readySent && scene.isWarm()) {
         readySent = true;
         readyRef.current?.(); // first live frame — parent drops the overlay
       }

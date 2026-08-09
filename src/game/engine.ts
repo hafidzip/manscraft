@@ -35,7 +35,7 @@ import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { Enemy, EnemyManager } from './fps/Enemy';
+import { Enemy, EnemyManager, ENEMY_PRESETS } from './fps/Enemy';
 import { Effects } from './fps/effects';
 import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
 import { session, saveCoins } from './session';
@@ -50,7 +50,7 @@ import {
   type FurnaceState,
 } from './crafting/smelting';
 import { ItemDropManager } from './fps/ItemDrop';
-import { buildExtrudedItem, paintDrumstick } from './fps/textures';
+import { buildExtrudedItem, paintDrumstick, pixelTexture } from './fps/textures';
 import { Spring1 } from './fps/anim';
 import type { BodyRig } from './fps/models';
 
@@ -404,12 +404,6 @@ export class GameEngine {
     persistentInventory?: Inventory,
     /** Camp IDs that were cleared on a previous visit (cross-planet persistence) */
     private initialClearedCamps?: number[],
-    /**
-     * Warm re-entry (planet hop from space): preload only a tight ring of
-     * chunks and stream the rest in during play, so the descent feels instant
-     * instead of showing a loading cut.
-     */
-    private fastStart = false,
   ) {
     this.theme = theme ?? null;
     // Use provided inventory or create fresh one
@@ -887,30 +881,41 @@ export class GameEngine {
       this.menuYaw = this.player.yaw;
     }
 
-    // ---- budgeted world preload with progress ----
-    // Warm re-entries only preload a tight 3-chunk ring (≈instant) and let the
-    // main loop stream the rest in while the player is already controlling the
-    // ship — the transition overlay covers any horizon pop-in.
-    const preloadRadius = this.fastStart ? 3 : C.VIEW_DISTANCE;
+    // ---- complete startup cook --------------------------------------------
+    // Generate the finite toroidal data set first. Previously warm entries
+    // explicitly stopped at radius 3 and cold entries stopped at the visible
+    // radius, leaving terrain noise, trees, column scans and chunk meshes in
+    // the gameplay queue. Full data cooking plus an EVICT_DISTANCE mesh ring
+    // gives both on-foot movement and fast flight a prepared safety margin.
+    let dataProgress = 0;
+    while (dataProgress < 1) {
+      dataProgress = this.world.prepareAllData(24);
+      this.events.onProgress(dataProgress * 0.48, 'Cooking terrain data');
+      if (dataProgress < 1) await this.nextFrame();
+      if (this.disposed) return;
+    }
+
+    const preloadRadius = C.EVICT_DISTANCE;
     const total = World.cellsInRadius(preloadRadius);
     let loaded = 0;
     let labelIdx = -1;
     while (true) {
-      loaded += this.world.update(this.player.pos.x, this.player.pos.z, this.fastStart ? 48 : 32);
-      if (this.fastStart ? loaded >= total : !this.world.pendingWork) break;
+      loaded += this.world.update(this.player.pos.x, this.player.pos.z, 28, preloadRadius);
+      if (!this.world.pendingWork && loaded >= total) break;
       const p = Math.min(0.99, loaded / total);
       const idx = Math.min(LOAD_LABELS.length - 1, Math.floor(p * LOAD_LABELS.length));
       if (idx !== labelIdx) {
         labelIdx = idx;
-        this.events.onProgress(p, LOAD_LABELS[idx]);
-      } else this.events.onProgress(p, LOAD_LABELS[labelIdx]);
+        this.events.onProgress(0.48 + p * 0.32, LOAD_LABELS[idx]);
+      } else this.events.onProgress(0.48 + p * 0.32, LOAD_LABELS[labelIdx]);
       await this.nextFrame();
       if (this.disposed) return;
     }
-    this.events.onProgress(1, 'World ready');
+    this.events.onProgress(0.8, 'World geometry ready');
 
     // ---- unified combat systems ----
     this.fx = new Effects(this.scene, this.world, this.player.pos, (pos) => this.handleExplosion(pos));
+    this.fx.prewarm(Object.values(DEFS).flatMap((def) => def.colors));
     const bridge: GameBridge = {
       fireShot: (m, d, def, anchor) => this.fireShot(m, d, def.id, anchor),
       launchRocket: (m, d, anchor) => this.launchRocket(m, d, anchor),
@@ -930,6 +935,14 @@ export class GameEngine {
       this.enemies.markCampsCleared(this.initialClearedCamps);
     }
     this.enemies.addScene(this.scene);
+
+    // Paint every hostile skin now. Enemy geometry uses the shared box cache,
+    // and these immutable textures are reused by every later wild spawn.
+    for (const cfg of Object.values(ENEMY_PRESETS)) {
+      pixelTexture(cfg.skin, 14, 16, cfg.seed);
+      pixelTexture(cfg.shirt, 16, 16, cfg.seed + 1);
+      pixelTexture(cfg.pants, 14, 16, cfg.seed + 2);
+    }
 
     // ---- coin purse: persists across planet hops (session) and reloads ----
     if (!Number.isFinite(session.coins)) {
@@ -953,6 +966,13 @@ export class GameEngine {
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
       this.syncHotbarMode();
     });
+    this.itemDrops.prewarm(new Set(Object.values(TO_FPS)));
+
+    // Held-block geometry is otherwise built on the first selection of each
+    // material. Cook all placeable variants while the loading overlay is up.
+    for (const id of new Set(Object.values(FROM_FPS))) {
+      if (DEFS[id]) this.blockGeometry(id);
+    }
 
     // held food — Minecraft-style extruded drumstick (each pixel = a voxel)
     this.heldFood = buildExtrudedItem(paintDrumstick, 0.017, 0.034);
@@ -977,7 +997,7 @@ export class GameEngine {
     // Hidden weapon/item rigs and the fixed torch-light shader variant must
     // reach the GPU before gameplay. Otherwise the first weapon swap / first
     // torch placement pays this upload + program-link cost in a visible frame.
-    this.events.onProgress(1, 'Warming up equipment');
+    this.events.onProgress(0.86, 'Warming up equipment');
     await this.nextFrame();
     if (this.disposed) return;
 
@@ -1006,6 +1026,8 @@ export class GameEngine {
     this.heldBlock.showTorch();
     this.heldBlock.group.visible = true;
     this.heldFood.visible = true;
+    const laserWarmTarget = this.camera.position.clone().add(new THREE.Vector3(0, 0, -3));
+    this.laser.update(0, { visible: true, firing: true, target: laserWarmTarget, charge: 1, speed: 0 });
     try {
       await this.weapons.warmup(this.renderer, this.scene);
     } finally {
@@ -1015,9 +1037,18 @@ export class GameEngine {
       foliageWarmGeo.dispose();
       this.heldBlock.group.visible = false;
       this.heldFood.visible = false;
+      this.laser.update(0, { visible: false, firing: false, target: null, charge: 0, speed: 0 });
       this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
     }
     if (this.disposed) return;
+
+    // compileAsync covers scene materials, but render targets and full-screen
+    // post effects allocate/link on their first actual draw. Execute the whole
+    // pipeline once now so the first controllable frame cannot pay that cost.
+    this.events.onProgress(0.94, 'Compiling lighting pipeline');
+    await this.warmupRenderPipeline();
+    if (this.disposed) return;
+    this.events.onProgress(1, 'All systems ready');
 
     this.addListeners();
 
@@ -1038,6 +1069,47 @@ export class GameEngine {
 
   private nextFrame(): Promise<void> {
     return new Promise((r) => requestAnimationFrame(() => r()));
+  }
+
+  /** Force texture upload, shadow allocation and every post-process shader. */
+  private async warmupRenderPipeline(): Promise<void> {
+    const textures = new Set<THREE.Texture>();
+    this.scene.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh && !(object as THREE.Sprite).isSprite && !(object as THREE.Points).isPoints) return;
+      const raw = (mesh as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      const materials = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+      for (const material of materials) {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) textures.add(value);
+        }
+      }
+    });
+    for (const texture of textures) this.renderer.initTexture(texture);
+    await this.renderer.compileAsync(this.scene, this.camera);
+    if (this.disposed || !this.mainRT) return;
+
+    this.sky.update(0, this.camera.position);
+    this.renderer.shadowMap.needsUpdate = true;
+    this.renderer.setRenderTarget(this.mainRT);
+    this.renderer.render(this.scene, this.camera);
+
+    this.lumenLite!.configure(
+      this.sky.skyColor,
+      this.sky.sunColor,
+      this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
+      this.sky.dayFactor,
+      this.world.gen.sea,
+    );
+    this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
+    this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture!);
+    this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, 1 / 60, false);
+    this.volumetricLight!.lightWorldPosition.copy(this.sky.sunWorldPos);
+    this.volumetricLight!.intensity = 0.01;
+    this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+    this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
+    this.renderer.setRenderTarget(null);
+    await this.nextFrame();
   }
 
   /**

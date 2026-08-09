@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { BLOCK_COLORS, B, type WorldLike } from './World';
 import { Inventory } from './Inventory';
 import { AudioSynth } from './audio';
-import { buildAtlas, blockCubeGeometry } from './textures';
+import { getAtlas, blockCubeGeometry } from './textures';
 import { minImageF } from '../core/constants';
 
 const tmpV = new THREE.Vector3();
@@ -32,6 +32,7 @@ export class ItemDropManager {
   items: DroppedItem[] = [];
   private geoCache = new Map<number, THREE.BufferGeometry>();
   private mat: THREE.MeshLambertMaterial | null = null;
+  private meshPool: THREE.Mesh[] = [];
   private scene: THREE.Scene;
   private world: WorldLike;
   private inv: Inventory;
@@ -57,15 +58,28 @@ export class ItemDropManager {
   }
 
   private getMaterial(): THREE.MeshLambertMaterial {
-    if (!this.mat) this.mat = new THREE.MeshLambertMaterial({ map: buildAtlas() });
+    if (!this.mat) this.mat = new THREE.MeshLambertMaterial({ map: getAtlas() });
     return this.mat;
+  }
+
+  /** Cook every drop variant and reserve entities before control is enabled. */
+  prewarm(blockIds: Iterable<number>, poolSize = 32): void {
+    for (const id of blockIds) this.getGeometry(id);
+    const mat = this.getMaterial();
+    while (this.meshPool.length < poolSize) {
+      const mesh = new THREE.Mesh(this.getGeometry(B.STONE), mat);
+      mesh.visible = false;
+      this.meshPool.push(mesh);
+    }
   }
 
   /** Spawn a dropped block item popping out from a destroyed voxel position. */
   spawn(blockId: number, pos: THREE.Vector3) {
     if (blockId === B.AIR || blockId === B.BEDROCK) return;
 
-    const mesh = new THREE.Mesh(this.getGeometry(blockId), this.getMaterial());
+    const mesh = this.meshPool.pop() ?? new THREE.Mesh(this.getGeometry(blockId), this.getMaterial());
+    mesh.geometry = this.getGeometry(blockId);
+    mesh.material = this.getMaterial();
     mesh.position.copy(pos);
     mesh.castShadow = true;
     mesh.receiveShadow = false;
@@ -146,6 +160,8 @@ export class ItemDropManager {
           this.audio.foley('snap');
           this.onPickup?.(item.blockId);
           this.scene.remove(item.mesh);
+          item.mesh.visible = false;
+          this.meshPool.push(item.mesh);
           this.items.splice(i, 1);
         }
       }
@@ -155,6 +171,8 @@ export class ItemDropManager {
   clear() {
     for (const item of this.items) {
       this.scene.remove(item.mesh);
+      item.mesh.visible = false;
+      this.meshPool.push(item.mesh);
     }
     this.items = [];
   }

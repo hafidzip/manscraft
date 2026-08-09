@@ -91,11 +91,14 @@ export function GameCanvas({
       home ? themeFromPlanet(home.planet, home.star) : undefined,
       persistentInventory ?? undefined,
       initialClearedCamps,
-      !coldStart, // warm re-entry: fast preload, stream the rest during play
     );
     engineRef.current = engine;
     engine.init().then(() => {
       if (cancelled) engine.dispose();
+    }).catch((error) => {
+      // Keep initialization failures visible instead of leaving a silent,
+      // permanently queued loading screen.
+      console.error('Game initialization failed', error);
     });
 
     return () => {

@@ -28,6 +28,18 @@ export const MATS = {
   warheadTip: new THREE.MeshLambertMaterial({ map: pixelTexture('#33352a', 12, 16, 18) }),
 };
 
+const boxGeometryCache = new Map<string, THREE.BoxGeometry>();
+
+function sharedBoxGeometry(w: number, h: number, d: number): THREE.BoxGeometry {
+  const key = `${w}|${h}|${d}`;
+  let geometry = boxGeometryCache.get(key);
+  if (!geometry) {
+    geometry = new THREE.BoxGeometry(w, h, d);
+    boxGeometryCache.set(key, geometry);
+  }
+  return geometry;
+}
+
 export function box(
   parent: THREE.Object3D,
   w: number, h: number, d: number,
@@ -35,7 +47,7 @@ export function box(
   mat: THREE.Material,
   rx = 0, ry = 0, rz = 0
 ): THREE.Mesh {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  const m = new THREE.Mesh(sharedBoxGeometry(w, h, d), mat);
   m.position.set(x, y, z);
   m.rotation.set(rx, ry, rz);
   parent.add(m);
@@ -68,7 +80,7 @@ export class ArmLink {
     this.target = target;
     // One uninterrupted voxel arm: no palm, fingers, thumb, cuff, or second
     // hand block. The mesh stretches as the weapon pose changes.
-    this.arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 1), MATS.skin);
+    this.arm = new THREE.Mesh(sharedBoxGeometry(0.09, 0.09, 1), MATS.skin);
     this.group.add(this.arm);
     parent.add(this.group);
     // orientation bookkeeping handled in update via lookAt

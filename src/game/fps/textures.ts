@@ -303,6 +303,9 @@ export function tileUV(idx: number): [number, number, number, number] {
 
 /** Noisy pixel texture for weapon parts / skin. */
 export function pixelTexture(base: string, variance = 22, size = 24, seed = 7): THREE.CanvasTexture {
+  const key = `${base}|${variance}|${size}|${seed}`;
+  const cached = pixelTextureCache.get(key);
+  if (cached) return cached;
   const { c, g } = mkCanvas(size, size);
   const rand = mulberry32(seed);
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
@@ -313,8 +316,14 @@ export function pixelTexture(base: string, variance = 22, size = 24, seed = 7): 
   tex.magFilter = THREE.NearestFilter;
   tex.minFilter = THREE.NearestFilter;
   tex.colorSpace = THREE.SRGBColorSpace;
+  pixelTextureCache.set(key, tex);
   return tex;
 }
+
+/** Enemy waves and effects reuse a small fixed palette; painting a fresh
+ * canvas and uploading an identical texture for every spawn caused GC and GPU
+ * upload spikes. Textures are immutable, so sharing is safe. */
+const pixelTextureCache = new Map<string, THREE.CanvasTexture>();
 
 /** Star-burst muzzle flash sprite. */
 export function muzzleTexture(): THREE.CanvasTexture {

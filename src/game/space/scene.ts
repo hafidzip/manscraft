@@ -279,6 +279,16 @@ export class SpaceScene {
 
   onHud?: (s: HudState) => void;
 
+  /** Initial entry is ready only after its planet assets have finished their
+   * queued build steps. Later sectors remain streamed under a frame budget. */
+  isWarm(): boolean {
+    if (this.pendingOrbit) return false;
+    for (const planets of this.streamedPlanets.values()) {
+      for (const planet of planets) if (planet.hasPending()) return false;
+    }
+    return this.streamedPlanets.size > 0 || this.entryStar.planetCount === 0;
+  }
+
   constructor(private canvas: HTMLCanvasElement, entry?: SpaceEntry) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,

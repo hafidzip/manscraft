@@ -74,6 +74,8 @@ export class World {
   // Numeric keys (cx << 5 | cz) — string template keys allocated on every
   // single voxel query, which dominated AI sensing cost.
   private chunks = new Map<number, Chunk>();
+  /** Render-resident subset; avoids scanning all 1,024 cooked data chunks. */
+  private meshedChunks = new Set<Chunk>();
   /** 1-entry memo: neighbouring voxel queries almost always share a chunk */
   private memoKey = -1;
   private memoChunk: Chunk | null = null;
@@ -94,6 +96,12 @@ export class World {
   /** latest camera position — drives nearest-image chunk placement */
   private camX = 8;
   private camZ = 8;
+  /** True after every terrain chunk has been generated and column-cached. */
+  private fullyPrepared = false;
+  /** Suppresses neighbour remesh churn while the complete data set is built. */
+  private bulkPreparing = false;
+  private prepareCursor = 0;
+  private loadRadius = VIEW_DISTANCE;
 
   /** fired after a block changes (suppressed during batches) */
   onChanged: ((x: number, y: number, z: number, oldId: number, newId: number) => void) | null = null;
@@ -256,8 +264,10 @@ export class World {
       };
       this.chunks.set(k, c);
       this.buildColumnCache(c);
-      // borders of existing neighbors may change -> re-mesh them once
-      this.markNeighborBorders(cx, cz);
+      // During normal streaming a new neighbour exposes previously unknown
+      // border faces. Full startup cooking generates all data before any mesh,
+      // so queuing those intermediate remeshes would only duplicate work.
+      if (!this.bulkPreparing) this.markNeighborBorders(cx, cz);
     }
     this.memoKey = k;
     this.memoChunk = c;
@@ -502,6 +512,7 @@ export class World {
     }
     add(geoms.water, this.mats.water, 2, false);
     c.hasMesh = true;
+    this.meshedChunks.add(c);
     this.dirtySet.delete(c);
   }
 
@@ -521,7 +532,7 @@ export class World {
   updateGrassShadowCasters(camX: number, camZ: number, radius: number): boolean {
     const r2 = radius * radius;
     let changed = false;
-    for (const c of this.chunks.values()) {
+    for (const c of this.meshedChunks) {
       const g = c.grass;
       if (!g) continue;
       // chunk centre in nearest-image render space
@@ -558,8 +569,7 @@ export class World {
     if (Math.abs(camX - this.syncX) < 1 && Math.abs(camZ - this.syncZ) < 1) return;
     this.syncX = camX;
     this.syncZ = camZ;
-    for (const c of this.chunks.values()) {
-      if (!c.hasMesh) continue;
+    for (const c of this.meshedChunks) {
       const [ox, oz] = this.renderOffset(c.cx, c.cz);
       if (ox === c.kx && oz === c.kz) continue;
       c.kx = ox;
@@ -594,7 +604,7 @@ export class World {
    * Spend up to `budgetMs` generating / meshing / unloading around (px, pz).
    * Returns the number of chunks activated this call.
    */
-  update(px: number, pz: number, budgetMs: number): number {
+  update(px: number, pz: number, budgetMs: number, radius = VIEW_DISTANCE): number {
     const t0 = performance.now();
     let processed = 0;
 
@@ -620,8 +630,9 @@ export class World {
     const ccx = wrapChunk(Math.floor(wrapBlock(px) / S));
     const ccz = wrapChunk(Math.floor(wrapBlock(pz) / S));
     const centerKey = this.key(ccx, ccz);
-    if (this.loadQueue.length === 0 && (centerKey !== this.lastCenter || this.lastCenter === -1)) {
-      this.rebuildLoadQueue(ccx, ccz);
+    if (this.loadQueue.length === 0 && (centerKey !== this.lastCenter || this.lastCenter === -1 || radius !== this.loadRadius)) {
+      this.loadRadius = radius;
+      this.rebuildLoadQueue(ccx, ccz, radius);
       this.lastCenter = centerKey;
     }
 
@@ -671,9 +682,10 @@ export class World {
             }
             c.meshes.length = 0;
             c.hasMesh = false;
+            this.meshedChunks.delete(c);
             retired++;
           }
-        } else if (!c.dirty && d2 > lim2) {
+        } else if (!this.fullyPrepared && !c.dirty && d2 > lim2) {
           // modified chunks stay resident so player edits never vanish
           this.chunks.delete(k);
           if (this.memoKey === k) { this.memoKey = -1; this.memoChunk = null; }
@@ -690,9 +702,38 @@ export class World {
     return this.loadQueue.length > 0 || this.dirtyQueue.length > 0;
   }
 
-  private rebuildLoadQueue(ccx: number, ccz: number): void {
+  /**
+   * Generate and column-cache the entire finite toroidal world without
+   * creating meshes. Keeping this ~20 MB voxel data set resident guarantees
+   * that collision, AI, flight and future mesh builds never run terrain noise
+   * or tree generation in a gameplay frame.
+   *
+   * Returns 0..1 progress. Work is resumable and bounded by `budgetMs`.
+   */
+  prepareAllData(budgetMs: number): number {
+    if (this.fullyPrepared) return 1;
+    const deadline = performance.now() + budgetMs;
+    this.bulkPreparing = true;
+    do {
+      const cx = Math.floor(this.prepareCursor / WORLD_CHUNKS);
+      const cz = this.prepareCursor % WORLD_CHUNKS;
+      this.ensureData(cx, cz);
+      this.prepareCursor++;
+    } while (this.prepareCursor < WORLD_CHUNKS * WORLD_CHUNKS && performance.now() < deadline);
+
+    if (this.prepareCursor >= WORLD_CHUNKS * WORLD_CHUNKS) {
+      this.bulkPreparing = false;
+      this.fullyPrepared = true;
+      this.memoKey = -1;
+      this.memoChunk = null;
+      return 1;
+    }
+    return this.prepareCursor / (WORLD_CHUNKS * WORLD_CHUNKS);
+  }
+
+  private rebuildLoadQueue(ccx: number, ccz: number, radius = VIEW_DISTANCE): void {
     const items: { cx: number; cz: number; d: number }[] = [];
-    const r = VIEW_DISTANCE;
+    const r = radius;
     for (let dx = -r; dx <= r; dx++) {
       for (let dz = -r; dz <= r; dz++) {
         const d2 = dx * dx + dz * dz;
