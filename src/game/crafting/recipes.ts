@@ -36,7 +36,7 @@ export interface Recipe {
   group: RecipeGroupId;
 }
 
-export type RecipeGroupId = 'building' | 'glass' | 'nature';
+export type RecipeGroupId = 'building' | 'glass' | 'nature' | 'redstone';
 
 export interface RecipeGroup {
   id: RecipeGroupId;
@@ -49,6 +49,7 @@ export const RECIPE_GROUPS: RecipeGroup[] = [
   { id: 'building', label: 'Building Blocks', icon: B.PLANK },
   { id: 'glass', label: 'Glass & Light', icon: B.GLASS },
   { id: 'nature', label: 'Nature', icon: B.LEAVES },
+  { id: 'redstone', label: 'Machines', icon: B.CONVEYOR },
 ];
 
 const blk = (blockId: number): Ingredient => ({ kind: 'block', blockId });
@@ -146,6 +147,24 @@ export const RECIPES: Recipe[] = [
       [P.LEAVES, P.LEAVES, P.LEAVES],
     ],
     output: { kind: 'block', blockId: B.DIRT, count: 6 },
+  },
+  {
+    id: 'conveyor', name: 'Conveyor Belt', grid: 3, group: 'redstone',
+    shaped: [
+      [P.STONE,  P.STONE,  P.STONE],
+      [P.STICK,  P.COBBLE, P.STICK],
+      [P.STONE,  P.STONE,  P.STONE],
+    ],
+    output: { kind: 'block', blockId: B.CONVEYOR, count: 6 },
+  },
+  {
+    id: 'inserter', name: 'Inserter', grid: 3, group: 'redstone',
+    shaped: [
+      [null,   P.PLANK, null  ],
+      [P.STICK, P.COBBLE, P.STICK],
+      [P.STICK, null,  P.STICK],
+    ],
+    output: { kind: 'block', blockId: B.INSERTER, count: 2 },
   },
 ];
 

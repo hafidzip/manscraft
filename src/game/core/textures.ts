@@ -28,6 +28,12 @@ const TILE_NAMES = [
   'ore_gold', 'ore_silver', 'ore_jade', 'ore_emerald',
   // coal / crafting materials / torch
   'coal_ore', 'coal', 'stick', 'torch',
+  // conveyor belt: one arrow tile per facing + a shared chassis side
+  'conveyor_top_n', 'conveyor_top_e', 'conveyor_top_s', 'conveyor_top_w',
+  'conveyor_side',
+  // inserter: static base plate per facing (the arm itself is a dynamic mesh)
+  'inserter_top_n', 'inserter_top_e', 'inserter_top_s', 'inserter_top_w',
+  'inserter_side',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -212,6 +218,149 @@ const paintDirt: Painter = (img, r) =>
     const c = vary([121, 85, 58], 20, r);
     return r() < 0.08 ? vary([88, 62, 42], 10, r) : c;
   });
+
+/**
+ * Deterministic per-pixel hash → [0,1). The belt tiles are repainted every
+ * animation frame; sequential RNG (mulberry32) would resample new noise on
+ * each repaint and make the whole surface flicker. Hashing the *pattern-space*
+ * coordinate keeps every speck stable AND moving with the belt.
+ */
+function pixelHash(x: number, y: number, salt: number): number {
+  let h = Math.imul(x + 0x9e37, 0x85ebca6b) ^ Math.imul(y + 0x1b87, 0xc2b2ae35) ^ salt;
+  h = Math.imul(h ^ (h >>> 13), 0x27d4eb2f);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** vary() twin driven by a hash value instead of a sequential RNG */
+function varyH(base: RGB, amt: number, h: number): RGB {
+  const v = Math.floor((h * 2 - 1) * amt);
+  return [
+    Math.max(0, Math.min(255, base[0] + v)),
+    Math.max(0, Math.min(255, base[1] + v)),
+    Math.max(0, Math.min(255, base[2] + v)),
+  ] as const;
+}
+
+/**
+ * Conveyor belt top face: rubber band with roller grooves and two chevrons.
+ * `rot` rotates the whole pattern by 90° steps (0 = arrows toward image +X).
+ * `phase` scrolls the moving pattern along the travel axis (in pixels) — the
+ * animation driver repaints these tiles with an advancing phase so the belt
+ * visibly runs in its facing direction.
+ *
+ * The moving pattern is fully periodic in x (grooves period 4, chevrons
+ * period 8) so any integer phase wraps seamlessly; only the guide rails on
+ * the cross-axis edges are static.
+ */
+function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number): void {
+  const N = TILE;
+  tileRegion(img, tile, (px, py) => {
+    let x = px, y = py;
+    if (rot === 1) { x = py; y = N - 1 - px; }
+    else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
+    else if (rot === 3) { x = N - 1 - py; y = px; }
+
+    // static guide rails along the travel direction
+    if (y === 0 || y === N - 1) return varyH([44, 44, 50], 5, pixelHash(x, y, 11));
+    if (y === 1 || y === N - 2) return varyH([88, 88, 96], 7, pixelHash(x, y, 12));
+
+    // pattern space: scrolls toward +x as phase grows (+x = arrow direction)
+    const wx = ((x - phase) % N + N) % N;
+
+    // roller grooves across the belt
+    if (wx % 4 === 0) return varyH([50, 50, 56], 6, pixelHash(wx, y, 13));
+    // two chevrons pointing toward +x, spaced half a tile apart (period 8)
+    const cw = wx % 8;
+    const dx = cw - 5;
+    if (dx >= -2 && dx <= 0) {
+      const spread = -dx;                       // 0 at the tip, 2 at the tails
+      const off = Math.abs(y - 7.5);
+      if (off >= spread - 0.5 && off <= spread + 1.5)
+        return varyH([226, 146, 34], 12, pixelHash(wx, y, 14));
+    }
+    // belt surface
+    return varyH([74, 74, 80], 9, pixelHash(wx, y, 15));
+  });
+}
+
+/**
+ * Inserter base plate (static): armored dark plate with the same directional
+ * chevrons as the belt so players can read the drop side, plus a bolted pivot
+ * ring in the middle where the dynamic arm mounts.
+ */
+function paintInserterTop(img: ImageData, tile: number, rot: number, r: () => number): void {
+  const N = TILE;
+  tileRegion(img, tile, (px, py) => {
+    let x = px, y = py;
+    if (rot === 1) { x = py; y = N - 1 - px; }
+    else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
+    else if (rot === 3) { x = N - 1 - py; y = px; }
+
+    // plate rim
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42], 5, r);
+    if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68], 7, r);
+
+    // central pivot ring (radius ~3.5 px) with darker hub
+    const dx = x - 7.5;
+    const dz = y - 7.5;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d < 2.2) return vary([28, 28, 32], 4, r);
+    if (d < 3.4) return vary([98, 98, 106], 8, r);
+
+    // single long chevron toward +x (the drop side)
+    if (x >= 10 && x <= 13 && Math.abs(y - 7.5) <= (x - 10) + 1 && Math.abs(y - 7.5) > (x - 10) - 1)
+      return vary([226, 146, 34], 10, r);
+
+    // rivets in the free corners
+    if ((x === 3 || x === 12) && Math.abs(y - 7.5) > 4 && (y === 3 + (Math.abs(x - 7.5) > 3 ? 1 : 0) || y === 12 - (Math.abs(x - 7.5) > 3 ? 1 : 0)))
+      return vary([110, 110, 118], 8, r);
+
+    // plate body
+    return vary([72, 72, 80], 9, r);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// conveyor animation driver
+// ---------------------------------------------------------------------------
+
+/** pixels the belt pattern advances per second (≈ item transport speed) */
+const BELT_ANIM_PX_PER_SEC = 20;
+
+let beltPhase = -1;
+
+/**
+ * Advance the conveyor tiles inside a live atlas. Called once per frame from
+ * the engine; only actually repaints when the quantized pixel phase changes
+ * (~20 Hz), and uploads just the belt row of the canvas via the dirty rect.
+ * The atlas has no mipmaps (NearestFilter), so the re-upload is trivial.
+ */
+export function animateConveyorTiles(set: TextureSet, time: number): void {
+  const phase = Math.floor(time * BELT_ANIM_PX_PER_SEC) % TILE;
+  if (phase === beltPhase) return;
+  beltPhase = phase;
+
+  const img = set.atlasImg;
+  paintBeltTop(img, TILES.conveyor_top_n, 0, phase);
+  paintBeltTop(img, TILES.conveyor_top_e, 1, phase);
+  paintBeltTop(img, TILES.conveyor_top_s, 2, phase);
+  paintBeltTop(img, TILES.conveyor_top_w, 3, phase);
+
+  // dirty rect spanning the four (contiguous) top tiles
+  const tiles = [
+    TILES.conveyor_top_n, TILES.conveyor_top_e,
+    TILES.conveyor_top_s, TILES.conveyor_top_w,
+  ];
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const t of tiles) {
+    const ox = (t % TPR) * TILE;
+    const oy = Math.floor(t / TPR) * TILE;
+    x0 = Math.min(x0, ox); y0 = Math.min(y0, oy);
+    x1 = Math.max(x1, ox + TILE); y1 = Math.max(y1, oy + TILE);
+  }
+  set.atlasCtx.putImageData(img, 0, 0, x0, y0, x1 - x0, y1 - y0);
+  set.atlas.needsUpdate = true;
+}
 
 const PAINTERS: Partial<Record<string, Painter>> = {
   grass_top: (img, r) =>
@@ -602,6 +751,52 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return null;
     });
   },
+
+  // ---- conveyor belt ----------------------------------------------------
+  // On the top face the atlas image +X axis runs toward world -Z and image +Y
+  // toward world +X (see the mesher's top-face corner/UV order). The base
+  // pattern therefore points NORTH, and the other three facings are the same
+  // pattern sampled through a 90° rotation. Painted at phase 0 here; the
+  // engine re-drives the phase every frame via animateConveyorTiles().
+  conveyor_top_n: (img) => paintBeltTop(img, TILES.conveyor_top_n, 0, 0),
+  conveyor_top_e: (img) => paintBeltTop(img, TILES.conveyor_top_e, 1, 0),
+  conveyor_top_s: (img) => paintBeltTop(img, TILES.conveyor_top_s, 2, 0),
+  conveyor_top_w: (img) => paintBeltTop(img, TILES.conveyor_top_w, 3, 0),
+  conveyor_side: (img, r) =>
+    tileRegion(img, TILES.conveyor_side, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([42, 42, 48], 5, r);
+      // roller circles at each end
+      if (y >= 5 && y <= 10 && (x <= 4 || x >= 11)) {
+        const cx = x <= 4 ? 2.5 : 13.5;
+        const dx = x - cx, dy = y - 7.5;
+        if (dx * dx + dy * dy < 5) return vary([100, 100, 106], 8, r);
+      }
+      // belt band across middle
+      if (y >= 3 && y <= 5) return vary([58, 58, 64], 6, r);
+      // chassis
+      return vary([66, 66, 72], 8, r);
+    }),
+
+  // ---- inserter: static base plates (one per facing) + chassis side ----
+  inserter_top_n: (img, r) => paintInserterTop(img, TILES.inserter_top_n, 0, r),
+  inserter_top_e: (img, r) => paintInserterTop(img, TILES.inserter_top_e, 1, r),
+  inserter_top_s: (img, r) => paintInserterTop(img, TILES.inserter_top_s, 2, r),
+  inserter_top_w: (img, r) => paintInserterTop(img, TILES.inserter_top_w, 3, r),
+  inserter_side: (img, r) =>
+    tileRegion(img, TILES.inserter_side, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([40, 40, 46], 5, r);
+      // armored pillar silhouette in the middle
+      if (x >= 5 && x <= 10 && y >= 2) {
+        if (x === 5 || x === 10) return vary([100, 100, 108], 8, r);
+        if (y === 8 || y === 9) return vary([226, 146, 34], 10, r);
+        return vary([62, 62, 70], 8, r);
+      }
+      // vent slots at the base
+      if (y >= 12 && y <= 14 && x % 3 !== 0) return vary([30, 30, 34], 4, r);
+      return vary([56, 56, 62], 8, r);
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -613,6 +808,9 @@ export interface TextureSet {
   water: THREE.CanvasTexture;
   cracks: THREE.CanvasTexture[];
   atlasCanvas: HTMLCanvasElement;
+  /** live pixel buffer + context, kept so animated tiles can repaint in place */
+  atlasImg: ImageData;
+  atlasCtx: CanvasRenderingContext2D;
 }
 
 /** UV rect (u0, vBottom, u1, vTop) of a tile inside the atlas */
@@ -767,5 +965,7 @@ export function createTextures(theme?: PlanetTheme | null): TextureSet {
     water,
     cracks: [0, 1, 2, 3, 4].map(makeCrackTexture),
     atlasCanvas: canvas,
+    atlasImg: img,
+    atlasCtx: ctx,
   };
 }

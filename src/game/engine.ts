@@ -13,9 +13,10 @@
 
 import * as THREE from 'three';
 import * as C from './core/constants';
-import { createTextures, tileUV, type TextureSet } from './core/textures';
-import { B, DEFS, isWaterId, applyThemeToBlockColors } from './world/blocks';
+import { createTextures, tileUV, animateConveyorTiles, type TextureSet } from './core/textures';
+import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter } from './world/blocks';
 import { World, type ChunkMaterials } from './world/world';
+import { InserterManager } from './fps/Inserter';
 import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
@@ -222,6 +223,10 @@ const TO_FPS: Record<number, number> = {
   [B.COBBLE]: 11,
   // coal ore mines into a coal lump; torch places back as a torch
   [B.COAL_ORE]: 58, [B.TORCH]: 60,
+  // conveyor belt (all 4 directional variants → single inventory id)
+  [B.CONVEYOR_N]: 61, [B.CONVEYOR_E]: 61, [B.CONVEYOR_S]: 61, [B.CONVEYOR_W]: 61,
+  // inserter (same treatment)
+  [B.INSERTER_N]: 62, [B.INSERTER_E]: 62, [B.INSERTER_S]: 62, [B.INSERTER_W]: 62,
   // gemstones map to unused high ids in the fps inventory
   [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
   [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
@@ -237,6 +242,8 @@ const FROM_FPS: Record<number, number> = Object.fromEntries(
 FROM_FPS[58] = B.COAL_ITEM;
 FROM_FPS[59] = B.STICK_ITEM;
 FROM_FPS[60] = B.TORCH;
+FROM_FPS[61] = B.CONVEYOR_E; // default direction; overridden in placeBlock()
+FROM_FPS[62] = B.INSERTER_E; // same — direction chosen from player yaw
 
 /** fps inventory ids for non-placeable crafting materials */
 const B_COAL = 58;
@@ -274,6 +281,7 @@ export class GameEngine {
   private toolMode: 'weapon' | 'laser' | 'block' | 'food' = 'weapon';
   /** unified inventory (voxel-fps): 6-slot hotbar + 3x9 storage */
   public inventory!: Inventory;
+  private inserters!: InserterManager;
   private enemiesEnabled = true;
   private triggerDown = false;
   private prevLeft = false;
@@ -962,10 +970,12 @@ export class GameEngine {
     // dynamic point-lights for placed torches (illuminate deep mines)
     this.torchLights = new TorchLights(this.scene);
 
-    // floating voxel item drops (mined blocks magnetize back to the player)
+    // floating voxel item drops (grounded physics; walk over to collect)
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
       this.syncHotbarMode();
     });
+    // automated arms that scoop drops off the ground and swing them onward
+    this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
     this.itemDrops.prewarm(new Set(Object.values(TO_FPS)));
 
     // Held-block geometry is otherwise built on the first selection of each
@@ -1791,8 +1801,19 @@ export class GameEngine {
         break;
       case 'KeyE':
         if (this.piloting) this.exitShip();
-        else if (this.nearMerchantEnemy) this.openShop();   // haggle first
+        else if (this.nearMerchantEnemy) this.openShop();
         else if (this.ship && this.ship.distanceTo(this.player.eye()) < 6) this.boardShip();
+        else {
+          const eye = this.player.eye();
+          this.camera.getWorldDirection(this.aimDir);
+          const hit = raycastVoxel(this.world, eye.x, eye.y, eye.z,
+            this.aimDir.x, this.aimDir.y, this.aimDir.z, 5);
+          if (hit && (isConveyor(hit.id) || isInserter(hit.id))) {
+            e.preventDefault();
+            this.sound.playClick();
+            this.rotateConveyor(hit.x, hit.y, hit.z, hit.id);
+          }
+        }
         break;
       default:
         if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) {
@@ -1878,11 +1899,10 @@ export class GameEngine {
     if (this.wheelAcc === 0) return;
     const step = this.wheelAcc > 0 ? 1 : -1;
     this.wheelAcc = 0;
-    if (this.toolMode === 'weapon') {
-      this.weapons.cycle(step);
-    } else {
-      this.selectSlot((this.sel + step + 6) % 6);
-    }
+    // Always move through the hotbar itself. Cycling the weapon rig directly
+    // swapped the model without changing `sel`, so the HUD kept highlighting
+    // (and reporting) the old slot.
+    this.selectSlot((this.sel + step + 6) % 6, true);
   }
 
   // -------------------------------------------------------------- main loop
@@ -1935,6 +1955,8 @@ export class GameEngine {
     if (this.textures) {
       this.textures.water.offset.x += dt * 0.003;
       this.textures.water.offset.y += dt * 0.006;
+      // conveyor tops scroll toward their facing (repaints at ~20 Hz max)
+      animateConveyorTiles(this.textures, this.time);
     }
     if (this.locked) this.fluid.update(dt);
     // Streaming budget follows the frame clock: when a frame is already over
@@ -2423,9 +2445,10 @@ export class GameEngine {
       const sdt = dt * timeScale;
       this.fx.update(sdt);
       this.weapons.update(dt, this.time, false, false, false);
-      // dropped gun tumbles to the dirt + item drops keep magnetizing
+      // dropped gun tumbles to the dirt; item drops and inserters keep running
       this.updateDroppedWeapon(dt);
       this.itemDrops.update(sdt, this.player.pos);
+      this.inserters.update(sdt, this.player.pos);
       // play the voxel-fps collapse camera: buckle, topple, bounce, twitch
       this.player.updateDeath(dt);
       this.player.applyDeathCamera(this.camera);
@@ -2434,6 +2457,21 @@ export class GameEngine {
     }
 
     p.update(dt, this.input);
+
+    // ---- conveyor belt: carry whatever is standing on the belt ----------
+    // Applied as an ACCELERATION rather than a velocity override, so walking
+    // (which lerps velocity toward the input target at ~14/s) still works: the
+    // belt just biases the equilibrium. drift ≈ BELT_ACCEL / 14 blocks/s.
+    if (p.onGround) {
+      const belowId = this.world.getBlockRaw(
+        Math.floor(p.pos.x), Math.floor(p.pos.y - 0.05), Math.floor(p.pos.z));
+      const dir = conveyorDir(belowId);
+      if (dir) {
+        const BELT_ACCEL = 46;
+        p.vel.x += dir[0] * BELT_ACCEL * dt;
+        p.vel.z += dir[1] * BELT_ACCEL * dt;
+      }
+    }
 
     // fell out of the world -> respawn
     if (p.pos.y < -12) p.setSpawn(this.spawn.x, this.spawn.y, this.spawn.z);
@@ -2513,6 +2551,7 @@ export class GameEngine {
     if (this.invulnT > 0) this.invulnT -= dt;
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
+    this.inserters.update(dt, this.player.pos);
 
     // re-target the torch light pool onto the torches nearest the camera
     this.torchLights.update(dt, this.camera.position);
@@ -2697,6 +2736,46 @@ export class GameEngine {
     );
   }
 
+  /**
+   * Cardinal facing for a look yaw. Yaw 0 faces -Z (north) and grows
+   * counter-clockwise, matching the player controller's forward vector.
+   */
+  private yawCardinal(yaw: number): 'N' | 'E' | 'S' | 'W' {
+    const a = ((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    if (a < Math.PI * 0.25 || a >= Math.PI * 1.75) return 'N';
+    if (a < Math.PI * 0.75) return 'W';
+    if (a < Math.PI * 1.25) return 'S';
+    return 'E';
+  }
+
+  private facingBlock(family: 'belt' | 'inserter', yaw: number): number {
+    const c = this.yawCardinal(yaw);
+    if (family === 'belt') {
+      return c === 'N' ? B.CONVEYOR_N : c === 'E' ? B.CONVEYOR_E : c === 'S' ? B.CONVEYOR_S : B.CONVEYOR_W;
+    }
+    return c === 'N' ? B.INSERTER_N : c === 'E' ? B.INSERTER_E : c === 'S' ? B.INSERTER_S : B.INSERTER_W;
+  }
+
+  /** Pressing E on a placed belt or inserter spins it 90° clockwise (N→E→S→W→N). */
+  private rotateConveyor(x: number, y: number, z: number, id: number): void {
+    const NEXT: Record<number, number> = {
+      [B.CONVEYOR_N]: B.CONVEYOR_E,
+      [B.CONVEYOR_E]: B.CONVEYOR_S,
+      [B.CONVEYOR_S]: B.CONVEYOR_W,
+      [B.CONVEYOR_W]: B.CONVEYOR_N,
+      [B.INSERTER_N]: B.INSERTER_E,
+      [B.INSERTER_E]: B.INSERTER_S,
+      [B.INSERTER_S]: B.INSERTER_W,
+      [B.INSERTER_W]: B.INSERTER_N,
+    };
+    const next = NEXT[id];
+    if (next === undefined) return;
+    this.world.setBlock(x, y, z, next);
+    this.sound.playPlace('stone');
+    this.particles.burst(x + 0.5, y + 1.02, z + 0.5, DEFS[next].colors, 6, 1.2);
+    this.placeCd = 0.22;
+  }
+
   private placeBlock(): void {
     const item = this.inventory.hotbar[this.sel];
     if (!item || item.kind !== 'block' || item.count <= 0) return;
@@ -2716,7 +2795,23 @@ export class GameEngine {
     const replaceable = existing === B.AIR || isWaterId(existing) || (exDef.cross ?? false);
     if (!replaceable) return;
 
-    const ourId = FROM_FPS[item.blockId] ?? B.STONE;
+    let ourId = FROM_FPS[item.blockId] ?? B.STONE;
+
+    // Conveyor belt: must be attached to (supported by) a solid block, and it
+    // is laid facing the direction the player is looking.
+    if (isConveyor(ourId)) {
+      if (!DEFS[this.world.getBlockRaw(x, y - 1, z)]?.solid) return;
+      ourId = this.facingBlock('belt', this.player.yaw);
+    }
+
+    // Inserter: free-standing machine, facing the player's look direction so
+    // it grabs from behind and places in front. Same support rule as belts —
+    // the base needs ground under it.
+    if (isInserter(ourId)) {
+      if (!DEFS[this.world.getBlockRaw(x, y - 1, z)]?.solid) return;
+      ourId = this.facingBlock('inserter', this.player.yaw);
+    }
+
     const d = DEFS[ourId];
     if (d.solid && this.playerIntersectsBlock(x, y, z)) return;
     // Torch must cling to a solid face (Minecraft rule) — otherwise it would float.
@@ -2928,13 +3023,8 @@ export class GameEngine {
       this.droppedGun = null;
     }
 
-    // Recall the ship to the protected landing area, then seat the player in
-    // it. This prevents a respawn from dropping the player back into the same
-    // combat space and makes the ship the consistent recovery point.
-    const spawnX = Math.floor(this.spawn.x);
-    const spawnZ = Math.floor(this.spawn.z);
-    this.ship.placeNear(this.world.gen, spawnX, spawnZ);
-
+    // Seat the player back in the ship at its last parked location.
+    // This makes the ship the consistent recovery point wherever you left it.
     this.player.resetDeath();
     this.player.setSpawn(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
     this.player.yaw = this.ship.yaw;
@@ -3234,6 +3324,7 @@ export class GameEngine {
     this.renderer.setAnimationLoop(null);
     this.sound.stopShip();
     this.itemDrops?.clear();
+    this.inserters?.clear();
     this.removeListeners();
     window.removeEventListener('resize', this.resize);
     // customDepthMaterial is not reachable from scene.traverse material walks

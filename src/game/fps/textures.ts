@@ -4,7 +4,7 @@ import { mulberry32 } from '../core/noise';
 
 const TILE = 32;          // pixels per tile
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 8;     // grew to fit coal/stick/torch tiles
+const ATLAS_ROWS = 9;     // grew to fit coal/stick/torch/belt/inserter tiles
 
 function mkCanvas(w: number, h: number) {
   const c = document.createElement('canvas');
@@ -48,6 +48,8 @@ export const T = {
   ORE_RUBY: 19, ORE_AMBER: 20, ORE_LUMI: 21, ORE_DIAMOND: 22,
   ORE_GOLD: 23, ORE_SILVER: 24, ORE_JADE: 25, ORE_EMERALD: 26,
   COAL_ORE: 27, COAL: 28, STICK: 29, TORCH: 30,
+  CONVEYOR: 31,
+  INSERTER: 32,
 } as const;
 
 let atlasTex: THREE.CanvasTexture | null = null;
@@ -278,6 +280,62 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 13, 2, 6, 8, '#f0821e');
     px(ox, oy, 14, 1, 4, 8, '#ffc846');
     px(ox, oy, 15, 3, 2, 5, '#fff6c8');
+  });
+
+  // conveyor belt: dark metal slab with roller grooves and chevron arrows
+  tile(T.CONVEYOR, (ox, oy) => {
+    noisyTile(g, ox, oy, '#484854', 10, 501);
+    // rim
+    px(ox, oy, 0, 0, TILE, 2, '#3a3a42');
+    px(ox, oy, 0, TILE - 2, TILE, 2, '#3a3a42');
+    px(ox, oy, 0, 0, 2, TILE, '#3a3a42');
+    px(ox, oy, TILE - 2, 0, 2, TILE, '#3a3a42');
+    // roller grooves
+    for (let y = 4; y < TILE - 4; y += 4) {
+      px(ox, oy, 3, y, TILE - 6, 1, '#3e3e46');
+    }
+    // chevron arrows (orange) pointing right
+    const arrowColor = '#dc8c1e';
+    // arrow 1 centered at (10, 10)
+    px(ox, oy, 8, 10, 3, 2, arrowColor);
+    px(ox, oy, 10, 8, 2, 2, arrowColor);
+    px(ox, oy, 10, 12, 2, 2, arrowColor);
+    px(ox, oy, 12, 10, 2, 2, arrowColor);
+    // arrow 2 centered at (20, 10)
+    px(ox, oy, 18, 10, 3, 2, arrowColor);
+    px(ox, oy, 20, 8, 2, 2, arrowColor);
+    px(ox, oy, 20, 12, 2, 2, arrowColor);
+    px(ox, oy, 22, 10, 2, 2, arrowColor);
+  });
+
+  // inserter: armored base plate + raised pillar + swung arm with claw
+  tile(T.INSERTER, (ox, oy) => {
+    noisyTile(g, ox, oy, '#484852', 9, 601);
+    // rim
+    px(ox, oy, 0, 0, TILE, 1, '#2c2c34');
+    px(ox, oy, 0, TILE - 1, TILE, 1, '#2c2c34');
+    px(ox, oy, 0, 0, 1, TILE, '#2c2c34');
+    px(ox, oy, TILE - 1, 0, 1, TILE, '#2c2c34');
+    // base plate rivets
+    px(ox, oy, 3, 3, 2, 2, '#6e6e78');
+    px(ox, oy, TILE - 5, 3, 2, 2, '#6e6e78');
+    px(ox, oy, 3, TILE - 5, 2, 2, '#6e6e78');
+    px(ox, oy, TILE - 5, TILE - 5, 2, 2, '#6e6e78');
+    // vertical pillar (left of center)
+    px(ox, oy, 8, 10, 5, 15, '#5a5a64');
+    px(ox, oy, 8, 10, 1, 15, '#787884');
+    px(ox, oy, 12, 10, 1, 15, '#3c3c44');
+    // hinge cap
+    px(ox, oy, 7, 8, 7, 4, '#8a8a94');
+    // arm reaching right (toward the drop side)
+    px(ox, oy, 12, 9, 11, 3, '#565660');
+    px(ox, oy, 12, 9, 11, 1, '#7c7c88');
+    // claw
+    px(ox, oy, 22, 6, 4, 8, '#dc8c1e');
+    px(ox, oy, 22, 6, 2, 2, '#f4b455');
+    px(ox, oy, 22, 12, 2, 2, '#a36418');
+    // grip hint below claw
+    px(ox, oy, 23, 15, 2, 3, '#909098');
   });
 
   const tex = new THREE.CanvasTexture(c);
@@ -515,6 +573,8 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 58: return T.COAL;
     case 59: return T.STICK;
     case 60: return T.TORCH;
+    case 61: return T.CONVEYOR; // CONVEYOR
+    case 62: return T.INSERTER; // INSERTER
     default: return T.STONE;
   }
 }

@@ -47,6 +47,10 @@ const TIPS = [
   'The world is generated from a single random seed.',
   'Mined blocks stack into your inventory — drag them onto the hotbar.',
   'Rockets turn mountains into inventory.',
+  'Drops no longer fly to you — walk over them to pick them up.',
+  'Conveyor belts carry dropped items. Press E on one to rotate it.',
+  'Conveyor belts need a crafting table: stone, sticks and cobblestone.',
+  'Inserters scoop up dropped items and place them forward. Press E to rotate.',
 ];
 
 // ---------------------------------------------------------- pixel weapon icons
@@ -129,6 +133,8 @@ function blockTile(blockId: number): number {
     case B.COAL: return T.COAL;
     case B.STICK: return T.STICK;
     case B.TORCH: return T.TORCH;
+    case B.CONVEYOR: return T.CONVEYOR;
+    case B.INSERTER: return T.INSERTER;
     default: return T.STONE;
   }
 }

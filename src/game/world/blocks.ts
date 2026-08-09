@@ -47,6 +47,16 @@ export const B = {
   // item-only pseudo blocks (held/dropped icons, never generated or placed)
   COAL_ITEM: 50,
   STICK_ITEM: 51,
+  // conveyor belt (4 directional variants)
+  CONVEYOR_N: 52,
+  CONVEYOR_E: 53,
+  CONVEYOR_S: 54,
+  CONVEYOR_W: 55,
+  // inserter (4 directional variants — grabs drops behind and places in front)
+  INSERTER_N: 56,
+  INSERTER_E: 57,
+  INSERTER_S: 58,
+  INSERTER_W: 59,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -261,6 +271,72 @@ DEFS[B.STICK_ITEM] = def({
   hardness: 0, sound: 'wood', colors: [0x8a643a, 0xa67c4a],
 });
 
+// ---- conveyor belt: one block per facing, distinguished by its arrow tile ----
+const beltDef = (top: number): BlockDef =>
+  def({
+    name: 'Conveyor Belt',
+    top, side: TILES.conveyor_side, bottom: TILES.conveyor_side, icon: top,
+    hardness: 0.8, sound: 'stone',
+    colors: [0x484854, 0x6a6a72, 0xdc8c1e],
+  });
+DEFS[B.CONVEYOR_N] = beltDef(TILES.conveyor_top_n);
+DEFS[B.CONVEYOR_E] = beltDef(TILES.conveyor_top_e);
+DEFS[B.CONVEYOR_S] = beltDef(TILES.conveyor_top_s);
+DEFS[B.CONVEYOR_W] = beltDef(TILES.conveyor_top_w);
+
+// ---- inserter: solid machine block; the swinging arm is a dynamic mesh ----
+// managed by the InserterManager (not part of the chunk mesh).
+const inserterDef = (top: number): BlockDef =>
+  def({
+    name: 'Inserter',
+    top, side: TILES.inserter_side, bottom: TILES.inserter_side, icon: TILES.inserter_top,
+    hardness: 1.0, sound: 'stone',
+    colors: [0x505058, 0x6a6a72, 0xdc8c1e],
+  });
+DEFS[B.INSERTER_N] = inserterDef(TILES.inserter_top_n);
+DEFS[B.INSERTER_E] = inserterDef(TILES.inserter_top_e);
+DEFS[B.INSERTER_S] = inserterDef(TILES.inserter_top_s);
+DEFS[B.INSERTER_W] = inserterDef(TILES.inserter_top_w);
+
+/** Returns true for any inserter variant. */
+export function isInserter(id: number): boolean {
+  return id === B.INSERTER_N || id === B.INSERTER_E || id === B.INSERTER_S || id === B.INSERTER_W;
+}
+
+/**
+ * Returns the drop direction [dx, dz] for an inserter block (it picks drops up
+ * from the cell BEHIND and places them into the cell IN FRONT), or null.
+ * N = -Z, E = +X, S = +Z, W = -X.
+ */
+export function inserterDir(id: number): [number, number] | null {
+  switch (id) {
+    case B.INSERTER_N: return [0, -1];
+    case B.INSERTER_E: return [1, 0];
+    case B.INSERTER_S: return [0, 1];
+    case B.INSERTER_W: return [-1, 0];
+    default: return null;
+  }
+}
+
+/** Returns true for any conveyor variant. */
+export function isConveyor(id: number): boolean {
+  return id === B.CONVEYOR_N || id === B.CONVEYOR_E || id === B.CONVEYOR_S || id === B.CONVEYOR_W;
+}
+
+/**
+ * Returns the push direction [dx, dz] for a conveyor block, or null.
+ * N = -Z, E = +X, S = +Z, W = -X.
+ */
+export function conveyorDir(id: number): [number, number] | null {
+  switch (id) {
+    case B.CONVEYOR_N: return [0, -1];
+    case B.CONVEYOR_E: return [1, 0];
+    case B.CONVEYOR_S: return [0, 1];
+    case B.CONVEYOR_W: return [-1, 0];
+    default: return null;
+  }
+}
+
 /** hotbar pseudo-item: the water bucket (not a placeable block id) */
 export const BUCKET_ID = 100;
 
@@ -333,6 +409,10 @@ const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass', [B.GRAVEL]: 'stone',
   [B.BEDROCK]: 'stone', [B.CACTUS]: 'cactus', [B.CRAFTING_TABLE]: 'planks',
   [B.FURNACE]: 'stone', [B.COBBLE]: 'stone',
+  [B.CONVEYOR_N]: 'stone', [B.CONVEYOR_E]: 'stone',
+  [B.CONVEYOR_S]: 'stone', [B.CONVEYOR_W]: 'stone',
+  [B.INSERTER_N]: 'stone', [B.INSERTER_E]: 'stone',
+  [B.INSERTER_S]: 'stone', [B.INSERTER_W]: 'stone',
 };
 
 /** stock colours, captured once so re-theming is never cumulative */

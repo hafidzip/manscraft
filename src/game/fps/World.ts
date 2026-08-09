@@ -22,6 +22,8 @@ export const B = {
   COAL: 58,
   STICK: 59,
   TORCH: 60,
+  CONVEYOR: 61,
+  INSERTER: 62,
 } as const;
 
 export const BLOCK_COLORS: Record<number, number> = {
@@ -41,6 +43,8 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.CRAFTING_TABLE]: 0xa48150,
   [B.GLASS]: 0xcee8f5,
   [B.FURNACE]: 0x7c7c80,
+  [B.CONVEYOR]: 0x484854,
+  [B.INSERTER]: 0x505058,
 };
 
 export interface RayHit {
