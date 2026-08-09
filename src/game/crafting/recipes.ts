@@ -166,6 +166,15 @@ export const RECIPES: Recipe[] = [
     ],
     output: { kind: 'block', blockId: B.INSERTER, count: 2 },
   },
+  {
+    id: 'laser_miner', name: 'Laser Miner', grid: 3, group: 'redstone',
+    shaped: [
+      [P.GLASS,  P.COAL,   P.GLASS ],
+      [P.STONE,  P.STONE,  P.STONE ],
+      [P.COBBLE, P.COBBLE, P.COBBLE],
+    ],
+    output: { kind: 'block', blockId: B.LASER_MINER, count: 1 },
+  },
 ];
 
 /** the multiset of ingredients a recipe consumes per craft */

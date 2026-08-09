@@ -50,6 +50,7 @@ export const T = {
   COAL_ORE: 27, COAL: 28, STICK: 29, TORCH: 30,
   CONVEYOR: 31,
   INSERTER: 32,
+  LASER_MINER: 33,
 } as const;
 
 let atlasTex: THREE.CanvasTexture | null = null;
@@ -338,6 +339,32 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 23, 15, 2, 3, '#909098');
   });
 
+  // laser miner: a stone pedestal with a grey turret gun aimed to the right
+  tile(T.LASER_MINER, (ox, oy) => {
+    noisyTile(g, ox, oy, '#3a3d42', 8, 733);
+    // stone pedestal base
+    px(ox, oy, 9, 22, 14, 9, '#6c6f75');
+    px(ox, oy, 9, 22, 14, 1, '#888b91');
+    px(ox, oy, 11, 25, 3, 3, '#54575c');
+    px(ox, oy, 17, 25, 3, 3, '#54575c');
+    // pivot yoke
+    px(ox, oy, 13, 18, 7, 5, '#4c4f55');
+    // gun body (light steel) tilted
+    px(ox, oy, 8, 11, 13, 7, '#9aa0a8');
+    px(ox, oy, 8, 11, 13, 1, '#c2c8d0');
+    px(ox, oy, 8, 17, 13, 1, '#6a6f77');
+    // dark vented top rail
+    px(ox, oy, 15, 8, 8, 4, '#2c2f34');
+    px(ox, oy, 17, 9, 1, 2, '#5c6068');
+    px(ox, oy, 19, 9, 1, 2, '#5c6068');
+    px(ox, oy, 21, 9, 1, 2, '#5c6068');
+    // dark barrel to the left (muzzle)
+    px(ox, oy, 1, 13, 8, 4, '#1c1e22');
+    px(ox, oy, 1, 13, 2, 4, '#0e0f12');
+    // emitter glow at the muzzle tip
+    px(ox, oy, 1, 14, 2, 2, '#ff5a1e');
+  });
+
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
@@ -575,6 +602,7 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 60: return T.TORCH;
     case 61: return T.CONVEYOR; // CONVEYOR
     case 62: return T.INSERTER; // INSERTER
+    case 63: return T.LASER_MINER; // LASER MINER
     default: return T.STONE;
   }
 }

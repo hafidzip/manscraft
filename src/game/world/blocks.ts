@@ -57,6 +57,12 @@ export const B = {
   INSERTER_E: 57,
   INSERTER_S: 58,
   INSERTER_W: 59,
+  // laser miner (4 directional variants — a turret that mines blocks in the
+  // cone of view in front and drops them behind; the turret is a dynamic mesh)
+  LASER_MINER_N: 60,
+  LASER_MINER_E: 61,
+  LASER_MINER_S: 62,
+  LASER_MINER_W: 63,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -303,6 +309,42 @@ export function isInserter(id: number): boolean {
   return id === B.INSERTER_N || id === B.INSERTER_E || id === B.INSERTER_S || id === B.INSERTER_W;
 }
 
+// ---- laser miner: solid machine base; the turret + beam are dynamic meshes ----
+// managed by the LaserMinerManager (not part of the chunk mesh).
+const laserMinerDef = (): BlockDef =>
+  def({
+    name: 'Laser Miner',
+    top: TILES.furnace_top, side: TILES.inserter_side, bottom: TILES.inserter_side,
+    icon: TILES.furnace_top,
+    hardness: 1.4, sound: 'stone',
+    colors: [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34],
+  });
+DEFS[B.LASER_MINER_N] = laserMinerDef();
+DEFS[B.LASER_MINER_E] = laserMinerDef();
+DEFS[B.LASER_MINER_S] = laserMinerDef();
+DEFS[B.LASER_MINER_W] = laserMinerDef();
+
+/** Returns true for any laser miner variant. */
+export function isLaserMiner(id: number): boolean {
+  return id === B.LASER_MINER_N || id === B.LASER_MINER_E ||
+    id === B.LASER_MINER_S || id === B.LASER_MINER_W;
+}
+
+/**
+ * Returns the forward (mining) direction [dx, dz] for a laser miner block, or
+ * null. It mines the cone of view in FRONT and ejects drops BEHIND.
+ * N = -Z, E = +X, S = +Z, W = -X.
+ */
+export function laserMinerDir(id: number): [number, number] | null {
+  switch (id) {
+    case B.LASER_MINER_N: return [0, -1];
+    case B.LASER_MINER_E: return [1, 0];
+    case B.LASER_MINER_S: return [0, 1];
+    case B.LASER_MINER_W: return [-1, 0];
+    default: return null;
+  }
+}
+
 /**
  * Returns the drop direction [dx, dz] for an inserter block (it picks drops up
  * from the cell BEHIND and places them into the cell IN FRONT), or null.
@@ -413,6 +455,8 @@ const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.CONVEYOR_S]: 'stone', [B.CONVEYOR_W]: 'stone',
   [B.INSERTER_N]: 'stone', [B.INSERTER_E]: 'stone',
   [B.INSERTER_S]: 'stone', [B.INSERTER_W]: 'stone',
+  [B.LASER_MINER_N]: 'stone', [B.LASER_MINER_E]: 'stone',
+  [B.LASER_MINER_S]: 'stone', [B.LASER_MINER_W]: 'stone',
 };
 
 /** stock colours, captured once so re-theming is never cumulative */

@@ -14,9 +14,10 @@
 import * as THREE from 'three';
 import * as C from './core/constants';
 import { createTextures, tileUV, animateConveyorTiles, type TextureSet } from './core/textures';
-import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter } from './world/blocks';
+import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter, isLaserMiner } from './world/blocks';
 import { World, type ChunkMaterials } from './world/world';
 import { InserterManager } from './fps/Inserter';
+import { LaserMinerManager } from './fps/LaserMiner';
 import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
@@ -227,6 +228,8 @@ const TO_FPS: Record<number, number> = {
   [B.CONVEYOR_N]: 61, [B.CONVEYOR_E]: 61, [B.CONVEYOR_S]: 61, [B.CONVEYOR_W]: 61,
   // inserter (same treatment)
   [B.INSERTER_N]: 62, [B.INSERTER_E]: 62, [B.INSERTER_S]: 62, [B.INSERTER_W]: 62,
+  // laser miner (same treatment)
+  [B.LASER_MINER_N]: 63, [B.LASER_MINER_E]: 63, [B.LASER_MINER_S]: 63, [B.LASER_MINER_W]: 63,
   // gemstones map to unused high ids in the fps inventory
   [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
   [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
@@ -244,6 +247,7 @@ FROM_FPS[59] = B.STICK_ITEM;
 FROM_FPS[60] = B.TORCH;
 FROM_FPS[61] = B.CONVEYOR_E; // default direction; overridden in placeBlock()
 FROM_FPS[62] = B.INSERTER_E; // same — direction chosen from player yaw
+FROM_FPS[63] = B.LASER_MINER_E; // same — direction chosen from player yaw
 
 /** fps inventory ids for non-placeable crafting materials */
 const B_COAL = 58;
@@ -282,6 +286,7 @@ export class GameEngine {
   /** unified inventory (voxel-fps): 6-slot hotbar + 3x9 storage */
   public inventory!: Inventory;
   private inserters!: InserterManager;
+  private laserMiners!: LaserMinerManager;
   private enemiesEnabled = true;
   private triggerDown = false;
   private prevLeft = false;
@@ -976,6 +981,11 @@ export class GameEngine {
     });
     // automated arms that scoop drops off the ground and swing them onward
     this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
+    // automated mining turrets that chew the cone of view in front and eject drops behind
+    this.laserMiners = new LaserMinerManager(this.scene, this.world, {
+      mineable: (id) => this.laserMinerCanMine(id),
+      mine: (x, y, z, dropPos) => this.laserMinerMine(x, y, z, dropPos),
+    });
     this.itemDrops.prewarm(new Set(Object.values(TO_FPS)));
 
     // Held-block geometry is otherwise built on the first selection of each
@@ -1207,6 +1217,57 @@ export class GameEngine {
     if (fpsId === undefined) return; // not representable in the fps inventory
     this.itemDrops.spawn(fpsId, pos);
     this.blocksMined++;
+  }
+
+  /**
+   * Predicate used by placed Laser Miners to pick targets: a block is mineable
+   * when it is solid, has finite hardness (not bedrock), and is representable in
+   * the inventory. Machines (belts / inserters / other miners), air and water
+   * are skipped so a miner never eats its own supply chain.
+   */
+  private laserMinerCanMine(id: number): boolean {
+    if (id === B.AIR || id < 0) return false;
+    if (isWaterId(id)) return false;
+    if (isConveyor(id) || isInserter(id) || isLaserMiner(id)) return false;
+    const d = DEFS[id];
+    if (!d || !d.solid || !isFinite(d.hardness)) return false;
+    return TO_FPS[id] !== undefined;
+  }
+
+  /**
+   * A placed Laser Miner broke a block: remove it, play the break VFX, suck the
+   * fragment toward the machine and eject the drop right behind it (dropPos).
+   */
+  private laserMinerMine(x: number, y: number, z: number, dropPos: THREE.Vector3): void {
+    const id = this.world.getBlockRaw(x, y, z);
+    if (id < 0 || !this.laserMinerCanMine(id)) return;
+    const d = DEFS[id];
+    this.world.setBlock(x, y, z, B.AIR);
+    if (id === B.TORCH) this.torchLights.remove(x, y, z);
+    this.detachTorchesSupportedBy(x, y, z, true);
+    this.removeFloatingPlantsAbove(x, y, z);
+    this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 20, 3.2);
+
+    // "suck" trail: a few sparks streaking from the block toward the eject point
+    const from = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+    const pull = dropPos.clone().sub(from);
+    for (let i = 0; i < 6; i++) {
+      this.fx.spawnParticle(
+        from.clone(),
+        pull.clone().multiplyScalar(1.4 + Math.random() * 0.6)
+          .add(new THREE.Vector3((Math.random() - 0.5) * 0.6, 0.4, (Math.random() - 0.5) * 0.6)),
+        0xffb060, 0.02 + Math.random() * 0.01, 0.35, false,
+      );
+    }
+
+    const fpsId = TO_FPS[id];
+    if (fpsId !== undefined) {
+      this.itemDrops.spawn(fpsId, dropPos.clone(), new THREE.Vector3(
+        (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4));
+    }
+    this.sound.playBreak(d.sound);
+    this.blocksMined++;
+    this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
   }
 
   /**
@@ -1808,7 +1869,7 @@ export class GameEngine {
           this.camera.getWorldDirection(this.aimDir);
           const hit = raycastVoxel(this.world, eye.x, eye.y, eye.z,
             this.aimDir.x, this.aimDir.y, this.aimDir.z, 5);
-          if (hit && (isConveyor(hit.id) || isInserter(hit.id))) {
+          if (hit && (isConveyor(hit.id) || isInserter(hit.id) || isLaserMiner(hit.id))) {
             e.preventDefault();
             this.sound.playClick();
             this.rotateConveyor(hit.x, hit.y, hit.z, hit.id);
@@ -2449,6 +2510,7 @@ export class GameEngine {
       this.updateDroppedWeapon(dt);
       this.itemDrops.update(sdt, this.player.pos);
       this.inserters.update(sdt, this.player.pos);
+      this.laserMiners.update(sdt, this.player.pos);
       // play the voxel-fps collapse camera: buckle, topple, bounce, twitch
       this.player.updateDeath(dt);
       this.player.applyDeathCamera(this.camera);
@@ -2552,6 +2614,7 @@ export class GameEngine {
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
     this.inserters.update(dt, this.player.pos);
+    this.laserMiners.update(dt, this.player.pos);
 
     // re-target the torch light pool onto the torches nearest the camera
     this.torchLights.update(dt, this.camera.position);
@@ -2748,10 +2811,13 @@ export class GameEngine {
     return 'E';
   }
 
-  private facingBlock(family: 'belt' | 'inserter', yaw: number): number {
+  private facingBlock(family: 'belt' | 'inserter' | 'miner', yaw: number): number {
     const c = this.yawCardinal(yaw);
     if (family === 'belt') {
       return c === 'N' ? B.CONVEYOR_N : c === 'E' ? B.CONVEYOR_E : c === 'S' ? B.CONVEYOR_S : B.CONVEYOR_W;
+    }
+    if (family === 'miner') {
+      return c === 'N' ? B.LASER_MINER_N : c === 'E' ? B.LASER_MINER_E : c === 'S' ? B.LASER_MINER_S : B.LASER_MINER_W;
     }
     return c === 'N' ? B.INSERTER_N : c === 'E' ? B.INSERTER_E : c === 'S' ? B.INSERTER_S : B.INSERTER_W;
   }
@@ -2767,6 +2833,10 @@ export class GameEngine {
       [B.INSERTER_E]: B.INSERTER_S,
       [B.INSERTER_S]: B.INSERTER_W,
       [B.INSERTER_W]: B.INSERTER_N,
+      [B.LASER_MINER_N]: B.LASER_MINER_E,
+      [B.LASER_MINER_E]: B.LASER_MINER_S,
+      [B.LASER_MINER_S]: B.LASER_MINER_W,
+      [B.LASER_MINER_W]: B.LASER_MINER_N,
     };
     const next = NEXT[id];
     if (next === undefined) return;
@@ -2810,6 +2880,13 @@ export class GameEngine {
     if (isInserter(ourId)) {
       if (!DEFS[this.world.getBlockRaw(x, y - 1, z)]?.solid) return;
       ourId = this.facingBlock('inserter', this.player.yaw);
+    }
+
+    // Laser miner: free-standing turret facing the player's look direction, so
+    // it mines the cone in front and ejects drops behind. Needs ground support.
+    if (isLaserMiner(ourId)) {
+      if (!DEFS[this.world.getBlockRaw(x, y - 1, z)]?.solid) return;
+      ourId = this.facingBlock('miner', this.player.yaw);
     }
 
     const d = DEFS[ourId];
@@ -3325,6 +3402,7 @@ export class GameEngine {
     this.sound.stopShip();
     this.itemDrops?.clear();
     this.inserters?.clear();
+    this.laserMiners?.clear();
     this.removeListeners();
     window.removeEventListener('resize', this.resize);
     // customDepthMaterial is not reachable from scene.traverse material walks

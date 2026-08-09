@@ -24,6 +24,7 @@ export const B = {
   TORCH: 60,
   CONVEYOR: 61,
   INSERTER: 62,
+  LASER_MINER: 63,
 } as const;
 
 export const BLOCK_COLORS: Record<number, number> = {
@@ -45,6 +46,7 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.FURNACE]: 0x7c7c80,
   [B.CONVEYOR]: 0x484854,
   [B.INSERTER]: 0x505058,
+  [B.LASER_MINER]: 0x9aa0a8,
 };
 
 export interface RayHit {

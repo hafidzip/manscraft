@@ -48,6 +48,7 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.TORCH]: 'Torch',
   [B.CONVEYOR]: 'Conveyor Belt',
   [B.INSERTER]: 'Inserter',
+  [B.LASER_MINER]: 'Laser Miner',
   // gemstones (fps ids 50-57)
   50: 'Ruby Ore',
   51: 'Amber Ore',
@@ -71,8 +72,10 @@ export class Inventory {
 
   mainInv: (SlotItem | null)[] = (() => {
     const arr: (SlotItem | null)[] = Array(27).fill(null);
-    arr[0] = { kind: 'block', blockId: B.COBBLE, count: 64 };
-    arr[1] = { kind: 'block', blockId: B.CONVEYOR, count: 64 };
+    arr[0] = { kind: 'block', blockId: B.INSERTER, count: 64 };
+    arr[1] = { kind: 'block', blockId: B.LASER_MINER, count: 64 };
+    arr[2] = { kind: 'block', blockId: B.CONVEYOR, count: 64 };
+    arr[3] = { kind: 'block', blockId: B.COBBLE, count: 64 };
     arr[9] = { kind: 'food', foodId: 'chicken-drum', count: 64 };
     return arr;
   })();
