@@ -87,6 +87,8 @@ export const GRASS_YAW = { value: 0 };
 export interface ChunkGeoms {
   opaque?: THREE.BufferGeometry;
   cutout?: THREE.BufferGeometry;
+  /** leaves — split from grass so they get their own material/shader */
+  foliage?: THREE.BufferGeometry;
   water?: THREE.BufferGeometry;
 }
 
@@ -107,6 +109,7 @@ function buildGeom(b: Bucket, withFlow = false, withSway = false): THREE.BufferG
 export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, data: Uint8Array): ChunkGeoms {
   const opaqueB = newBucket();
   const cutoutB = newBucket();
+  const foliageB = newBucket();
   const waterB = newBucket();
   const baseX = cx * S;
   const baseZ = cz * S;
@@ -169,7 +172,10 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         }
 
         const isWater = !!d.water;
-        const bucket = isWater ? waterB : d.cutout ? cutoutB : opaqueB;
+        // Leaves get their own bucket (and later material/shader): static
+        // alpha-cutout cubes without the grass sway/billboard machinery.
+        const isFoliage = id === B.LEAVES;
+        const bucket = isWater ? waterB : isFoliage ? foliageB : d.cutout ? cutoutB : opaqueB;
 
         // ---- water surface + flow ----
         // Vanilla-style corner heights, symmetric per corner so adjacent
@@ -262,7 +268,7 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
 
           let visible: boolean;
           if (isWater) visible = !isWaterId(nid) && !nd.opaque;
-          else if (d.cutout) visible = nid !== id && !nd.opaque;
+          else if (d.cutout || isFoliage) visible = nid !== id && !nd.opaque;
           else visible = !nd.opaque;
           if (!visible) continue;
 
@@ -272,7 +278,7 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
           const us = isWater ? [0, 0, 1, 1] : [u0, u0, u1, u1];
           const vs = isWater ? [1, 0, 0, 1] : [v1, v0, v0, v1];
 
-          const doAO = !isWater && !d.cutout;
+          const doAO = !isWater && !d.cutout && !isFoliage;
           // map world flow (fx,fz) to this face's uv axes; falling water rushes down
           let fu = 0;
           let fv = 0;
@@ -335,7 +341,12 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
     }
   }
 
-  return { opaque: buildGeom(opaqueB), cutout: buildGeom(cutoutB, false, true), water: buildGeom(waterB, true) };
+  return {
+    opaque: buildGeom(opaqueB),
+    cutout: buildGeom(cutoutB, false, true),
+    foliage: buildGeom(foliageB),
+    water: buildGeom(waterB, true),
+  };
 }
 
 /** two diagonal quads (plants) — full-bright, double-sided rendering */

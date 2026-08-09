@@ -185,6 +185,13 @@ export class Spaceship {
     }
     this.baseY = this.pos.y;
     this.yaw = Math.random() * Math.PI * 2;
+    // `placeNear` also acts as the emergency recall used by player respawn.
+    // Clear any stale flight momentum/orientation before the player is seated.
+    this.vel.set(0, 0, 0);
+    this.pitchVis = 0;
+    this.flyPitch = 0;
+    this.bank = 0;
+    this.load = 0;
     this.sync();
   }
 

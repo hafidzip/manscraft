@@ -179,22 +179,38 @@ const DEATH_DURATION = 4;
 /**
  * Direct sun/moon shadow tuning for one-meter voxels.
  *
- * The previous normalBias (0.15) was large enough to detach blocker silhouettes
- * from cube edges, and PCF filtering blended lit samples across those detached
- * edges. That looked like sunlight leaking through sealed block corners. Voxel
- * terrain wants tight, hard direct shadows; torch light and GI are separate.
+ * The sun is parked on a permanent golden-hour plateau (~12.7° above the
+ * horizon, see sky.ts GOLDEN_ELEV). That grazing angle is a worst case for
+ * shadow acne: the depth gradient across a shadow-map texel is huge, so a flat
+ * lit surface self-shadows in periodic stripes unless the bias is large enough
+ * to clear a whole texel footprint (~texel / sin(elevation) blocks long).
+ *
+ * Two levers keep that under control WITHOUT the classic side effects:
+ *   1. A tighter texel — a 2048² map over an 88-block window is 0.043 blocks
+ *      per texel (vs the old 0.0625), which shrinks the footprint the bias has
+ *      to jump, so a smaller bias goes further.
+ *   2. Bias sized for the grazing footprint (normalBias pushes the receiver
+ *      along its up-normal; the constant bias trims the residual), paired with
+ *      a tight PCF radius so lit samples never blend across detached blocker
+ *      edges — that blend, not the offset itself, was the old corner-leak.
+ *
+ * Voxel terrain wants tight, hard direct shadows; torch light and GI are
+ * separate.
  */
-const CELESTIAL_SHADOW_SIZE = 1536;
-const CELESTIAL_SHADOW_HALF_EXTENT = 48;
+const CELESTIAL_SHADOW_SIZE = 2048;
+const CELESTIAL_SHADOW_HALF_EXTENT = 44;
 
 /**
- * Radius (blocks) inside which foliage chunks cast shadows.
+ * Radius (blocks) inside which GRASS chunks cast shadows.
  *
- * Grass is the single densest thing in the scene — a chunk of tall grass is
- * thousands of alpha-tested quads, and alpha-test disables early-Z in the
- * depth pass. Casting from the whole 92-block view radius would multiply the
- * shadow pass cost by an order of magnitude for detail that is invisible past
- * a few blocks. Set to 0 to disable grass shadow casting entirely.
+ * Leaves are NOT budgeted by this: they live on a separate static material
+ * (mats.foliage) and cast shadows everywhere — boxy alpha-cutout quads are
+ * cheap in the depth pass. Grass is the single densest thing in the scene —
+ * a chunk of tall grass is thousands of alpha-tested quads, and alpha-test
+ * disables early-Z in the depth pass. Casting from the whole 92-block view
+ * radius would multiply the shadow pass cost by an order of magnitude for
+ * detail that is invisible past a few blocks. Set to 0 to disable grass
+ * shadow casting entirely.
  */
 const GRASS_SHADOW_RADIUS = 0;
 
@@ -431,10 +447,20 @@ export class GameEngine {
     const mats: ChunkMaterials & {
       opaque: THREE.MeshLambertMaterial;
       cutout: THREE.MeshLambertMaterial;
+      foliage: THREE.MeshLambertMaterial;
       water: THREE.MeshLambertMaterial;
     } = {
       opaque: new THREE.MeshLambertMaterial({ map: this.textures.atlas, vertexColors: true }),
       cutout: new THREE.MeshLambertMaterial({
+        map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
+      }),
+      // Leaves get their OWN material, split from grass. The grass shader
+      // carries wind sway, blade billboarding and distance-collapse LOD —
+      // none of which apply to leaves. Their dedicated shader keeps only the
+      // world-up normal bias so sunlit canopies shade exactly like terrain,
+      // and their depth material is a plain alpha-test (static geometry), so
+      // canopies can cast shadows at full range at near-zero extra cost.
+      foliage: new THREE.MeshLambertMaterial({
         map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
       }),
       // grass receives shadows like terrain but never casts; the sway +
@@ -449,6 +475,7 @@ export class GameEngine {
     // directional-light hole along block and chunk edges.
     mats.opaque.shadowSide = THREE.DoubleSide;
     mats.cutout.shadowSide = THREE.DoubleSide;
+    mats.foliage.shadowSide = THREE.DoubleSide;
     // shader injection: per-cell flow vectors scroll the water texture so
     // streams visibly flow and waterfalls rush down. A world-space shimmer is
     // layered on top so still water (pools, lakes, oceans — where the flow
@@ -604,6 +631,24 @@ export class GameEngine {
         );
     };
 
+    // ---- leaves material (separate shader from grass) ----------------------
+    // The grass shader above is heavy: wind sway, camera-facing billboarding
+    // and distance collapse for every vertex. Leaves are static cubes — they
+    // only need the world-up normal bias (so canopies never go black against
+    // the sun) and the atlas alpha cutout. Keeping them on a separate program
+    // means tree geometry never pays the grass vertex cost, and their depth
+    // pass needs no sway transform either (see mats.foliageDepth below).
+    mats.foliage.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+         // Leaves are lit with a pure world-up normal, exactly like terrain
+         // and the grass shader — face-to-face variety is baked into vertex
+         // colours by the mesher, so nothing is lost.
+         objectNormal = vec3(0.0, 1.0, 0.0);`
+      );
+    };
+
     // ---- grass shadow depth material --------------------------------------
     // Three.js renders the shadow map with its own depth material, which knows
     // nothing about our sway/collapse vertex work or the atlas alpha. Without
@@ -674,6 +719,17 @@ export class GameEngine {
         );
     };
 
+    // ---- leaves shadow depth material -------------------------------------
+    // Canopies are static, so their depth pass is a plain alpha-test against
+    // the atlas — no onBeforeCompile at all. This is what lets every leaf
+    // chunk cast shadows without the per-frame sway transform cost.
+    mats.foliageDepth = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+      map: this.textures.atlas,
+      alphaTest: 0.4,
+      side: THREE.DoubleSide,
+    });
+
     // deterministic per-planet seed; only fall back to random with no theme
     const seed = this.theme
       ? planetSeedToWorldSeed(this.theme.seed)
@@ -716,9 +772,16 @@ export class GameEngine {
       light.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
       light.shadow.camera.near = 0.5;
       light.shadow.camera.far = 180;
-      light.shadow.bias = -0.00015;
-      light.shadow.normalBias = 0.05;
-      light.shadow.radius = 1.5;
+      // Bias sized for the grazing golden-hour sun (see CELESTIAL_SHADOW_SIZE
+      // notes). normalBias offsets the receiver along its surface normal — on
+      // flat ground that is straight up, which is exactly where acne forms —
+      // and the constant bias trims what's left in projected depth space.
+      light.shadow.bias = -0.0004;
+      light.shadow.normalBias = 0.16;
+      // Tight PCF kernel: keeps shadows hard (voxel look) and, critically,
+      // stops lit samples from blending across normalBias-detached block edges,
+      // which is what previously read as light leaking through sealed corners.
+      light.shadow.radius = 1.0;
       light.shadow.camera.updateProjectionMatrix();
     }
 
@@ -918,9 +981,11 @@ export class GameEngine {
     await this.nextFrame();
     if (this.disposed) return;
 
-    // Guarantee the alpha-cutout shader is represented even on a planet whose
-    // loaded spawn chunks happen to contain no foliage. The mesh is never
-    // rendered; compileAsync only needs a visible material/geometry pair.
+    // Guarantee the alpha-cutout shaders (grass AND leaves) are represented
+    // even on a planet whose loaded spawn chunks happen to contain no foliage.
+    // The meshes are never rendered; compileAsync only needs visible
+    // material/geometry pairs. The leaves warm mesh deliberately has no
+    // aSway attribute — its shader must not expect one.
     const cutoutWarmGeo = new THREE.PlaneGeometry(0.01, 0.01);
     const warmCount = cutoutWarmGeo.getAttribute('position').count;
     cutoutWarmGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Array(warmCount * 3).fill(1), 3));
@@ -928,6 +993,13 @@ export class GameEngine {
     const cutoutWarmMesh = new THREE.Mesh(cutoutWarmGeo, mats.cutout);
     cutoutWarmMesh.frustumCulled = false;
     this.scene.add(cutoutWarmMesh);
+
+    const foliageWarmGeo = new THREE.PlaneGeometry(0.01, 0.01);
+    const foliageWarmCount = foliageWarmGeo.getAttribute('position').count;
+    foliageWarmGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Array(foliageWarmCount * 3).fill(1), 3));
+    const foliageWarmMesh = new THREE.Mesh(foliageWarmGeo, mats.foliage);
+    foliageWarmMesh.frustumCulled = false;
+    this.scene.add(foliageWarmMesh);
 
     // Held torch and food are normally hidden, so expose them only to the
     // compiler. No frame is rendered while this temporary state is active.
@@ -939,6 +1011,8 @@ export class GameEngine {
     } finally {
       this.scene.remove(cutoutWarmMesh);
       cutoutWarmGeo.dispose();
+      this.scene.remove(foliageWarmMesh);
+      foliageWarmGeo.dispose();
       this.heldBlock.group.visible = false;
       this.heldFood.visible = false;
       this.heldBlock.setGeometry(this.blockGeometry(B.GRASS));
@@ -2068,7 +2142,7 @@ export class GameEngine {
     this.heldFood.visible = false;
   }
 
-  private boardShip(): void {
+  private boardShip(resetCamera = false): void {
     this.ship.ensureClearance(0.35);
     this.piloting = true;
     // Stow EVERY camera child so nothing from the FPS kit rides along into
@@ -2079,7 +2153,29 @@ export class GameEngine {
     this.heldBlock.update(0, false, 0);
     this.heldFood.visible = false;
     this.bodyGroup.visible = false;
-    this.flyCam.copy(this.camera.position);
+    if (resetCamera) {
+      // A death camera may be many blocks away from the recalled ship. Seed
+      // the chase camera directly behind the hull to avoid one bad frame of
+      // the death view before pilot mode takes over on the next tick.
+      const yaw = this.player.yaw;
+      this.flyCam.set(
+        this.ship.pos.x + Math.sin(yaw) * 11,
+        this.ship.pos.y + 2.3,
+        this.ship.pos.z + Math.cos(yaw) * 11,
+      );
+      this.camera.position.copy(this.flyCam);
+      this.tmpSeat.set(
+        this.ship.pos.x - Math.sin(yaw) * 3.2,
+        this.ship.pos.y + 1.0,
+        this.ship.pos.z - Math.cos(yaw) * 3.2,
+      );
+      this.camera.lookAt(this.tmpSeat);
+      this.fov = 75;
+      this.camera.fov = 75;
+      this.camera.updateProjectionMatrix();
+    } else {
+      this.flyCam.copy(this.camera.position);
+    }
     this.highlight.visible = false;
     this.crack.visible = false;
     this.mouse.left = false;
@@ -2759,12 +2855,25 @@ export class GameEngine {
       this.scene.remove(this.droppedGun.mesh);
       this.droppedGun = null;
     }
+
+    // Recall the ship to the protected landing area, then seat the player in
+    // it. This prevents a respawn from dropping the player back into the same
+    // combat space and makes the ship the consistent recovery point.
+    const spawnX = Math.floor(this.spawn.x);
+    const spawnZ = Math.floor(this.spawn.z);
+    this.ship.placeNear(this.world.gen, spawnX, spawnZ);
+
     this.player.resetDeath();
-    this.player.setSpawn(this.spawn.x, this.spawn.y, this.spawn.z);
+    this.player.setSpawn(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
+    this.player.yaw = this.ship.yaw;
     this.player.pitch = 0;
+    this.wasOnGround = false;
+    this.wasInWater = false;
+    this.prevVelY = 0;
+    this.spaceExited = false;
     this.weapons.resetDeath();
     this.selectSlot(this.sel, true);
-    this.snapCameraToEye();
+    this.boardShip(true);
     this.statT = 0;
   }
 
@@ -3057,6 +3166,7 @@ export class GameEngine {
     window.removeEventListener('resize', this.resize);
     // customDepthMaterial is not reachable from scene.traverse material walks
     this.world?.materials.cutoutDepth?.dispose();
+    this.world?.materials.foliageDepth?.dispose();
     this.lumenLite?.dispose();
     this.depthFogPass?.dispose();
     this.bloom?.dispose();

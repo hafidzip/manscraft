@@ -21,7 +21,10 @@ const EVICT_RETIRE_PER_PASS = 6;
 
 export interface ChunkMaterials {
   opaque: THREE.Material;
+  /** grass / flowers / torches / glass — sway + billboard shader */
   cutout: THREE.Material;
+  /** leaves — dedicated static material, separate from grass */
+  foliage: THREE.Material;
   water: THREE.Material;
   /**
    * Optional depth override for the alpha-cutout pass. Grass/foliage must be
@@ -30,6 +33,12 @@ export interface ChunkMaterials {
    * distance-collapse LOD.
    */
   cutoutDepth?: THREE.Material;
+  /**
+   * Depth override for leaves. Leaves cast shadows everywhere (unlike blades
+   * they are boxy quads, cheap in the depth pass), so their depth material
+   * only needs the alpha cutout — no sway transform.
+   */
+  foliageDepth?: THREE.Material;
 }
 
 export interface MapColumn {
@@ -483,6 +492,14 @@ export class World {
       grass.customDepthMaterial = this.mats.cutoutDepth;
     }
     c.grass = grass;
+    // Leaves cast shadows everywhere. Boxy alpha-cutout quads are far cheaper
+    // in the depth pass than grass blades, so they are NOT distance-budgeted:
+    // canopies drop real shadows on the ground at any range the shadow map
+    // covers. Their depth material is static (no sway) to match the canopy.
+    const foliage = add(geoms.foliage, this.mats.foliage, 1, true);
+    if (foliage && this.mats.foliageDepth) {
+      foliage.customDepthMaterial = this.mats.foliageDepth;
+    }
     add(geoms.water, this.mats.water, 2, false);
     c.hasMesh = true;
     this.dirtySet.delete(c);

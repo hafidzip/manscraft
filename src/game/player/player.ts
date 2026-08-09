@@ -32,6 +32,8 @@ export class Player {
   inWater = false;
   headInWater = false;
   wasFalling = 0;
+  /** was the player in water last frame? used for water-exit jump */
+  private wasInWater = false;
 
   // unified-game viewmodel state (consumed by the weapon system)
   movePhase = 0;
@@ -271,7 +273,13 @@ export class Player {
     // --- vertical ---
     if (this.inWater) {
       this.vel.y -= C.GRAVITY * 0.24 * dt;
-      if (inp.jump) this.vel.y += (3.9 - this.vel.y) * Math.min(1, 8 * dt);
+      // Allow a normal jump from ground even when in water (Minecraft-style)
+      if (inp.jump && this.onGround && !this.crouching) {
+        this.vel.y = C.JUMP_VELOCITY;
+        this.onGround = false;
+      } else if (inp.jump) {
+        this.vel.y += (3.9 - this.vel.y) * Math.min(1, 8 * dt);
+      }
       if (this.vel.y < -3.4) this.vel.y = -3.4;
     } else {
       this.wasFalling = this.vel.y;
@@ -281,7 +289,15 @@ export class Player {
         this.vel.y = C.JUMP_VELOCITY;
         this.onGround = false;
       }
+      // Jump out of water: if we just exited water while holding jump,
+      // give a proper jump boost so the player can climb out.
+      if (inp.jump && this.wasInWater && !this.crouching) {
+        this.vel.y = C.JUMP_VELOCITY;
+      }
     }
+
+    // Track water state for next-frame water-exit detection.
+    this.wasInWater = this.inWater;
 
     // --- integrate with collision (axis separated) ---
     this.moveX(this.vel.x * dt);
