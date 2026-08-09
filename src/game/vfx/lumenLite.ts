@@ -130,7 +130,6 @@ const SSGI_FRAG = /* glsl */ `
     float rnd = hash12(gl_FragCoord.xy + vec2(17.0, 31.0));
     float rnd2 = hash12(gl_FragCoord.xy * 1.37 + vec2(9.0, 43.0));
 
-    float occl = 0.0;
     vec3 gi = vec3(0.0);
 
     for (int i = 0; i < DIRS; i++) {
@@ -154,13 +153,39 @@ const SSGI_FRAG = /* glsl */ `
         if (dz > 0.0 && dz < thickness) {
           float w = max(dot(dir, N), 0.0) * (1.0 - tt);
           gi += min(texture2D(tDiffuse, suv).rgb, vec3(1.8)) * w;
-          occl += w;
           break;
         }
       }
     }
 
-    float ao = clamp(1.0 - uAoStrength * (occl * 0.25), 0.0, 1.0);
+    // ---- SSAO: 8-sample interleaved-gradient-noise hemisphere ----
+    // Runs at half-res, reuses the full-res depth buffer, and rides the two
+    // bilateral blur passes already in the pipeline — so it costs one small
+    // kernel (8 depth taps) with no extra render targets. IGN rotation removes
+    // banding; the normal-lifted hemisphere avoids self-occluding flat faces.
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float aoOcc = 0.0;
+    float aoR = 1.6; // world-space radius — just over one block, for crevice AO
+    for (int j = 0; j < 8; j++) {
+      float fj = float(j);
+      float ang = (fj + ign) * 0.785398;             // spread over 2π
+      float rad = aoR * sqrt((fj + 0.5) / 8.0);       // sqrt disc distribution
+      vec3 off = T * cos(ang) * rad + B * sin(ang) * rad + N * (0.3 * rad + 0.15);
+      vec3 sp = P + off;
+      vec4 clip = uProj * vec4(sp, 1.0);
+      if (clip.w <= 0.0) continue;
+      vec2 suv = clip.xy / clip.w * 0.5 + 0.5;
+      if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
+      float sDepth = texture2D(tDepth, suv).x;
+      if (sDepth >= 0.9999) continue;
+      float sceneZ = getViewZ(sDepth);
+      float dz = sceneZ - sp.z;
+      float thick = max(0.2, -sp.z * 0.045);          // depth-aware thickness
+      if (dz > 0.02 && dz < thick) aoOcc += 1.0 - smoothstep(0.0, aoR, length(off));
+    }
+    aoOcc /= 8.0;
+    float ao = 1.0 - clamp(uAoStrength * aoOcc * 1.7, 0.0, 0.82);
+
     // RGB = indirect; alpha = AO for blend
     gl_FragColor = vec4(gi * 0.25 * uIntensitY, ao);
   }
@@ -443,7 +468,7 @@ export class LumenLitePass {
     // color bleed. The half-res pass is inherently low-frequency, so this
     // doesn't add cost but lifts shadows noticeably.
     this.giMat.uniforms.uIntensitY.value = 1.1;
-    this.giMat.uniforms.uAoStrength.value = 0.6;
+    this.giMat.uniforms.uAoStrength.value = 0.7;
     this.giMat.uniforms.uThickness.value = 0.22;
     // Radius in view units — 8.0 covers a full terrain block at typical view
     // distance, so bounce light from a sunlit wall reaches the ground behind.

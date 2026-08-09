@@ -440,7 +440,7 @@ export class GameEngine {
       // grass receives shadows like terrain but never casts; the sway +
       // distance-collapse shader is injected below
       water: new THREE.MeshLambertMaterial({
-        map: this.textures.water, vertexColors: true, transparent: true, opacity: 0.78,
+        map: this.textures.water, vertexColors: true, transparent: false, opacity: 1.0,
         side: THREE.DoubleSide,
       }),
     };
@@ -449,27 +449,34 @@ export class GameEngine {
     // directional-light hole along block and chunk edges.
     mats.opaque.shadowSide = THREE.DoubleSide;
     mats.cutout.shadowSide = THREE.DoubleSide;
-    // shader injection: per-cell flow vectors scroll the water texture,
-    // so streams visibly flow, waterfalls rush down, and pools stay still
+    // shader injection: per-cell flow vectors scroll the water texture so
+    // streams visibly flow and waterfalls rush down. A world-space shimmer is
+    // layered on top so still water (pools, lakes, oceans — where the flow
+    // vector is zero) never reads as a frozen texture.
     mats.water.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = WATER_TIME;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
-          '#include <common>\nattribute vec2 aFlow;\nvarying vec2 vFlow;'
+          '#include <common>\nattribute vec2 aFlow;\nvarying vec2 vFlow;\nvarying vec3 vWpos;'
         )
         .replace(
           '#include <uv_vertex>',
-          '#include <uv_vertex>\nvFlow = aFlow;'
+          '#include <uv_vertex>\nvFlow = aFlow;\nvWpos = (modelMatrix * vec4(position, 1.0)).xyz;'
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
-          '#include <common>\nuniform float uTime;\nvarying vec2 vFlow;'
+          '#include <common>\nuniform float uTime;\nvarying vec2 vFlow;\nvarying vec3 vWpos;'
         )
         .replace(
           '#include <map_fragment>',
-          `vec4 sampledDiffuseColor = texture2D( map, vMapUv + vFlow * uTime );
+          `vec2 flowUv = vMapUv + vFlow * uTime;
+           vec2 shim = vec2(
+             sin(vWpos.z * 1.9 + uTime * 0.7) + sin(vWpos.x * 1.1 - uTime * 0.5),
+             cos(vWpos.x * 1.7 + uTime * 0.6) + cos(vWpos.z * 1.3 - uTime * 0.8)
+           ) * 0.02;
+           vec4 sampledDiffuseColor = texture2D( map, flowUv + shim );
            diffuseColor *= sampledDiffuseColor;`
         );
     };
@@ -1774,13 +1781,16 @@ export class GameEngine {
       this.events.onEnterSpace?.(this.theme);
     }
 
-    // water: per-cell flow is shader-driven (+ subtle global shimmer for pools)
-    if (this.locked) {
-      WATER_TIME.value += dt;
+    // water: per-cell flow + ambient shimmer is shader-driven. The animation
+    // clock advances on EVERY rendered frame (not just under pointer lock) so
+    // lakes and streams keep moving in the menu / preview camera too; only the
+    // block-level fluid *simulation* is gated to active play.
+    WATER_TIME.value += dt;
+    if (this.textures) {
       this.textures.water.offset.x += dt * 0.003;
       this.textures.water.offset.y += dt * 0.006;
-      this.fluid.update(dt);
     }
+    if (this.locked) this.fluid.update(dt);
     // Streaming budget follows the frame clock: when a frame is already over
     // budget (heavy combat, lots of VFX) the streamer backs off instead of
     // stacking chunk builds on top of a frame that is running late.
