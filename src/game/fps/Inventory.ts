@@ -16,7 +16,7 @@ export const FOODS: Record<string, FoodDef> = {
 };
 
 export const FOOD_NAMES: Record<string, string> = Object.fromEntries(
-  Object.values(FOODS).map((f) => [f.id, f.name])
+  Object.values(FOODS).map((f) => [f.id, f.name]),
 );
 
 export interface SlotRef {
@@ -57,15 +57,51 @@ export const BLOCK_NAMES: Record<number, string> = {
   57: 'Emerald Ore',
 };
 
+const STACK = 64;
+const WEAPONS = ['handgun', 'smg', 'rifle', 'sniper', 'bazooka', 'laser'] as const;
+
+type Stackable = Extract<SlotItem, { count: number }>;
+
+const sameStack = (a: SlotItem, b: SlotItem): boolean => {
+  if (a.kind === 'block' && b.kind === 'block') return a.blockId === b.blockId;
+  if (a.kind === 'food' && b.kind === 'food') return a.foodId === b.foodId;
+  return false;
+};
+
+const mergeInto = (arr: (SlotItem | null)[], item: Stackable): number => {
+  let left = item.count;
+  for (let i = 0; i < arr.length && left > 0; i++) {
+    const s = arr[i];
+    if (!s || !sameStack(s, item) || s.kind === 'weapon' || s.count >= STACK) continue;
+    const add = Math.min(STACK - s.count, left);
+    s.count += add;
+    left -= add;
+  }
+  return left;
+};
+
+const placeInto = (arr: (SlotItem | null)[], item: Stackable, left: number): number => {
+  for (let i = 0; i < arr.length && left > 0; i++) {
+    if (arr[i]) continue;
+    const add = Math.min(STACK, left);
+    arr[i] = item.kind === 'block'
+      ? { kind: 'block', blockId: item.blockId, count: add }
+      : { kind: 'food', foodId: item.foodId, count: add };
+    left -= add;
+  }
+  return left;
+};
+
+const stackItem = (hotbar: (SlotItem | null)[], main: (SlotItem | null)[], item: Stackable): boolean => {
+  let left = mergeInto(hotbar, item);
+  left = mergeInto(main, { ...item, count: left });
+  if (left > 0) left = placeInto(main, item, left);
+  if (left > 0) left = placeInto(hotbar, item, left);
+  return left === 0;
+};
+
 export class Inventory {
-  hotbar: (SlotItem | null)[] = [
-    { kind: 'weapon', weaponId: 'handgun' },
-    { kind: 'weapon', weaponId: 'smg' },
-    { kind: 'weapon', weaponId: 'rifle' },
-    { kind: 'weapon', weaponId: 'sniper' },
-    { kind: 'weapon', weaponId: 'bazooka' },
-    { kind: 'weapon', weaponId: 'laser' },
-  ];
+  hotbar: (SlotItem | null)[] = WEAPONS.map((weaponId) => ({ kind: 'weapon' as const, weaponId }));
 
   mainInv: (SlotItem | null)[] = (() => {
     const arr: (SlotItem | null)[] = Array(27).fill(null);
@@ -77,40 +113,31 @@ export class Inventory {
     return arr;
   })();
 
+  craft: (SlotItem | null)[] = Array(9).fill(null);
+  craftSize: 2 | 3 = 2;
+
+  get craftCells(): (SlotItem | null)[] {
+    return this.craft.slice(0, this.craftSize * this.craftSize);
+  }
+
+  private bank(ref: SlotRef): (SlotItem | null)[] {
+    if (ref.isCraft) return this.craft;
+    return ref.isHotbar ? this.hotbar : this.mainInv;
+  }
+
   addItem(item: SlotItem): boolean {
     if (item.kind === 'block') return this.addBlock(item.blockId, item.count);
-    if (item.kind === 'food') return this.addFood(item.foodId, item.count);
+    if (item.kind === 'food') return stackItem(this.hotbar, this.mainInv, item);
     return false;
   }
 
-  private addFood(foodId: string, count: number): boolean {
-    const merge = (arr: (SlotItem | null)[]) => {
-      for (let i = 0; i < arr.length && count > 0; i++) {
-        const it = arr[i];
-        if (it && it.kind === 'food' && it.foodId === foodId && it.count < 64) {
-          const add = Math.min(64 - it.count, count);
-          it.count += add;
-          count -= add;
-        }
-      }
-    };
-    const place = (arr: (SlotItem | null)[]) => {
-      for (let i = 0; i < arr.length && count > 0; i++) {
-        if (!arr[i]) {
-          const add = Math.min(64, count);
-          arr[i] = { kind: 'food', foodId, count: add };
-          count -= add;
-        }
-      }
-    };
-    merge(this.hotbar);
-    merge(this.mainInv);
-    if (count > 0) { place(this.mainInv); place(this.hotbar); }
-    return count === 0;
+  addBlock(blockId: number, count = 1): boolean {
+    if (blockId === B.AIR || blockId === B.BEDROCK) return false;
+    return stackItem(this.hotbar, this.mainInv, { kind: 'block', blockId, count });
   }
 
   consumeAt(ref: SlotRef, n = 1): boolean {
-    const arr = ref.isHotbar ? this.hotbar : this.mainInv;
+    const arr = this.bank(ref);
     const item = arr[ref.index];
     if (!item || (item.kind !== 'block' && item.kind !== 'food')) return false;
     item.count -= n;
@@ -118,74 +145,13 @@ export class Inventory {
     return true;
   }
 
-  addBlock(blockId: number, count = 1): boolean {
-    if (blockId === B.AIR || blockId === B.BEDROCK) return false;
-
-    for (let i = 0; i < this.hotbar.length; i++) {
-      const item = this.hotbar[i];
-      if (item && item.kind === 'block' && item.blockId === blockId && item.count < 64) {
-        const space = 64 - item.count;
-        const add = Math.min(space, count);
-        item.count += add;
-        count -= add;
-        if (count <= 0) return true;
-      }
-    }
-
-    for (let i = 0; i < this.mainInv.length; i++) {
-      const item = this.mainInv[i];
-      if (item && item.kind === 'block' && item.blockId === blockId && item.count < 64) {
-        const space = 64 - item.count;
-        const add = Math.min(space, count);
-        item.count += add;
-        count -= add;
-        if (count <= 0) return true;
-      }
-    }
-
-    for (let i = 0; i < this.mainInv.length; i++) {
-      if (!this.mainInv[i]) {
-        const add = Math.min(64, count);
-        this.mainInv[i] = { kind: 'block', blockId, count: add };
-        count -= add;
-        if (count <= 0) return true;
-      }
-    }
-
-    for (let i = 0; i < this.hotbar.length; i++) {
-      if (!this.hotbar[i]) {
-        const add = Math.min(64, count);
-        this.hotbar[i] = { kind: 'block', blockId, count: add };
-        count -= add;
-        if (count <= 0) return true;
-      }
-    }
-
-    return count === 0;
-  }
-
   consumeBlock(slotRef: SlotRef): boolean {
-    const arr = slotRef.isHotbar ? this.hotbar : this.mainInv;
+    const arr = this.bank(slotRef);
     const item = arr[slotRef.index];
     if (!item || item.kind !== 'block' || item.count <= 0) return false;
     item.count--;
-    if (item.count <= 0) {
-      arr[slotRef.index] = null;
-    }
+    if (item.count <= 0) arr[slotRef.index] = null;
     return true;
-  }
-
-  craft: (SlotItem | null)[] = Array(9).fill(null);
-  craftSize: 2 | 3 = 2;
-
-  get craftCells(): (SlotItem | null)[] {
-    const s = this.craftSize;
-    return this.craft.slice(0, s * s);
-  }
-
-  private bank(ref: SlotRef): (SlotItem | null)[] {
-    if (ref.isCraft) return this.craft;
-    return ref.isHotbar ? this.hotbar : this.mainInv;
   }
 
   setCraftSize(size: 2 | 3): boolean {
@@ -202,76 +168,53 @@ export class Inventory {
   swapSlots(from: SlotRef, to: SlotRef) {
     const arrFrom = this.bank(from);
     const arrTo = this.bank(to);
+    const a = arrFrom[from.index];
+    const b = arrTo[to.index];
 
-    const itemFrom = arrFrom[from.index];
-    const itemTo = arrTo[to.index];
-
-    if (
-      itemFrom && itemTo &&
-      itemFrom.kind === 'block' && itemTo.kind === 'block' &&
-      itemFrom.blockId === itemTo.blockId
-    ) {
-      const space = 64 - itemTo.count;
+    if (a && b && sameStack(a, b) && a.kind !== 'weapon' && b.kind !== 'weapon') {
+      const space = STACK - b.count;
       if (space > 0) {
-        const add = Math.min(space, itemFrom.count);
-        itemTo.count += add;
-        itemFrom.count -= add;
-        if (itemFrom.count <= 0) {
-          arrFrom[from.index] = null;
-        }
+        const add = Math.min(space, a.count);
+        b.count += add;
+        a.count -= add;
+        if (a.count <= 0) arrFrom[from.index] = null;
         return;
       }
     }
 
-    if (
-      itemFrom && itemTo &&
-      itemFrom.kind === 'food' && itemTo.kind === 'food' &&
-      itemFrom.foodId === itemTo.foodId
-    ) {
-      const space = 64 - itemTo.count;
-      if (space > 0) {
-        const add = Math.min(space, itemFrom.count);
-        itemTo.count += add;
-        itemFrom.count -= add;
-        if (itemFrom.count <= 0) {
-          arrFrom[from.index] = null;
-        }
-        return;
-      }
-    }
-
-    arrFrom[from.index] = itemTo;
-    arrTo[to.index] = itemFrom;
+    arrFrom[from.index] = b;
+    arrTo[to.index] = a;
   }
 
   getItem(ref: SlotRef): SlotItem | null {
-    const arr = this.bank(ref);
     if (ref.isCraft && ref.index >= this.craftSize * this.craftSize) return null;
-    return arr[ref.index] ?? null;
+    return this.bank(ref)[ref.index] ?? null;
   }
 
   setItem(ref: SlotRef, item: SlotItem | null): void {
     this.bank(ref)[ref.index] = item;
   }
 
+  countBlock(blockId: number): number {
+    let n = 0;
+    for (const arr of [this.hotbar, this.mainInv])
+      for (const s of arr) if (s?.kind === 'block' && s.blockId === blockId) n += s.count;
+    return n;
+  }
+
   canAdd(item: SlotItem): boolean {
-    const need = (key: (s: SlotItem) => string | null) => {
-      let count = item.kind === 'weapon' ? 1 : item.count;
-      let empties = 0;
-      for (const arr of [this.hotbar, this.mainInv]) {
-        for (const s of arr) {
-          if (!s) { empties++; continue; }
-          const k = key(s);
-          if (k && k === key(item) && s.kind !== 'weapon' && s.count < 64) {
-            count -= Math.min(64 - s.count, count);
-          }
-        }
+    if (item.kind === 'weapon') {
+      return this.hotbar.some((s) => !s) || this.mainInv.some((s) => !s);
+    }
+    let count = item.count;
+    let empties = 0;
+    for (const arr of [this.hotbar, this.mainInv]) {
+      for (const s of arr) {
+        if (!s) { empties++; continue; }
+        if (sameStack(s, item) && s.kind !== 'weapon' && s.count < STACK)
+          count -= Math.min(STACK - s.count, count);
       }
-      if (item.kind === 'weapon') return empties > 0;
-      return count <= empties * 64;
-    };
-    if (item.kind === 'block') return need((s) => (s.kind === 'block' ? `b${s.blockId}` : null));
-    if (item.kind === 'food') return need((s) => (s.kind === 'food' ? `f${s.foodId}` : null));
-    return need(() => null);
+    }
+    return count <= empties * STACK;
   }
 }

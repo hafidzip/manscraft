@@ -2,7 +2,7 @@
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, SEA_LEVEL, WORLD_SIZE, wrapBlock, chunkIndex } from '../core/constants';
 import {
   Torus2, PeriodicPerlin2, fbm, ridged, billow, warp2,
-  smoothstep, to01, hash2, type Periodic2,
+  smoothstep, to01, hash2, clamp, type Periodic2,
 } from '../core/noise';
 import { B, DEFS } from './blocks';
 import { Biome, BIOME_DEFS, pickBiome } from './biomes';
@@ -35,8 +35,6 @@ export function planetSeedToWorldSeed(seed: bigint | string | number): number {
 let ACTIVE_THEME: PlanetTheme | null = null;
 export function setActivePlanetTheme(t: PlanetTheme | null | undefined): void { ACTIVE_THEME = t ?? null; }
 export function getActivePlanetTheme(): PlanetTheme | null { return ACTIVE_THEME; }
-
-const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
 export enum TerrainArea {
   WATER = 0,

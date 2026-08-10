@@ -250,85 +250,46 @@ DEFS[B.STICK_ITEM] = def({
   hardness: 0, sound: 'wood', colors: [0x8a643a, 0xa67c4a],
 });
 
-const beltDef = (top: number): BlockDef =>
-  def({
-    name: 'Conveyor Belt',
-    top, side: TILES.conveyor_side, bottom: TILES.conveyor_side, icon: top,
-    hardness: 0.8, sound: 'stone',
-    colors: [0x484854, 0x6a6a72, 0xdc8c1e],
-  });
-DEFS[B.CONVEYOR_N] = beltDef(TILES.conveyor_top_n);
-DEFS[B.CONVEYOR_E] = beltDef(TILES.conveyor_top_e);
-DEFS[B.CONVEYOR_S] = beltDef(TILES.conveyor_top_s);
-DEFS[B.CONVEYOR_W] = beltDef(TILES.conveyor_top_w);
+type Dir = [number, number];
+const DIRS: Dir[] = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
-const inserterDef = (top: number): BlockDef =>
-  def({
-    name: 'Inserter',
-    top, side: TILES.inserter_side, bottom: TILES.inserter_side, icon: TILES.inserter_top,
-    hardness: 1.0, sound: 'stone',
-    colors: [0x505058, 0x6a6a72, 0xdc8c1e],
-  });
-DEFS[B.INSERTER_N] = inserterDef(TILES.inserter_top_n);
-DEFS[B.INSERTER_E] = inserterDef(TILES.inserter_top_e);
-DEFS[B.INSERTER_S] = inserterDef(TILES.inserter_top_s);
-DEFS[B.INSERTER_W] = inserterDef(TILES.inserter_top_w);
+const orient = <T>(ids: readonly number[], val: T | ((i: number) => T)): Map<number, T> => {
+  const m = new Map<number, T>();
+  ids.forEach((id, i) => m.set(id, typeof val === 'function' ? (val as (i: number) => T)(i) : val));
+  return m;
+};
 
-export function isInserter(id: number): boolean {
-  return id === B.INSERTER_N || id === B.INSERTER_E || id === B.INSERTER_S || id === B.INSERTER_W;
+const CONV = [B.CONVEYOR_N, B.CONVEYOR_E, B.CONVEYOR_S, B.CONVEYOR_W] as const;
+const INS = [B.INSERTER_N, B.INSERTER_E, B.INSERTER_S, B.INSERTER_W] as const;
+const LM = [B.LASER_MINER_N, B.LASER_MINER_E, B.LASER_MINER_S, B.LASER_MINER_W] as const;
+
+const CONV_TOPS = [TILES.conveyor_top_n, TILES.conveyor_top_e, TILES.conveyor_top_s, TILES.conveyor_top_w];
+const INS_TOPS = [TILES.inserter_top_n, TILES.inserter_top_e, TILES.inserter_top_s, TILES.inserter_top_w];
+
+const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[]): BlockDef =>
+  def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
+
+CONV.forEach((id, i) => {
+  DEFS[id] = machineDef('Conveyor Belt', CONV_TOPS[i], TILES.conveyor_side, 0.8, [0x484854, 0x6a6a72, 0xdc8c1e]);
+});
+INS.forEach((id, i) => {
+  DEFS[id] = machineDef('Inserter', INS_TOPS[i], TILES.inserter_side, 1.0, [0x505058, 0x6a6a72, 0xdc8c1e]);
+});
+{
+  const lm = machineDef('Laser Miner', TILES.furnace_top, TILES.inserter_side, 1.4, [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34]);
+  LM.forEach((id) => { DEFS[id] = lm; });
 }
 
-const laserMinerDef = (): BlockDef =>
-  def({
-    name: 'Laser Miner',
-    top: TILES.furnace_top, side: TILES.inserter_side, bottom: TILES.inserter_side,
-    icon: TILES.furnace_top,
-    hardness: 1.4, sound: 'stone',
-    colors: [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34],
-  });
-DEFS[B.LASER_MINER_N] = laserMinerDef();
-DEFS[B.LASER_MINER_E] = laserMinerDef();
-DEFS[B.LASER_MINER_S] = laserMinerDef();
-DEFS[B.LASER_MINER_W] = laserMinerDef();
+const CONV_DIR = orient(CONV, (i) => DIRS[i]);
+const INS_DIR = orient(INS, (i) => DIRS[i]);
+const LM_DIR = orient(LM, (i) => DIRS[i]);
 
-export function isLaserMiner(id: number): boolean {
-  return id === B.LASER_MINER_N || id === B.LASER_MINER_E ||
-    id === B.LASER_MINER_S || id === B.LASER_MINER_W;
-}
-
-export function laserMinerDir(id: number): [number, number] | null {
-  switch (id) {
-    case B.LASER_MINER_N: return [0, -1];
-    case B.LASER_MINER_E: return [1, 0];
-    case B.LASER_MINER_S: return [0, 1];
-    case B.LASER_MINER_W: return [-1, 0];
-    default: return null;
-  }
-}
-
-export function inserterDir(id: number): [number, number] | null {
-  switch (id) {
-    case B.INSERTER_N: return [0, -1];
-    case B.INSERTER_E: return [1, 0];
-    case B.INSERTER_S: return [0, 1];
-    case B.INSERTER_W: return [-1, 0];
-    default: return null;
-  }
-}
-
-export function isConveyor(id: number): boolean {
-  return id === B.CONVEYOR_N || id === B.CONVEYOR_E || id === B.CONVEYOR_S || id === B.CONVEYOR_W;
-}
-
-export function conveyorDir(id: number): [number, number] | null {
-  switch (id) {
-    case B.CONVEYOR_N: return [0, -1];
-    case B.CONVEYOR_E: return [1, 0];
-    case B.CONVEYOR_S: return [0, 1];
-    case B.CONVEYOR_W: return [-1, 0];
-    default: return null;
-  }
-}
+export const isConveyor = (id: number): boolean => CONV_DIR.has(id);
+export const isInserter = (id: number): boolean => INS_DIR.has(id);
+export const isLaserMiner = (id: number): boolean => LM_DIR.has(id);
+export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;
+export const inserterDir = (id: number): Dir | null => INS_DIR.get(id) ?? null;
+export const laserMinerDir = (id: number): Dir | null => LM_DIR.get(id) ?? null;
 
 export const BUCKET_ID = 100;
 
@@ -383,18 +344,16 @@ export function waterHeight(level: number, falling: boolean): number {
 }
 
 
+const STONE_GROUP = [
+  B.STONE, B.GRAVEL, B.BEDROCK, B.FURNACE, B.COBBLE,
+  ...CONV, ...INS, ...LM,
+];
 const BLOCK_GROUP: Partial<Record<number, string>> = {
-  [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.STONE]: 'stone', [B.SAND]: 'sand',
+  [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.SAND]: 'sand',
   [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.WATER]: 'water', [B.SNOW]: 'snow',
-  [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass', [B.GRAVEL]: 'stone',
-  [B.BEDROCK]: 'stone', [B.CACTUS]: 'cactus', [B.CRAFTING_TABLE]: 'planks',
-  [B.FURNACE]: 'stone', [B.COBBLE]: 'stone',
-  [B.CONVEYOR_N]: 'stone', [B.CONVEYOR_E]: 'stone',
-  [B.CONVEYOR_S]: 'stone', [B.CONVEYOR_W]: 'stone',
-  [B.INSERTER_N]: 'stone', [B.INSERTER_E]: 'stone',
-  [B.INSERTER_S]: 'stone', [B.INSERTER_W]: 'stone',
-  [B.LASER_MINER_N]: 'stone', [B.LASER_MINER_E]: 'stone',
-  [B.LASER_MINER_S]: 'stone', [B.LASER_MINER_W]: 'stone',
+  [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass',
+  [B.CACTUS]: 'cactus', [B.CRAFTING_TABLE]: 'planks',
+  ...Object.fromEntries(STONE_GROUP.map((id) => [id, 'stone'])),
 };
 
 const BASE_COLORS: number[][] = DEFS.map((d) => (d ? d.colors.slice() : []));
@@ -408,10 +367,8 @@ export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
     const m = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
     d.colors = base.map((hex) => {
       if (!m) return hex;
-      const r = Math.max(0, Math.min(255, ((hex >> 16) & 255) * m[0]));
-      const g = Math.max(0, Math.min(255, ((hex >> 8) & 255) * m[1]));
-      const b = Math.max(0, Math.min(255, (hex & 255) * m[2]));
-      return (r << 16) | (g << 8) | b;
+      const ch = (shift: number, f: number) => Math.max(0, Math.min(255, ((hex >> shift) & 255) * f));
+      return (ch(16, m[0]) << 16) | (ch(8, m[1]) << 8) | ch(0, m[2]);
     });
   }
 }

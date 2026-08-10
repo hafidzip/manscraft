@@ -32,129 +32,52 @@ export const RECIPE_GROUPS: RecipeGroup[] = [
   { id: 'redstone', label: 'Machines', icon: B.CONVEYOR },
 ];
 
-const blk = (blockId: number): Ingredient => ({ kind: 'block', blockId });
+const b = (blockId: number): Ingredient => ({ kind: 'block', blockId });
+const out = (blockId: number, count: number): SlotItem => ({ kind: 'block', blockId, count });
+const row = (...cells: (Ingredient | null)[]) => cells;
+const fill = (n: number, ing: Ingredient): (Ingredient | null)[] => Array(n).fill(ing);
+const ring = (edge: Ingredient, center: Ingredient | null = null): (Ingredient | null)[][] => [
+  fill(3, edge), [edge, center, edge], fill(3, edge),
+];
 
 const P = {
-  LOG: blk(B.LOG),
-  PLANK: blk(B.PLANK),
-  SAND: blk(B.SAND),
-  STONE: blk(B.STONE),
-  GLASS: blk(B.GLASS),
-  TABLE: blk(B.CRAFTING_TABLE),
-  LEAVES: blk(B.LEAVES),
-  COBBLE: blk(B.COBBLE),
-  COAL: blk(B.COAL),
-  STICK: blk(B.STICK),
+  LOG: b(B.LOG), PLANK: b(B.PLANK), SAND: b(B.SAND), STONE: b(B.STONE),
+  GLASS: b(B.GLASS), TABLE: b(B.CRAFTING_TABLE), LEAVES: b(B.LEAVES),
+  COBBLE: b(B.COBBLE), COAL: b(B.COAL), STICK: b(B.STICK), DIRT: b(B.DIRT),
 };
 
-const DIRT = blk(B.DIRT);
+const R = (
+  id: string, name: string, grid: 2 | 3, group: RecipeGroupId,
+  shape: { shaped?: (Ingredient | null)[][]; shapeless?: Ingredient[] },
+  output: SlotItem,
+): Recipe => ({ id, name, grid, group, ...shape, output });
 
 export const RECIPES: Recipe[] = [
-  {
-    id: 'planks', name: 'Oak Planks', grid: 2, group: 'building',
-    shapeless: [P.LOG],
-    output: { kind: 'block', blockId: B.PLANK, count: 4 },
-  },
-  {
-    id: 'crafting_table', name: 'Crafting Table', grid: 2, group: 'building',
-    shaped: [
-      [P.PLANK, P.PLANK],
-      [P.PLANK, P.PLANK],
-    ],
-    output: { kind: 'block', blockId: B.CRAFTING_TABLE, count: 1 },
-  },
-  {
-    id: 'furnace', name: 'Furnace', grid: 3, group: 'building',
-    shaped: [
-      [P.COBBLE, P.COBBLE, P.COBBLE],
-      [P.COBBLE, null,     P.COBBLE],
-      [P.COBBLE, P.COBBLE, P.COBBLE],
-    ],
-    output: { kind: 'block', blockId: B.FURNACE, count: 1 },
-  },
-  {
-    id: 'bench', name: 'Reinforced Bench', grid: 3, group: 'building',
-    shaped: [
-      [P.PLANK, P.PLANK, P.PLANK],
-      [P.PLANK, P.LOG,    P.PLANK],
-      [P.PLANK, P.PLANK, P.PLANK],
-    ],
-    output: { kind: 'block', blockId: B.CRAFTING_TABLE, count: 3 },
-  },
-  {
-    id: 'stick', name: 'Sticks', grid: 3, group: 'building',
-    shaped: [
-      [P.PLANK],
-      [P.PLANK],
-    ],
-    output: { kind: 'block', blockId: B.STICK, count: 4 },
-  },
-  {
-    id: 'torch', name: 'Torch', grid: 3, group: 'glass',
-    shaped: [
-      [P.COAL],
-      [P.STICK],
-    ],
-    output: { kind: 'block', blockId: B.TORCH, count: 4 },
-  },
-  {
-    id: 'glass', name: 'Glass', grid: 2, group: 'glass',
-    shaped: [
-      [P.SAND, P.SAND],
-      [P.SAND, P.SAND],
-    ],
-    output: { kind: 'block', blockId: B.GLASS, count: 1 },
-  },
-  {
-    id: 'glass_batch', name: 'Glass Batch', grid: 3, group: 'glass',
-    shaped: [
-      [P.SAND, P.SAND, P.SAND],
-      [P.SAND, P.SAND, P.SAND],
-      [P.SAND, P.SAND, P.SAND],
-    ],
-    output: { kind: 'block', blockId: B.GLASS, count: 4 },
-  },
-  {
-    id: 'compost', name: 'Compost', grid: 2, group: 'nature',
-    shapeless: [P.LEAVES, P.LEAVES, DIRT],
-    output: { kind: 'block', blockId: B.DIRT, count: 2 },
-  },
-  {
-    id: 'mulch', name: 'Leaf Mulch', grid: 3, group: 'nature',
-    shaped: [
-      [P.LEAVES, P.LEAVES, P.LEAVES],
-      [P.LEAVES, DIRT,    P.LEAVES],
-      [P.LEAVES, P.LEAVES, P.LEAVES],
-    ],
-    output: { kind: 'block', blockId: B.DIRT, count: 6 },
-  },
-  {
-    id: 'conveyor', name: 'Conveyor Belt', grid: 3, group: 'redstone',
-    shaped: [
-      [P.STONE,  P.STONE,  P.STONE],
-      [P.STICK,  P.COBBLE, P.STICK],
-      [P.STONE,  P.STONE,  P.STONE],
-    ],
-    output: { kind: 'block', blockId: B.CONVEYOR, count: 6 },
-  },
-  {
-    id: 'inserter', name: 'Inserter', grid: 3, group: 'redstone',
-    shaped: [
-      [null,   P.PLANK, null  ],
-      [P.STICK, P.COBBLE, P.STICK],
-      [P.STICK, null,  P.STICK],
-    ],
-    output: { kind: 'block', blockId: B.INSERTER, count: 2 },
-  },
-  {
-    id: 'laser_miner', name: 'Laser Miner', grid: 3, group: 'redstone',
-    shaped: [
-      [P.GLASS,  P.COAL,   P.GLASS ],
-      [P.STONE,  P.STONE,  P.STONE ],
-      [P.COBBLE, P.COBBLE, P.COBBLE],
-    ],
-    output: { kind: 'block', blockId: B.LASER_MINER, count: 1 },
-  },
+  R('planks', 'Oak Planks', 2, 'building', { shapeless: [P.LOG] }, out(B.PLANK, 4)),
+  R('crafting_table', 'Crafting Table', 2, 'building', {
+    shaped: [row(P.PLANK, P.PLANK), row(P.PLANK, P.PLANK)],
+  }, out(B.CRAFTING_TABLE, 1)),
+  R('furnace', 'Furnace', 3, 'building', { shaped: ring(P.COBBLE) }, out(B.FURNACE, 1)),
+  R('bench', 'Reinforced Bench', 3, 'building', { shaped: ring(P.PLANK, P.LOG) }, out(B.CRAFTING_TABLE, 3)),
+  R('stick', 'Sticks', 3, 'building', { shaped: [[P.PLANK], [P.PLANK]] }, out(B.STICK, 4)),
+  R('torch', 'Torch', 3, 'glass', { shaped: [[P.COAL], [P.STICK]] }, out(B.TORCH, 4)),
+  R('glass', 'Glass', 2, 'glass', {
+    shaped: [row(P.SAND, P.SAND), row(P.SAND, P.SAND)],
+  }, out(B.GLASS, 1)),
+  R('glass_batch', 'Glass Batch', 3, 'glass', {
+    shaped: [fill(3, P.SAND), fill(3, P.SAND), fill(3, P.SAND)],
+  }, out(B.GLASS, 4)),
+  R('compost', 'Compost', 2, 'nature', { shapeless: [P.LEAVES, P.LEAVES, P.DIRT] }, out(B.DIRT, 2)),
+  R('mulch', 'Leaf Mulch', 3, 'nature', { shaped: ring(P.LEAVES, P.DIRT) }, out(B.DIRT, 6)),
+  R('conveyor', 'Conveyor Belt', 3, 'redstone', {
+    shaped: [fill(3, P.STONE), row(P.STICK, P.COBBLE, P.STICK), fill(3, P.STONE)],
+  }, out(B.CONVEYOR, 6)),
+  R('inserter', 'Inserter', 3, 'redstone', {
+    shaped: [row(null, P.PLANK, null), row(P.STICK, P.COBBLE, P.STICK), row(P.STICK, null, P.STICK)],
+  }, out(B.INSERTER, 2)),
+  R('laser_miner', 'Laser Miner', 3, 'redstone', {
+    shaped: [row(P.GLASS, P.COAL, P.GLASS), fill(3, P.STONE), fill(3, P.COBBLE)],
+  }, out(B.LASER_MINER, 1)),
 ];
 
 export function recipeIngredients(r: Recipe): Ingredient[] {

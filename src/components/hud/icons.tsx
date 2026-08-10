@@ -52,39 +52,17 @@ export function WeaponIcon({ id, size = 46 }: { id: string; size?: number }) {
   );
 }
 
-function blockTile(blockId: number): number {
-  switch (blockId) {
-    case B.GRASS: return T.GRASS_SIDE;
-    case B.DIRT: return T.DIRT;
-    case B.STONE: return T.STONE;
-    case B.SAND: return T.SAND;
-    case B.SANDSTONE: return T.SANDSTONE;
-    case B.LOG: return T.LOG_SIDE;
-    case B.LEAVES: return T.LEAVES;
-    case B.CACTUS: return T.CACTUS_SIDE;
-    case B.PLANK: return T.PLANK;
-    case B.ORE: return T.ORE;
-    case B.COBBLE: return T.COBBLE;
-    case B.WOOL: return T.TARGET_WOOL;
-    case B.CRAFTING_TABLE: return T.CRAFT_TOP;
-    case B.GLASS: return T.GLASS;
-    case B.FURNACE: return T.FURNACE;
-    case 50: return T.ORE_RUBY;
-    case 51: return T.ORE_AMBER;
-    case 52: return T.ORE_LUMI;
-    case 53: return T.ORE_DIAMOND;
-    case 54: return T.ORE_GOLD;
-    case 55: return T.ORE_SILVER;
-    case 56: return T.ORE_JADE;
-    case 57: return T.ORE_EMERALD;
-    case B.COAL: return T.COAL;
-    case B.STICK: return T.STICK;
-    case B.TORCH: return T.TORCH;
-    case B.CONVEYOR: return T.CONVEYOR;
-    case B.INSERTER: return T.INSERTER;
-    default: return T.STONE;
-  }
-}
+const BLOCK_TILE: Record<number, number> = {
+  [B.GRASS]: T.GRASS_SIDE, [B.DIRT]: T.DIRT, [B.STONE]: T.STONE, [B.SAND]: T.SAND,
+  [B.SANDSTONE]: T.SANDSTONE, [B.LOG]: T.LOG_SIDE, [B.LEAVES]: T.LEAVES,
+  [B.CACTUS]: T.CACTUS_SIDE, [B.PLANK]: T.PLANK, [B.ORE]: T.ORE, [B.COBBLE]: T.COBBLE,
+  [B.WOOL]: T.TARGET_WOOL, [B.CRAFTING_TABLE]: T.CRAFT_TOP, [B.GLASS]: T.GLASS,
+  [B.FURNACE]: T.FURNACE, [B.COAL]: T.COAL, [B.STICK]: T.STICK, [B.TORCH]: T.TORCH,
+  [B.CONVEYOR]: T.CONVEYOR, [B.INSERTER]: T.INSERTER,
+  50: T.ORE_RUBY, 51: T.ORE_AMBER, 52: T.ORE_LUMI, 53: T.ORE_DIAMOND,
+  54: T.ORE_GOLD, 55: T.ORE_SILVER, 56: T.ORE_JADE, 57: T.ORE_EMERALD,
+};
+const blockTile = (blockId: number): number => BLOCK_TILE[blockId] ?? T.STONE;
 
 export function BlockIcon({ blockId, size = 22 }: { blockId: number; size?: number }) {
   const url = atlasDataUrl();
@@ -142,17 +120,9 @@ export function RenderSlotItem({ item, hovered }: RenderSlotItemProps) {
   if (item.kind === 'weapon') {
     return <div style={{ filter: hot }}><WeaponIcon id={item.weaponId} size={38} /></div>;
   }
-  if (item.kind === 'block') {
-    return (
-      <div className="flex flex-col items-center justify-center relative w-full h-full" style={{ filter: hot }}>
-        <BlockIcon blockId={item.blockId} size={22} />
-        <span className="absolute bottom-0 right-0.5 px-font text-[8px] text-white px-shadow">{item.count}</span>
-      </div>
-    );
-  }
   return (
     <div className="flex flex-col items-center justify-center relative w-full h-full" style={{ filter: hot }}>
-      <DrumstickIcon size={24} />
+      {item.kind === 'block' ? <BlockIcon blockId={item.blockId} size={22} /> : <DrumstickIcon size={24} />}
       <span className="absolute bottom-0 right-0.5 px-font text-[8px] text-white px-shadow">{item.count}</span>
     </div>
   );

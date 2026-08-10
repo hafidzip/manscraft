@@ -33,24 +33,18 @@ export function PlayingHud({ stats, game }: { stats: HudStats; game: () => GameE
                 </div>
                 <div className="px-font text-[7px] px-shadow-sm text-white/45 tracking-widest">HOLD LMB TO CUT</div>
               </>
-            ) : isFoodHud ? (
+            ) : isFoodHud || stats.heldBlockId !== null ? (
               <>
                 <div className="px-font px-shadow text-[26px] leading-none text-white">
                   {stats.ammo}<span className="text-[13px] text-white/50"> x</span>
                 </div>
-                <div className="px-font text-[7px] px-shadow-sm text-[#6dc24a] tracking-widest">RMB — EAT</div>
-              </>
-            ) : stats.heldBlockId !== null ? (
-              <>
-                <div className="px-font px-shadow text-[26px] leading-none text-white">
-                  {stats.ammo}<span className="text-[13px] text-white/50"> x</span>
+                <div className={`px-font text-[7px] px-shadow-sm tracking-widest ${isFoodHud ? 'text-[#6dc24a]' : 'text-[#ffd23e]'}`}>
+                  {isFoodHud ? 'RMB — EAT' : 'RMB — PLACE'}
                 </div>
-                <div className="px-font text-[7px] px-shadow-sm text-[#ffd23e] tracking-widest">RMB — PLACE</div>
               </>
             ) : (
               <div className={`px-font px-shadow text-[26px] leading-none ${lowAmmo ? 'text-[#ff5347]' : 'text-white'}`}>
-                {stats.ammo}
-                <span className="text-[13px] text-white/50"> / {stats.mag}</span>
+                {stats.ammo}<span className="text-[13px] text-white/50"> / {stats.mag}</span>
               </div>
             )}
           </div>

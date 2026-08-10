@@ -967,12 +967,8 @@ export class GameEngine {
       need.set(ing.blockId, (need.get(ing.blockId) ?? 0) + 1);
 
     let possible = times;
-    for (const [bid, per] of need) {
-      let have = 0;
-      for (const arr of [inv.hotbar, inv.mainInv])
-        for (const s of arr) if (s && s.kind === 'block' && s.blockId === bid) have += s.count;
-      possible = Math.min(possible, Math.floor(have / per));
-    }
+    for (const [bid, per] of need)
+      possible = Math.min(possible, Math.floor(inv.countBlock(bid) / per));
     if (possible <= 0) return 0;
 
     const base = recipe.output;

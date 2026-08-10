@@ -69,13 +69,16 @@ export function ScopeOverlay() {
 }
 
 export function Crosshair({ spread }: { spread: number }) {
+  const arms: React.CSSProperties[] = [
+    { width: 2, height: 9, left: -1, top: -(spread + 9) },
+    { width: 2, height: 9, left: -1, top: spread },
+    { width: 9, height: 2, top: -1, left: -(spread + 9) },
+    { width: 9, height: 2, top: -1, left: spread },
+    { width: 2, height: 2, left: -1, top: -1 },
+  ];
   return (
     <div className="absolute left-1/2 top-1/2 z-20 pointer-events-none" style={{ transform: 'translate(-50%,-50%)' }}>
-      <div className="crosshair-line" style={{ width: 2, height: 9, left: -1, top: -(spread + 9) }} />
-      <div className="crosshair-line" style={{ width: 2, height: 9, left: -1, top: spread }} />
-      <div className="crosshair-line" style={{ width: 9, height: 2, top: -1, left: -(spread + 9) }} />
-      <div className="crosshair-line" style={{ width: 9, height: 2, top: -1, left: spread }} />
-      <div className="crosshair-line" style={{ width: 2, height: 2, left: -1, top: -1 }} />
+      {arms.map((s, i) => <div key={i} className="crosshair-line" style={s} />)}
     </div>
   );
 }

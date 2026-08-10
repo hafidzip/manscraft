@@ -191,10 +191,12 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
 
       {locked && (
         <div className="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-          <div className="crosshair-line" style={{ width: 2, height: 6, left: -1, top: -8 }} />
-          <div className="crosshair-line" style={{ width: 2, height: 6, left: -1, top: 2 }} />
-          <div className="crosshair-line" style={{ width: 6, height: 2, top: -1, left: -8 }} />
-          <div className="crosshair-line" style={{ width: 6, height: 2, top: -1, left: 2 }} />
+          {([
+            { width: 2, height: 6, left: -1, top: -8 },
+            { width: 2, height: 6, left: -1, top: 2 },
+            { width: 6, height: 2, top: -1, left: -8 },
+            { width: 6, height: 2, top: -1, left: 2 },
+          ] as const).map((s, i) => <div key={i} className="crosshair-line" style={s} />)}
         </div>
       )}
 
@@ -222,46 +224,35 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {!locked && coldStart && (
+      {!locked && (coldStart || hasLockedOnce) && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
-          style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.75), rgba(3,4,12,0.92))' }}>
-          <div className="px-font text-[10px] text-[#9fd4ff] tracking-[0.35em] px-shadow-sm">// OPEN SPACE</div>
-          <h1 className="px-font px-shadow title-in text-[clamp(26px,5vw,48px)] text-white tracking-[0.12em] mt-3">
-            VOXEL<span className="text-[#9fd4ff]">SKY</span>
-          </h1>
-          <div className="mt-8 mc-panel p-5 grid grid-cols-2 gap-x-10 gap-y-2.5 px-font text-[8px] leading-relaxed text-white/80 pointer-events-auto">
-            <div><span className="text-[#ffd23e]">W/S</span> THRUST</div>
-            <div><span className="text-[#ffd23e]">A/D</span> STRAFE</div>
-            <div><span className="text-[#ffd23e]">SPACE/C</span> UP / DOWN</div>
-            <div><span className="text-[#ff8a5a]">SHIFT</span> BOOST</div>
-            <div><span className="text-[#9fd4ff]">F</span> HYPERJUMP</div>
-            <div><span className="text-[#ffd23e]">TARGET</span> LOCK ON</div>
+          style={{ background: `radial-gradient(ellipse at 50% 35%, rgba(10,16,32,${coldStart ? 0.75 : 0.62}), rgba(3,4,12,${coldStart ? 0.92 : 0.86}))` }}>
+          <div className={`px-font text-[#9fd4ff] tracking-[0.35em] px-shadow-sm ${coldStart ? 'text-[10px]' : 'text-[9px]'}`}>
+            {coldStart ? '// OPEN SPACE' : '// FLIGHT SUSPENDED'}
           </div>
+          {coldStart ? (
+            <h1 className="px-font px-shadow title-in text-[clamp(26px,5vw,48px)] text-white tracking-[0.12em] mt-3">
+              VOXEL<span className="text-[#9fd4ff]">SKY</span>
+            </h1>
+          ) : (
+            <h2 className="px-font px-shadow text-[20px] text-white tracking-[0.14em] mt-2">PAUSED</h2>
+          )}
+          {coldStart && (
+            <div className="mt-8 mc-panel p-5 grid grid-cols-2 gap-x-10 gap-y-2.5 px-font text-[8px] leading-relaxed text-white/80 pointer-events-auto">
+              {([
+                ['W/S', 'THRUST', '#ffd23e'], ['A/D', 'STRAFE', '#ffd23e'],
+                ['SPACE/C', 'UP / DOWN', '#ffd23e'], ['SHIFT', 'BOOST', '#ff8a5a'],
+                ['F', 'HYPERJUMP', '#9fd4ff'], ['TARGET', 'LOCK ON', '#ffd23e'],
+              ] as const).map(([k, v, c]) => (
+                <div key={k}><span style={{ color: c }}>{k}</span> {v}</div>
+              ))}
+            </div>
+          )}
           <button
-            className="mc-btn pointer-events-auto mt-8 px-9 py-3.5 text-[11px] tracking-widest cursor-pointer"
+            className={`mc-btn pointer-events-auto px-9 py-3.5 text-[11px] tracking-widest cursor-pointer ${coldStart ? 'mt-8' : 'mt-7'}`}
             onClick={() => canvasRef.current?.requestPointerLock()}
           >
-            ▶ TAKE CONTROL
-          </button>
-          <button
-            className="pointer-events-auto mt-4 px-font px-shadow-sm text-[8px] text-white/50 hover:text-white cursor-pointer tracking-widest"
-            onClick={exit}
-          >
-            ⬅ RETURN TO PLANET
-          </button>
-        </div>
-      )}
-
-      {!locked && !coldStart && hasLockedOnce && (
-        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
-          style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.62), rgba(3,4,12,0.86))' }}>
-          <div className="px-font text-[9px] text-[#9fd4ff] tracking-[0.35em] px-shadow-sm">// FLIGHT SUSPENDED</div>
-          <h2 className="px-font px-shadow text-[20px] text-white tracking-[0.14em] mt-2">PAUSED</h2>
-          <button
-            className="mc-btn pointer-events-auto mt-7 px-9 py-3.5 text-[11px] tracking-widest cursor-pointer"
-            onClick={() => canvasRef.current?.requestPointerLock()}
-          >
-            ▶ RESUME FLIGHT
+            {coldStart ? '▶ TAKE CONTROL' : '▶ RESUME FLIGHT'}
           </button>
           <button
             className="pointer-events-auto mt-4 px-font px-shadow-sm text-[8px] text-white/50 hover:text-white cursor-pointer tracking-widest"

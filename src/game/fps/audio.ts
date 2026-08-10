@@ -70,15 +70,18 @@ export class AudioSynth {
   }
 
   foley(name: ReloadSfx) {
-    switch (name) {
-      case 'out': this.noise(0.05, 'bandpass', 2600, 2, 0.2); this.tone(700, 0.04, 'square', 0.07); break;
-      case 'in': this.tone(500, 0.05, 'square', 0.12); this.noise(0.06, 'bandpass', 1500, 2, 0.22); break;
-      case 'slap': this.noise(0.07, 'lowpass', 900, 1, 0.3); this.tone(220, 0.06, 'sine', 0.2); break;
-      case 'rack': this.noise(0.06, 'bandpass', 3200, 3, 0.24); this.tone(1300, 0.03, 'square', 0.08); break;
-      case 'snap': this.noise(0.045, 'bandpass', 4000, 3, 0.2); this.tone(1900, 0.025, 'square', 0.09); break;
-      case 'grab': this.noise(0.08, 'lowpass', 1400, 1, 0.14); break;
-      case 'twist': this.noise(0.1, 'bandpass', 2100, 4, 0.16); this.tone(950, 0.06, 'square', 0.06, 1400); break;
-    }
+    const n = (d: number, t: BiquadFilterType, f: number, q: number, g: number) => this.noise(d, t, f, q, g);
+    const o = (f: number, d: number, t: OscillatorType, g: number, slide?: number) => this.tone(f, d, t, g, slide);
+    const table: Record<ReloadSfx, () => void> = {
+      out:   () => { n(0.05, 'bandpass', 2600, 2, 0.2); o(700, 0.04, 'square', 0.07); },
+      in:    () => { o(500, 0.05, 'square', 0.12); n(0.06, 'bandpass', 1500, 2, 0.22); },
+      slap:  () => { n(0.07, 'lowpass', 900, 1, 0.3); o(220, 0.06, 'sine', 0.2); },
+      rack:  () => { n(0.06, 'bandpass', 3200, 3, 0.24); o(1300, 0.03, 'square', 0.08); },
+      snap:  () => { n(0.045, 'bandpass', 4000, 3, 0.2); o(1900, 0.025, 'square', 0.09); },
+      grab:  () => n(0.08, 'lowpass', 1400, 1, 0.14),
+      twist: () => { n(0.1, 'bandpass', 2100, 4, 0.16); o(950, 0.06, 'square', 0.06, 1400); },
+    };
+    table[name]();
   }
 
   boltClang() { this.foley('rack'); }

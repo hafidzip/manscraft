@@ -44,11 +44,9 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
   };
 
   const fillRecipe = (r: Recipe) => {
-    const g = game();
-    if (!g) return;
+    if (!game()) return;
     if (r.grid === 3 && !inv.setCraftSize(3)) return;
     const size = inv.craftSize;
-
     const need: (number | null)[] = Array(size * size).fill(null);
     if (r.shaped) {
       const off = Math.floor((size - r.shaped.length) / 2);
@@ -61,32 +59,26 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
 
     const req = new Map<number, number>();
     for (const id of need) if (id != null) req.set(id, (req.get(id) ?? 0) + 1);
-    const avail = new Map<number, number>();
-    for (const arr of [inv.hotbar, inv.mainInv]) for (const s of arr)
-      if (s && s.kind === 'block') avail.set(s.blockId, (avail.get(s.blockId) ?? 0) + s.count);
-    for (const [id, n] of req) if ((avail.get(id) ?? 0) < n) return;
+    for (const [id, n] of req) if (inv.countBlock(id) < n) return;
 
     for (let i = 0; i < size * size; i++) {
       const it = inv.craft[i];
-      if (it) {
-        if (!inv.addItem(it)) { inv.craft[i] = it; return; }
-        inv.craft[i] = null;
-      }
+      if (!it) continue;
+      if (!inv.addItem(it)) { inv.craft[i] = it; return; }
+      inv.craft[i] = null;
     }
     for (let i = 0; i < size * size; i++) {
       const id = need[i];
       if (id == null) continue;
-      for (const arr of [inv.hotbar, inv.mainInv]) {
+      outer: for (const arr of [inv.hotbar, inv.mainInv]) {
         for (let k = 0; k < arr.length; k++) {
           const s = arr[k];
-          if (s && s.kind === 'block' && s.blockId === id && s.count > 0) {
-            s.count -= 1;
-            if (s.count <= 0) arr[k] = null;
+          if (s?.kind === 'block' && s.blockId === id && s.count > 0) {
+            if (--s.count <= 0) arr[k] = null;
             inv.craft[i] = { kind: 'block', blockId: id, count: 1 };
-            break;
+            break outer;
           }
         }
-        if (inv.craft[i]) break;
       }
     }
     refreshInv();
@@ -106,16 +98,12 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
           </div>
           <div className="flex items-center gap-3 justify-center">
             <div className="grid grid-cols-2 gap-1.5">
-              {[0,1,2,3].map((i) => {
+              {[0, 1, 2, 3].map((i) => {
                 const ref: SlotRef = { isHotbar: false, index: i, isCraft: true };
                 const p = slotProps(ref);
                 return (
-                  <div key={i} draggable={p.draggable}
-                    className={`${p.className} w-[44px] h-[44px]`}
-                    onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
-                    onDragOver={p.onDragOver} onDrop={p.onDrop}
-                    onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
-                    <RenderSlotItem item={pocketCells[i] ?? null} hovered={!!hoverSlot && !!hoverSlot.isCraft && hoverSlot.index === i} />
+                  <div key={i} {...p} className={`${p.className} w-[44px] h-[44px]`}>
+                    <RenderSlotItem item={pocketCells[i] ?? null} hovered={!!hoverSlot?.isCraft && hoverSlot.index === i} />
                   </div>
                 );
               })}
@@ -184,14 +172,9 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
             <div className="px-font text-[7px] text-white/40">STORAGE</div>
             <div className="grid grid-cols-9 gap-1.5">
               {(game()?.inventory.mainInv ?? Array(27).fill(null)).map((item, i) => {
-                const ref: SlotRef = { isHotbar: false, index: i };
-                const p = slotProps(ref);
+                const p = slotProps({ isHotbar: false, index: i });
                 return (
-                  <div key={i} draggable={p.draggable}
-                    className={`${p.className} w-[44px] h-[44px]`}
-                    onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
-                    onDragOver={p.onDragOver} onDrop={p.onDrop}
-                    onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
+                  <div key={i} {...p} className={`${p.className} w-[44px] h-[44px]`}>
                     <RenderSlotItem item={item} hovered={!!hoverSlot && !hoverSlot.isHotbar && !hoverSlot.isCraft && hoverSlot.index === i} />
                   </div>
                 );
@@ -202,16 +185,11 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
             <div className="px-font text-[7px] text-[#ffd23e]">HOTBAR</div>
             <div className="grid grid-cols-6 gap-1.5">
               {(game()?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => {
-                const ref: SlotRef = { isHotbar: true, index: i };
-                const p = slotProps(ref);
+                const p = slotProps({ isHotbar: true, index: i });
                 return (
-                  <div key={i} draggable={p.draggable}
-                    className={`${p.className} w-[44px] h-[44px] ${stats.slot === i ? '!outline-[#ffd23e]' : ''}`}
-                    onClick={p.onClick} onDragStart={p.onDragStart} onDragEnd={p.onDragEnd}
-                    onDragOver={p.onDragOver} onDrop={p.onDrop}
-                    onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
-                    <span className="absolute top-0.5 left-1 px-font text-[6px] text-white/35">{i+1}</span>
-                    <RenderSlotItem item={item} hovered={!!hoverSlot && hoverSlot.isHotbar && !hoverSlot.isCraft && hoverSlot.index === i} />
+                  <div key={i} {...p} className={`${p.className} w-[44px] h-[44px] ${stats.slot === i ? '!outline-[#ffd23e]' : ''}`}>
+                    <span className="absolute top-0.5 left-1 px-font text-[6px] text-white/35">{i + 1}</span>
+                    <RenderSlotItem item={item} hovered={!!hoverSlot?.isHotbar && !hoverSlot.isCraft && hoverSlot.index === i} />
                   </div>
                 );
               })}

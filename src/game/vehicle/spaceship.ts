@@ -1,10 +1,11 @@
 
 import * as THREE from 'three';
-import { buildInstanced, type Part } from '../vfx/laserTool';
+import { buildInstanced } from '../vfx/laserTool';
 import type { Particles } from '../vfx/particles';
 import type { World } from '../world/world';
 import type { TerrainGenerator } from '../world/generator';
 import type { SoundEngine } from '../audio/sound';
+import { HULL_PARTS, GLOW_PARTS } from './hullParts';
 
 export interface FlightInput {
   forward: boolean;
@@ -15,50 +16,7 @@ export interface FlightInput {
   down: boolean;
 }
 
-
-const STEEL = 0x9aa4ae;
-const STEEL_HI = 0xc9d1d9;
-const HULL_DARK = 0x39404a;
-const HAZARD = 0xe0a53c;
-const CANOPY = 0x4fd8ec;
-const GLOW = 0xffffff;
-
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
-
-const HULL_PARTS: Part[] = [
-  { x: 0, y: 1.0, z: -0.2, w: 1.6, h: 0.9, d: 5.2, c: STEEL },
-  { x: 0, y: 1.05, z: -3.1, w: 1.4, h: 0.7, d: 1.1, c: STEEL_HI },
-  { x: 0, y: 1.0, z: -3.9, w: 0.85, h: 0.55, d: 0.8, c: STEEL_HI },
-  { x: 0, y: 0.55, z: 0.1, w: 1.1, h: 0.5, d: 3.6, c: HULL_DARK },
-  { x: 0, y: 1.56, z: -1.35, w: 1.5, h: 0.45, d: 1.5, c: HULL_DARK },
-  { x: -1.95, y: 0.92, z: 0.3, w: 2.4, h: 0.26, d: 1.7, c: STEEL },
-  { x: -3.15, y: 0.92, z: 1.05, w: 1.5, h: 0.24, d: 1.0, c: STEEL_HI },
-  { x: 1.95, y: 0.92, z: 0.3, w: 2.4, h: 0.26, d: 1.7, c: STEEL },
-  { x: 3.15, y: 0.92, z: 1.05, w: 1.5, h: 0.24, d: 1.0, c: STEEL_HI },
-  { x: -2.9, y: 1.08, z: 0.15, w: 0.9, h: 0.12, d: 0.9, c: HAZARD },
-  { x: 2.9, y: 1.08, z: 0.15, w: 0.9, h: 0.12, d: 0.9, c: HAZARD },
-  { x: 0, y: 1.85, z: 1.95, w: 0.24, h: 1.5, d: 1.1, c: STEEL },
-  { x: 0, y: 2.4, z: 2.15, w: 0.24, h: 0.5, d: 0.6, c: HAZARD },
-  { x: -1.15, y: 0.95, z: 2.35, w: 0.95, h: 0.85, d: 1.7, c: HULL_DARK },
-  { x: 1.15, y: 0.95, z: 2.35, w: 0.95, h: 0.85, d: 1.7, c: HULL_DARK },
-  { x: 0, y: 0.9, z: 2.85, w: 1.2, h: 0.95, d: 1.0, c: HULL_DARK },
-  { x: -1.35, y: 0.25, z: -0.9, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
-  { x: 1.35, y: 0.25, z: -0.9, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
-  { x: -1.35, y: 0.25, z: 1.3, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
-  { x: 1.35, y: 0.25, z: 1.3, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
-  { x: -1.35, y: -0.02, z: -0.9, w: 0.34, h: 0.08, d: 0.34, c: STEEL_HI },
-  { x: 1.35, y: -0.02, z: -0.9, w: 0.34, h: 0.08, d: 0.34, c: STEEL_HI },
-  { x: -1.35, y: -0.02, z: 1.3, w: 0.34, h: 0.08, d: 0.34, c: STEEL_HI },
-  { x: 1.35, y: -0.02, z: 1.3, w: 0.34, h: 0.08, d: 0.34, c: STEEL_HI },
-];
-
-const GLOW_PARTS: Part[] = [
-  { x: 0, y: 1.62, z: -1.45, w: 1.1, h: 0.34, d: 1.0, c: CANOPY },
-  { x: -1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW },
-  { x: 1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW },
-  { x: 0, y: 0.9, z: 3.42, w: 0.85, h: 0.6, d: 0.2, c: GLOW },
-  { x: 0, y: 0.5, z: -2.2, w: 0.9, h: 0.12, d: 0.9, c: 0x6f8fd0 },
-];
 
 const MAX_SPEED = 28;
 const MAX_VSPEED = 13;

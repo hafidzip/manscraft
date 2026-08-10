@@ -116,26 +116,21 @@ export class Spring3 {
   vel = new THREE.Vector3();
   constructor(public k = 220, public d = 16) {}
   update(dt: number): THREE.Vector3 {
-    const fx = -this.v.x * this.k - this.vel.x * this.d;
-    const fy = -this.v.y * this.k - this.vel.y * this.d;
-    const fz = -this.v.z * this.k - this.vel.z * this.d;
-    this.vel.x += fx * dt; this.vel.y += fy * dt; this.vel.z += fz * dt;
+    this.vel.x += (-this.v.x * this.k - this.vel.x * this.d) * dt;
+    this.vel.y += (-this.v.y * this.k - this.vel.y * this.d) * dt;
+    this.vel.z += (-this.v.z * this.k - this.vel.z * this.d) * dt;
     this.v.x += this.vel.x * dt; this.v.y += this.vel.y * dt; this.v.z += this.vel.z * dt;
     return this.v;
   }
-  impulse(x: number, y: number, z: number) {
-    this.vel.x += x; this.vel.y += y; this.vel.z += z;
-  }
+  impulse(x: number, y: number, z: number) { this.vel.x += x; this.vel.y += y; this.vel.z += z; }
 }
 
 export class Spring1 {
   v = 0; vel = 0;
   constructor(public k = 200, public d = 14, public target = 0) {}
   update(dt: number): number {
-    const f = (this.target - this.v) * this.k - this.vel * this.d;
-    this.vel += f * dt;
-    this.v += this.vel * dt;
-    return this.v;
+    this.vel += ((this.target - this.v) * this.k - this.vel * this.d) * dt;
+    return (this.v += this.vel * dt);
   }
   impulse(i: number) { this.vel += i; }
 }

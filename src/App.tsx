@@ -65,17 +65,19 @@ export default function App() {
     [key],
   );
 
-  const enterSpace = useCallback((h: PlanetHome, snapshot?: string | null) => {
-    armTransition(snapshot, '▲ BREAKING ATMOSPHERE', '#9fd4ff');
+  const switchMode = useCallback((next: Mode, h: PlanetHome, snapshot: string | null | undefined, label: string, accent: string) => {
+    armTransition(snapshot, label, accent);
     setHome(h);
-    setMode('space');
+    setMode(next);
   }, []);
 
+  const enterSpace = useCallback((h: PlanetHome, snapshot?: string | null) => {
+    switchMode('space', h, snapshot, '▲ BREAKING ATMOSPHERE', '#9fd4ff');
+  }, [switchMode]);
+
   const land = useCallback((h: PlanetHome, snapshot?: string | null) => {
-    armTransition(snapshot, '▼ MATERIALIZING SURFACE', '#ffd23e');
-    setHome(h);
-    setMode('craft');
-  }, []);
+    switchMode('craft', h, snapshot, '▼ MATERIALIZING SURFACE', '#ffd23e');
+  }, [switchMode]);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black">

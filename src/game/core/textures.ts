@@ -34,23 +34,20 @@ export const ATLAS_H = ATLAS_ROWS * TILE;
 
 
 type RGB = readonly [number, number, number];
+const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
+const rgb = (r: number, g: number, b: number): RGB => [clampByte(r), clampByte(g), clampByte(b)] as const;
+const map3 = (base: RGB, f: (c: number, i: number) => number): RGB =>
+  rgb(f(base[0], 0), f(base[1], 1), f(base[2], 2));
 
 function put(d: Uint8ClampedArray, w: number, x: number, y: number, c: RGB, a = 255): void {
   const i = (y * w + x) * 4;
-  d[i] = c[0];
-  d[i + 1] = c[1];
-  d[i + 2] = c[2];
-  d[i + 3] = a;
+  d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = a;
 }
 
-function vary(base: RGB, amt: number, r: () => number): RGB {
+const vary = (base: RGB, amt: number, r: () => number): RGB => {
   const v = Math.floor((r() * 2 - 1) * amt);
-  return [
-    Math.max(0, Math.min(255, base[0] + v)),
-    Math.max(0, Math.min(255, base[1] + v)),
-    Math.max(0, Math.min(255, base[2] + v)),
-  ] as const;
-}
+  return map3(base, (c) => c + v);
+};
 
 
 function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RGB {
@@ -99,22 +96,14 @@ export type TintMap = Record<string, RGB>;
 const TINT_STRENGTH = 0.85;
 const clampMul = (v: number) => Math.max(0.22, Math.min(2.4, v));
 
+const GROUP_H: Record<string, number> = {
+  grass: 0.14, leaves: 0.22, dirt: 0.08, sand: 0.04, stone: 0.5,
+  log: 0.3, planks: 0.36, water: -0.2, cactus: 0.18,
+};
 function targetFor(group: string, theme: PlanetTheme): RGB {
   const pal = PLANET_PALETTES[theme.type];
-  const s = pal.stops;
-  switch (group) {
-    case 'grass':   return rampAt(s, 0.14);
-    case 'leaves':  return rampAt(s, 0.22);
-    case 'dirt':    return rampAt(s, 0.08);
-    case 'sand':    return rampAt(s, 0.04);
-    case 'stone':   return rampAt(s, 0.5);
-    case 'log':     return rampAt(s, 0.3);
-    case 'planks':  return rampAt(s, 0.36);
-    case 'snow':    return pal.pole as unknown as RGB;
-    case 'water':   return rampAt(s, -0.2);
-    case 'cactus':  return rampAt(s, 0.18);
-    default:        return rampAt(s, 0.12);
-  }
+  if (group === 'snow') return pal.pole as unknown as RGB;
+  return rampAt(pal.stops, GROUP_H[group] ?? 0.12);
 }
 
 export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
@@ -145,9 +134,9 @@ function tintTile(img: ImageData, tile: number, m: RGB): void {
     for (let x = 0; x < TILE; x++) {
       const i = ((oy + y) * img.width + ox + x) * 4;
       if (d[i + 3] === 0) continue;
-      d[i] = Math.max(0, Math.min(255, d[i] * m[0]));
-      d[i + 1] = Math.max(0, Math.min(255, d[i + 1] * m[1]));
-      d[i + 2] = Math.max(0, Math.min(255, d[i + 2] * m[2]));
+      d[i] = clampByte(d[i] * m[0]);
+      d[i + 1] = clampByte(d[i + 1] * m[1]);
+      d[i + 2] = clampByte(d[i + 2] * m[2]);
     }
   }
 }
@@ -172,19 +161,10 @@ type Painter = (img: ImageData, r: () => number) => void;
 
 const GRASS_BASE: RGB = [96, 162, 54];
 
-function shadeMul(base: RGB, f: number): RGB {
-  return [
-    Math.max(0, Math.min(255, Math.floor(base[0] * f))),
-    Math.max(0, Math.min(255, Math.floor(base[1] * f))),
-    Math.max(0, Math.min(255, Math.floor(base[2] * f))),
-  ] as const;
-}
+const shadeMul = (base: RGB, f: number): RGB => map3(base, (c) => Math.floor(c * f));
 
 const paintDirt: Painter = (img, r) =>
-  tileRegion(img, TILES.dirt, () => {
-    const c = vary([121, 85, 58], 20, r);
-    return r() < 0.08 ? vary([88, 62, 42], 10, r) : c;
-  });
+  tileRegion(img, TILES.dirt, () => (r() < 0.08 ? vary([88, 62, 42], 10, r) : vary([121, 85, 58], 20, r)));
 
 function pixelHash(x: number, y: number, salt: number): number {
   let h = Math.imul(x + 0x9e37, 0x85ebca6b) ^ Math.imul(y + 0x1b87, 0xc2b2ae35) ^ salt;
@@ -192,14 +172,10 @@ function pixelHash(x: number, y: number, salt: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-function varyH(base: RGB, amt: number, h: number): RGB {
+const varyH = (base: RGB, amt: number, h: number): RGB => {
   const v = Math.floor((h * 2 - 1) * amt);
-  return [
-    Math.max(0, Math.min(255, base[0] + v)),
-    Math.max(0, Math.min(255, base[1] + v)),
-    Math.max(0, Math.min(255, base[2] + v)),
-  ] as const;
-}
+  return map3(base, (c) => c + v);
+};
 
 function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number): void {
   const N = TILE;

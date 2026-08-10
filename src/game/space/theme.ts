@@ -25,43 +25,25 @@ export interface PlanetHome {
   planet: PlanetSpec;
 }
 
-const PLAINS = Biome.PLAINS;
-const FOREST = Biome.FOREST;
-const DESERT = Biome.DESERT;
-const SNOW = Biome.SNOW;
-const MOUNT = Biome.MOUNTAINS;
+interface Rule { biome: Biome; sea: number; hillAmp: number; sky?: number; lava?: boolean }
 
-interface Rule {
-  biome: Biome;
-  sea: number;
-  hillAmp: number;
-  sky?: number;
-  lava?: boolean;
-}
+const R = (biome: Biome, sea: number, hillAmp: number, sky?: number, lava?: boolean): Rule =>
+  ({ biome, sea, hillAmp, sky, lava });
 
 const RULES: Record<PlanetType, Rule> = {
-  terran:      { biome: PLAINS, sea:   0, hillAmp: 1.00 },
-  ocean:       { biome: PLAINS, sea: +10, hillAmp: 0.70, sky: 0x6fd6f0 },
-  desert:      { biome: DESERT, sea: -24, hillAmp: 1.25, sky: 0xf0b070 },
-  ice:         { biome: SNOW,   sea:  -2, hillAmp: 0.95, sky: 0xcdeaff },
-  oceanic_ice: { biome: SNOW,   sea:  +8, hillAmp: 0.60, sky: 0xa8d8f0 },
-  volcanic:    { biome: MOUNT,  sea:  -8, hillAmp: 1.55, sky: 0x53221a, lava: true },
-  lava:        { biome: MOUNT,  sea:  +4, hillAmp: 1.35, sky: 0x7a1f10, lava: true },
-  barren:      { biome: MOUNT,  sea: -30, hillAmp: 1.15, sky: 0x1b1c22 },
-  alien:       { biome: FOREST, sea:  -2, hillAmp: 1.20, sky: 0x9d5cff },
-  jungle:      { biome: FOREST, sea:  +3, hillAmp: 1.05, sky: 0x7fe0b0 },
-  savanna:     { biome: PLAINS, sea:  -9, hillAmp: 0.85, sky: 0xe8c070 },
-  tundra:      { biome: SNOW,   sea:  -4, hillAmp: 0.75, sky: 0xa9c4d8 },
-  crimson:     { biome: DESERT, sea: -18, hillAmp: 1.30, sky: 0xc0402f },
-  neon:        { biome: FOREST, sea:  -6, hillAmp: 1.40, sky: 0x25f0d0 },
+  terran: R(Biome.PLAINS, 0, 1), ocean: R(Biome.PLAINS, 10, 0.7, 0x6fd6f0),
+  desert: R(Biome.DESERT, -24, 1.25, 0xf0b070), ice: R(Biome.SNOW, -2, 0.95, 0xcdeaff),
+  oceanic_ice: R(Biome.SNOW, 8, 0.6, 0xa8d8f0), volcanic: R(Biome.MOUNTAINS, -8, 1.55, 0x53221a, true),
+  lava: R(Biome.MOUNTAINS, 4, 1.35, 0x7a1f10, true), barren: R(Biome.MOUNTAINS, -30, 1.15, 0x1b1c22),
+  alien: R(Biome.FOREST, -2, 1.2, 0x9d5cff), jungle: R(Biome.FOREST, 3, 1.05, 0x7fe0b0),
+  savanna: R(Biome.PLAINS, -9, 0.85, 0xe8c070), tundra: R(Biome.SNOW, -4, 0.75, 0xa9c4d8),
+  crimson: R(Biome.DESERT, -18, 1.3, 0xc0402f), neon: R(Biome.FOREST, -6, 1.4, 0x25f0d0),
 };
 
-function skyFromAtmo(hex: number): number {
-  const r = Math.min(255, Math.round(((hex >> 16) & 255) * 0.72 + 46));
-  const g = Math.min(255, Math.round(((hex >> 8) & 255) * 0.72 + 52));
-  const b = Math.min(255, Math.round((hex & 255) * 0.78 + 60));
-  return (r << 16) | (g << 8) | b;
-}
+const skyFromAtmo = (hex: number): number => {
+  const ch = (s: number, m: number, a: number) => Math.min(255, Math.round(((hex >> s) & 255) * m + a));
+  return (ch(16, 0.72, 46) << 16) | (ch(8, 0.72, 52) << 8) | ch(0, 0.78, 60);
+};
 
 export function themeFromPalette(pal: PlanetPalette, seed: bigint): PlanetTheme {
   const rule = RULES[pal.key] ?? RULES.terran;

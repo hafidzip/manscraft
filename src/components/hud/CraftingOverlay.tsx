@@ -20,12 +20,7 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
   const list = RECIPES.filter((r) => r.group === activeGroup.id);
   const sel: Recipe | null = list.find((r) => r.id === bookSel) ?? list[0] ?? null;
 
-  const countOf = (id: number) => {
-    let n = 0;
-    for (const arr of [inv.hotbar, inv.mainInv])
-      for (const s of arr) if (s && s.kind === 'block' && s.blockId === id) n += s.count;
-    return n;
-  };
+  const countOf = (id: number) => inv.countBlock(id);
   const needMap = new Map<number, number>();
   if (sel) for (const ing of recipeIngredients(sel))
     needMap.set(ing.blockId, (needMap.get(ing.blockId) ?? 0) + 1);
@@ -106,15 +101,12 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
                 for (const ing of rNeeds) reqMap.set(ing.blockId, (reqMap.get(ing.blockId) ?? 0) + 1);
                 let can = 64;
                 for (const [id, n] of reqMap) can = Math.min(can, Math.floor(countOf(id) / n));
+                const outId = (r.output as { blockId?: number }).blockId ?? 1;
                 return (
-                  <button
-                    key={r.id}
-                    title={r.name}
-                    onClick={() => setBookSel(r.id)}
+                  <button key={r.id} title={r.name} onClick={() => setBookSel(r.id)}
                     className={`mc-book-slot mc-book-slot-hoverable w-[46px] h-[46px] flex items-center justify-center cursor-pointer
-                      ${sel?.id === r.id ? 'mc-book-picked' : ''} ${can <= 0 ? 'opacity-45' : ''}`}
-                  >
-                    <BlockIcon blockId={(r.output as { blockId?: number }).blockId ?? 1} size={28} />
+                      ${sel?.id === r.id ? 'mc-book-picked' : ''} ${can <= 0 ? 'opacity-45' : ''}`}>
+                    <BlockIcon blockId={outId} size={28} />
                   </button>
                 );
               })}

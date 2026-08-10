@@ -1,22 +1,23 @@
-import { TimelineDef, Key } from './anim';
-import { deg } from './anim';
+import { TimelineDef, Key, deg } from './anim';
 
 export interface ReloadCtx {
-  hideMag(): void;
-  showMag(): void;
-  showMagHand(): void;
-  hideMagHand(): void;
-  dropMag(): void;
-  showWarhead(): void;
-  hideWarheadHand(): void;
-  showWarheadHand(): void;
-  ejectShell(): void;
+  hideMag(): void; showMag(): void; showMagHand(): void; hideMagHand(): void; dropMag(): void;
+  showWarhead(): void; hideWarheadHand(): void; showWarheadHand(): void; ejectShell(): void;
   sfx(name: 'out' | 'in' | 'rack' | 'snap' | 'slap' | 'grab' | 'twist'): void;
 }
 
 type Ctx = ReloadCtx;
-
 const k = (t: number, p?: [number, number, number], r?: [number, number, number], e: Key['e'] = 'smooth'): Key => ({ t, p, r, e });
+
+const magEvents = (ctx: Ctx, t: { out: number; drop: number; grab: number; seat: number; slap: number; rack: number; snap: number }) => [
+  { t: t.out, fn: () => ctx.sfx('out') },
+  { t: t.drop, fn: () => { ctx.hideMag(); ctx.dropMag(); } },
+  { t: t.grab, fn: () => { ctx.sfx('grab'); ctx.showMagHand(); } },
+  { t: t.seat, fn: () => { ctx.sfx('in'); ctx.showMag(); ctx.hideMagHand(); } },
+  { t: t.slap, fn: () => ctx.sfx('slap') },
+  { t: t.rack, fn: () => ctx.sfx('rack') },
+  { t: t.snap, fn: () => ctx.sfx('snap') },
+];
 
 const MAG_REST: Record<string, { p: [number, number, number]; r: [number, number, number] }> = {
   handgun: { p: [0, -0.09, 0.052], r: [deg(-14), 0, 0] },
@@ -93,15 +94,7 @@ function handgun(ctx: Ctx): TimelineDef {
         k(1.64, [0, 0.032, -0.015], undefined, 'snap'),
       ]},
     ],
-    events: [
-      { t: 0.22, fn: () => ctx.sfx('out') },
-      { t: 0.56, fn: () => { ctx.hideMag(); ctx.dropMag(); } },
-      { t: 0.6, fn: () => { ctx.sfx('grab'); ctx.showMagHand(); } },
-      { t: SEAT, fn: () => { ctx.sfx('in'); ctx.showMag(); ctx.hideMagHand(); } },
-      { t: 1.32, fn: () => ctx.sfx('slap') },
-      { t: 1.54, fn: () => ctx.sfx('rack') },
-      { t: 1.64, fn: () => ctx.sfx('snap') },
-    ],
+    events: magEvents(ctx, { out: 0.22, drop: 0.56, grab: 0.6, seat: SEAT, slap: 1.32, rack: 1.54, snap: 1.64 }),
   };
 }
 
@@ -150,15 +143,7 @@ function smg(ctx: Ctx): TimelineDef {
         k(1.94, [-0.032, 0.02, -0.2], undefined, 'snap'),
       ]},
     ],
-    events: [
-      { t: 0.3, fn: () => ctx.sfx('out') },
-      { t: 0.73, fn: () => { ctx.hideMag(); ctx.dropMag(); } },
-      { t: 0.9, fn: () => { ctx.sfx('grab'); ctx.showMagHand(); } },
-      { t: SEAT, fn: () => { ctx.sfx('in'); ctx.showMag(); ctx.hideMagHand(); } },
-      { t: 1.62, fn: () => ctx.sfx('slap') },
-      { t: 1.86, fn: () => ctx.sfx('rack') },
-      { t: 1.94, fn: () => ctx.sfx('snap') },
-    ],
+    events: magEvents(ctx, { out: 0.3, drop: 0.73, grab: 0.9, seat: SEAT, slap: 1.62, rack: 1.86, snap: 1.94 }),
   };
 }
 
@@ -208,15 +193,7 @@ function rifle(ctx: Ctx): TimelineDef {
         k(2.05, [0, 0.048, 0.085], undefined, 'snap'),
       ]},
     ],
-    events: [
-      { t: 0.32, fn: () => ctx.sfx('out') },
-      { t: 0.73, fn: () => { ctx.hideMag(); ctx.dropMag(); } },
-      { t: 0.92, fn: () => { ctx.sfx('grab'); ctx.showMagHand(); } },
-      { t: SEAT, fn: () => { ctx.sfx('in'); ctx.showMag(); ctx.hideMagHand(); } },
-      { t: 1.62, fn: () => ctx.sfx('slap') },
-      { t: 1.95, fn: () => ctx.sfx('rack') },
-      { t: 2.05, fn: () => ctx.sfx('snap') },
-    ],
+    events: magEvents(ctx, { out: 0.32, drop: 0.73, grab: 0.92, seat: SEAT, slap: 1.62, rack: 1.95, snap: 2.05 }),
   };
 }
 

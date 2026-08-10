@@ -95,27 +95,24 @@ export function FurnaceOverlay({ game, stats, refreshInv }: {
             <span className="px-font text-[6px] text-[#6dc24a]">■ SMELTABLE</span>
             <span className="px-font text-[6px] text-[#ff8b4e]">■ FUEL</span>
           </div>
-          <div className="grid grid-cols-9 gap-[3px] mb-2">
-            {inv.mainInv.map((item, i) => (
-              <button key={i} onClick={quickMove(false, i)}
-                title={item && item.kind === 'block' ? (smeltResult(item.blockId) ? 'Click: smelt' : isFuel(item.blockId) ? 'Click: use as fuel' : undefined) : undefined}
-                className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${slotClass(item)}`}>
-                {item && <RenderSlotItem item={item} />}
-              </button>
-            ))}
-          </div>
-          <div className="grid grid-cols-9 gap-[3px] pt-2 border-t border-white/10">
-            {inv.hotbar.map((item, i) => (
-              <button key={i} onClick={quickMove(true, i)}
-                title={item && item.kind === 'block' ? (smeltResult(item.blockId) ? 'Click: smelt' : isFuel(item.blockId) ? 'Click: use as fuel' : undefined) : undefined}
-                className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${slotClass(item)} ${stats.slot === i ? 'mc-book-picked' : ''}`}>
-                {item && <RenderSlotItem item={item} />}
-              </button>
-            ))}
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={`f${i}`} className="mc-book-slot w-[46px] h-[40px] opacity-60" />
-            ))}
-          </div>
+          {([[false, inv.mainInv, 'mb-2'], [true, inv.hotbar, 'pt-2 border-t border-white/10']] as const).map(([isHot, arr, cls], row) => (
+            <div key={row} className={`grid grid-cols-9 gap-[3px] ${cls}`}>
+              {arr.map((item, i) => {
+                const tip = item?.kind === 'block'
+                  ? (smeltResult(item.blockId) ? 'Click: smelt' : isFuel(item.blockId) ? 'Click: use as fuel' : undefined)
+                  : undefined;
+                return (
+                  <button key={i} onClick={quickMove(isHot, i)} title={tip}
+                    className={`mc-book-slot w-[46px] h-[40px] flex items-center justify-center ${slotClass(item)} ${isHot && stats.slot === i ? 'mc-book-picked' : ''}`}>
+                    {item && <RenderSlotItem item={item} />}
+                  </button>
+                );
+              })}
+              {isHot && Array.from({ length: 3 }, (_, i) => (
+                <div key={`f${i}`} className="mc-book-slot w-[46px] h-[40px] opacity-60" />
+              ))}
+            </div>
+          ))}
         </div>
 
         <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">

@@ -251,29 +251,17 @@ export interface FbmOpts {
   lacunarity?: number;
 }
 
-export function fbm(src: Periodic2, x: number, z: number, o: FbmOpts): number {
-  const gain = o.gain ?? 0.5;
-  const lac = o.lacunarity ?? 2;
-  let wl = o.wavelength, amp = 1, sum = 0, norm = 0;
-  for (let i = 0; i < o.octaves; i++) {
-    sum += amp * src.at(x, z, wl);
-    norm += amp;
-    amp *= gain;
-    wl /= lac;
-  }
-  return sum / norm;
-}
-
-export function ridged(src: Periodic2, x: number, z: number, o: FbmOpts): number {
+function octaveSum(
+  src: Periodic2, x: number, z: number, o: FbmOpts,
+  sample: (n: number, weight: number) => { v: number; weight: number },
+): number {
   const gain = o.gain ?? 0.5;
   const lac = o.lacunarity ?? 2;
   let wl = o.wavelength, amp = 1, sum = 0, norm = 0, weight = 1;
   for (let i = 0; i < o.octaves; i++) {
-    let n = 1 - Math.abs(src.at(x, z, wl));
-    n *= n;
-    n *= weight;
-    weight = Math.min(1, Math.max(0, n * 2));
-    sum += amp * n;
+    const r = sample(src.at(x, z, wl), weight);
+    weight = r.weight;
+    sum += amp * r.v;
     norm += amp;
     amp *= gain;
     wl /= lac;
@@ -281,18 +269,18 @@ export function ridged(src: Periodic2, x: number, z: number, o: FbmOpts): number
   return sum / norm;
 }
 
-export function billow(src: Periodic2, x: number, z: number, o: FbmOpts): number {
-  const gain = o.gain ?? 0.5;
-  const lac = o.lacunarity ?? 2;
-  let wl = o.wavelength, amp = 1, sum = 0, norm = 0;
-  for (let i = 0; i < o.octaves; i++) {
-    sum += amp * Math.abs(src.at(x, z, wl));
-    norm += amp;
-    amp *= gain;
-    wl /= lac;
-  }
-  return sum / norm;
-}
+export const fbm = (src: Periodic2, x: number, z: number, o: FbmOpts): number =>
+  octaveSum(src, x, z, o, (n) => ({ v: n, weight: 1 }));
+
+export const ridged = (src: Periodic2, x: number, z: number, o: FbmOpts): number =>
+  octaveSum(src, x, z, o, (raw, weight) => {
+    let n = (1 - Math.abs(raw));
+    n = n * n * weight;
+    return { v: n, weight: Math.min(1, Math.max(0, n * 2)) };
+  });
+
+export const billow = (src: Periodic2, x: number, z: number, o: FbmOpts): number =>
+  octaveSum(src, x, z, o, (n) => ({ v: Math.abs(n), weight: 1 }));
 
 export function warp2(
   src: Periodic2, x: number, z: number, wavelength: number, amplitude: number, octaves = 2,

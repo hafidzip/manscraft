@@ -338,38 +338,9 @@ export const MOON_STOPS: Record<MoonStyle, Array<[number, [number, number, numbe
   ],
 };
 
-export function biomeColorInto(
-  h: number,
-  lat: number,
-  pal: PlanetPalette,
-  out: THREE.Color,
-  poleCol: THREE.Color
-): void {
-  const stops = pal.stops;
-  let i = 0;
-  for (let k = 0; k < stops.length - 1; k++) {
-    if (h > stops[k + 1][0]) i = k + 1;
-    else break;
-  }
-  const a = stops[i];
-  const b = stops[Math.min(i + 1, stops.length - 1)];
-  const span = b[0] - a[0];
-  const t = span === 0 ? 0 : Math.min(1, Math.max(0, (h - a[0]) / span));
-  out.setRGB(
-    a[1][0] + (b[1][0] - a[1][0]) * t,
-    a[1][1] + (b[1][1] - a[1][1]) * t,
-    a[1][2] + (b[1][2] - a[1][2]) * t
-  );
-  const polar = smoothstep(0.8, 0.95, lat);
-  if (polar > 0 && pal.poleAmount > 0) out.lerp(poleCol, polar * pal.poleAmount);
-}
+type Stop = [number, [number, number, number]];
 
-export function moonColorInto(
-  style: MoonStyle,
-  h: number,
-  out: THREE.Color
-): void {
-  const stops = MOON_STOPS[style];
+function sampleStops(stops: Stop[], h: number, out: THREE.Color): void {
   let i = 0;
   for (let k = 0; k < stops.length - 1; k++) {
     if (h > stops[k + 1][0]) i = k + 1;
@@ -382,13 +353,25 @@ export function moonColorInto(
   out.setRGB(
     a[1][0] + (b[1][0] - a[1][0]) * t,
     a[1][1] + (b[1][1] - a[1][1]) * t,
-    a[1][2] + (b[1][2] - a[1][2]) * t
+    a[1][2] + (b[1][2] - a[1][2]) * t,
   );
 }
 
 function smoothstep(a: number, b: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
+}
+
+export function biomeColorInto(
+  h: number, lat: number, pal: PlanetPalette, out: THREE.Color, poleCol: THREE.Color,
+): void {
+  sampleStops(pal.stops, h, out);
+  const polar = smoothstep(0.8, 0.95, lat);
+  if (polar > 0 && pal.poleAmount > 0) out.lerp(poleCol, polar * pal.poleAmount);
+}
+
+export function moonColorInto(style: MoonStyle, h: number, out: THREE.Color): void {
+  sampleStops(MOON_STOPS[style], h, out);
 }
 
 export function pickPlanetType(seed: bigint): PlanetType {

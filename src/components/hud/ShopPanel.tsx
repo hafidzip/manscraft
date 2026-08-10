@@ -36,21 +36,14 @@ export function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: Re
         item,
       }));
 
-  const buy = (id: string) => {
-    const ok = engineRef.current?.buyShopItem(id);
-    if (ok) {
-      setFlash(id);
-      window.setTimeout(() => setFlash((f) => (f === id ? null : f)), 280);
-    }
+  const pulse = (setter: typeof setFlash, key: string) => {
+    setter(key);
+    window.setTimeout(() => setter((f) => (f === key ? null : f)), 280);
   };
-
+  const buy = (id: string) => { if (engineRef.current?.buyShopItem(id)) pulse(setFlash, id); };
   const sellItem = (ref: { isHotbar: boolean; index: number }, amount: number) => {
-    const ok = engineRef.current?.sellShopItem(ref, amount);
-    if (ok) {
-      const key = `${ref.isHotbar ? 'h' : 'm'}${ref.index}`;
-      setSellFlash(key);
-      window.setTimeout(() => setSellFlash((f) => (f === key ? null : f)), 280);
-    }
+    if (engineRef.current?.sellShopItem(ref, amount))
+      pulse(setSellFlash, `${ref.isHotbar ? 'h' : 'm'}${ref.index}`);
   };
 
   const hoveredEntry = hoverItem ? SHOP_ITEMS.find((i) => i.id === hoverItem) ?? null : null;
