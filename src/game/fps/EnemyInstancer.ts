@@ -4,21 +4,9 @@ import { LOD_PARTS, PRESET_SCALE, BLACK_COLOR } from './EnemyRig';
 
 export const INSTANCED_ENEMIES = true;
 
-// Maximum simultaneous box-parts across ALL live enemies.
-// LOD0 has 8 body parts + 2 eyes = 10 per enemy.
-// 512 enemies × 10 = 5120, comfortably under 8192.
 const MAX_BODY = 8192;
-const MAX_EYES = 2048;   // always << MAX_BODY
+const MAX_EYES = 2048;
 
-// ------------------------------------------------------------------
-// Closed-form expansion of the transform chain
-//   M = T(render)·Ry(yaw)·T(pivot)·Rx(swing)·T(0,-off,0)·S(box)
-// The previous version ran this through ~8 Matrix4 multiplies per part
-// (~48 multiply-adds each, 16-float reads+writes). The closed form is
-// ~11 scalar multiplies plus 16 stores. Yaw sin/cos once per enemy;
-// swing sin/cos only for parts that actually swing (≈3 of 8 at LOD0).
-// Zero allocation: everything below is scalar locals.
-// ------------------------------------------------------------------
 
 export interface InstancedAgent {
   cfg: { id: string; peaceful?: boolean };
@@ -35,9 +23,7 @@ export interface InstancedAgent {
 }
 
 export class EnemyInstancer {
-  /** All black body parts — Lambert so lighting still works. */
   readonly mesh: THREE.InstancedMesh;
-  /** Glowing red eyes — MeshBasicMaterial so they are always bright. */
   readonly eyeMesh: THREE.InstancedMesh;
 
   private liveBody = 0;
@@ -47,9 +33,6 @@ export class EnemyInstancer {
   constructor(scene: THREE.Scene) {
     const geo = new THREE.BoxGeometry(1, 1, 1);
 
-    // Body: pure black Lambert. Do NOT set vertexColors:true — InstancedMesh
-    // already multiplies material.color by instanceColor without it, and
-    // vertexColors needs a geometry color attribute that we don't have.
     const bodyMat = new THREE.MeshLambertMaterial({ color: BLACK_COLOR.clone() });
     this.mesh = new THREE.InstancedMesh(geo, bodyMat, MAX_BODY);
     this.mesh.name = 'enemy-body';
@@ -57,14 +40,12 @@ export class EnemyInstancer {
     this.mesh.castShadow    = true;
     this.mesh.receiveShadow = false;
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.raycast = () => { };   // hit-testing via EnemyManager.raycast
+    this.mesh.raycast = () => { };
     this.mesh.count = 0;
 
-    // Eyes: unlit bright red — MeshBasicMaterial ignores Lambert lighting so
-    // eyes stay vivid even at night.  depthTest on so they respect occlusion.
     const eyeMat = new THREE.MeshBasicMaterial({
       color: 0xff1a1a,
-      toneMapped: false,   // preserve HDR brightness through post-processing
+      toneMapped: false,
     });
     this.eyeMesh = new THREE.InstancedMesh(geo, eyeMat, MAX_EYES);
     this.eyeMesh.name = 'enemy-eyes';
@@ -75,12 +56,8 @@ export class EnemyInstancer {
     this.eyeMesh.raycast = () => { };
     this.eyeMesh.count = 0;
 
-    // Eyes glow, so add them slightly in front of the rest to avoid z-fighting.
     this.eyeMesh.renderOrder = 1;
 
-    // Pre-create the body instanceColor buffer (per-instance grey that flashes
-    // toward white) and pre-initialise the constant matrix lanes so push()
-    // only ever writes the 12 varying floats per part.
     this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BODY * 3), 3);
     this.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     const bcol = this.mesh.instanceColor.array as Float32Array;
@@ -113,7 +90,6 @@ export class EnemyInstancer {
 
     const parts = LOD_PARTS[e.lod] ?? LOD_PARTS[2];
 
-    // Count body and eye parts separately for capacity checks.
     let needBody = 0, needEyes = 0;
     for (const p of parts) p.tint === 1 ? needEyes++ : needBody++;
     if (this.liveBody + needBody > MAX_BODY || this.liveEyes + needEyes > MAX_EYES) {
@@ -132,10 +108,6 @@ export class EnemyInstancer {
     const s1 = Math.sin(g) * 0.65 * amp;
     const s2 = Math.sin(g + Math.PI) * 0.55 * amp;
 
-    // Closed-form matrix components. three.js Matrix4 is column-major:
-    //   [ m11 m12 m13 tx ]      stored as [m11,0,m31,0, m12,m22,m32,0, ...]
-    //   [ 0   m22 m23 ty ]
-    //   [ m31 m32 m33 tz ]
     const cy = Math.cos(e.yaw);
     const sy = Math.sin(e.yaw);
 
@@ -143,7 +115,6 @@ export class EnemyInstancer {
     const emtx = this.eyeMesh.instanceMatrix.array as Float32Array;
     const col  = this.mesh.instanceColor!.array as Float32Array;
 
-    // Body flash colour, written directly (no setColorAt call overhead).
     const v = 1 - (1 - flash) * (1 - BLACK_COLOR.r);
 
     for (const p of parts) {
@@ -161,12 +132,10 @@ export class EnemyInstancer {
       const az  = p.az * scale;
       const off = p.hang ? by * 0.5 : 0;
 
-      // M = Ry(yaw)·T(pivot)·Rx(sw)·T(0,-off,0)·S(box), expanded.
       let m11: number, m31: number, m12: number, m22: number, m32: number,
           m13: number, m23: number, m33: number, tx: number, ty: number, tz: number;
 
       if (sw === 0) {
-        // Non-swinging parts (head/torso/eyes — the majority): skip trig.
         m11 = cy * bx; m31 = -sy * bx;
         m12 = 0;       m22 = by;      m32 = 0;
         m13 = sy * bz; m23 = 0;       m33 = cy * bz;
@@ -181,23 +150,19 @@ export class EnemyInstancer {
         tx = ax; ty = ay - cs * off; tz = az - sn * off;
       }
 
-      // World translation: render + Ry(yaw) · local translation.
       const wx = rx + cy * tx + sy * tz;
       const wy = ry + ty;
       const wz = rz + cy * tz - sy * tx;
 
       if (p.tint === 1) {
-        // Eye part → eye mesh buffer.
         const ei = this.liveEyes;
         const o = ei * 16;
         emtx[o]     = m11; emtx[o + 2]  = m31;
         emtx[o + 4] = m12; emtx[o + 5]  = m22; emtx[o + 6]  = m32;
         emtx[o + 8] = m13; emtx[o + 9]  = m23; emtx[o + 10] = m33;
         emtx[o + 12] = wx; emtx[o + 13] = wy;  emtx[o + 14] = wz;
-        // (lanes +1,+3,+7,+11,+15 pre-initialised in the constructor)
         this.liveEyes = ei + 1;
       } else {
-        // Body part → body buffer + direct colour write.
         const bi = this.liveBody;
         const o = bi * 16;
         mtx[o]     = m11; mtx[o + 2]  = m31;

@@ -9,15 +9,11 @@ import { TerrainGenerator } from './generator';
 import { buildChunkGeometry } from './mesher';
 import { raycastVoxel } from '../player/raycast';
 
-// Adaptive clock batching: a performance.now() read (~100ns) is noise next to
-// a 2ms mesh build, so when the cost EMA is expensive we still check every
-// item (better budget accuracy); we only batch to CLOCK_STRIDE when items are
-// cheap — exactly the case where per-item clock cost was hurting.
 const CLOCK_STRIDE  = 8;
 const CHEAP_ITEM_MS = 0.5;
 const COMPACT_AFTER = 64;
-const EVICT_SCAN    = 32;   // chunks examined per frame
-const EVICT_RETIRE  = 2;    // chunks retired per frame
+const EVICT_SCAN    = 32;
+const EVICT_RETIRE  = 2;
 
 export interface ChunkMaterials {
   opaque: THREE.Material;
@@ -499,7 +495,6 @@ export class World {
 
     let now = t0;
 
-    // ── Dirty queue: re-mesh modified chunks ─────────────────────────────
     {
       const dq = this.dirtyQueue;
       let dh = this.dirtyHead;
@@ -507,10 +502,9 @@ export class World {
       let batchStart = now, batchItems = 0;
       let didAny = false;
       while (dh < dq.length) {
-        // Original "at least one" semantics: only gate at batch boundaries.
         if (didAny && batchItems === 0 && now - t0 + this.meshCost > budgetMs) break;
         const c = dq[dh++];
-        if (!this.dirtySet.has(c)) continue;      // stale entry
+        if (!this.dirtySet.has(c)) continue;
         this.buildMesh(c);
         didAny = true;
         if (++batchItems >= stride) {
@@ -526,7 +520,6 @@ export class World {
         now = t;
       }
       this.dirtyHead = dh;
-      // Compaction: in-place shift + truncate (slice() allocated a new array).
       if (dh >= dq.length) {
         dq.length = 0;
         this.dirtyHead = 0;
@@ -548,7 +541,6 @@ export class World {
       this.lastCenter = centerKey;
     }
 
-    // ── Load queue: generate + mesh new chunks ───────────────────────────
     {
       const lq = this.loadQueue;
       let lh = this.loadHead;
@@ -587,9 +579,6 @@ export class World {
       }
     }
 
-    // ── Amortized eviction: a persistent Map iterator walks a bounded
-    //    number of chunks per frame instead of a periodic burst scan. Safe
-    //    under concurrent delete (JS Map iterators tolerate it), zero alloc.
     if (now - t0 < budgetMs) {
       if (!this.evictIter) this.evictIter = this.chunks.entries();
       const lim2 = (EVICT_DISTANCE + 2) * (EVICT_DISTANCE + 2);
@@ -601,14 +590,14 @@ export class World {
         if (step.done) {
           this.evictIter = this.chunks.entries();
           step = this.evictIter.next();
-          if (step.done) break;                    // empty map
+          if (step.done) break;
         }
         scanned++;
         const [key, c] = step.value;
         const dx = wrapDelta(c.cx - ccx, WORLD_CHUNKS);
         const dz = wrapDelta(c.cz - ccz, WORLD_CHUNKS);
         const d2 = dx * dx + dz * dz;
-        if (d2 <= evictSq) continue;               // still near: keep
+        if (d2 <= evictSq) continue;
 
         if (c.hasMesh) {
           for (const m of c.meshes) {

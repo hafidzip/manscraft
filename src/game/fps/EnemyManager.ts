@@ -53,24 +53,20 @@ function campRoster(s: CampSite, size: number): string[] {
 
 export interface EnemyHit { enemy: Enemy; point: THREE.Vector3; headshot: boolean; dist: number }
 
-// Keep the old constant name for compat with respawnTick/wildTick.
 const SIM_RADIUS = GRID_SIM_RADIUS;
 
-// Wild spawn governor (Phase 5 — scaled-up from the original WILD_CAP = 12).
-export const MAX_POP         = 96;    // hard hostile cap; raise gradually
+export const MAX_POP         = 96;
 const WILD_RING_MIN          = 28;
 const WILD_RING_MAX          = 88;
 const DESPAWN_R_SQ           = 136 * 136;
 const RELOCATE_R_SQ          = 96 * 96;
-const SPAWN_RATE_BASE        = 2;   // hostiles/s at empty world
-const SPAWN_RATE_MAX         = 20;  // hostiles/s approaching empty
+const SPAWN_RATE_BASE        = 2;
+const SPAWN_RATE_MAX         = 20;
 
-// Counting-sort histogram for tier assignment.
 const BAND      = 4;
 const INV_BAND  = 1 / BAND;
 const N_BANDS   = Math.ceil(MAX_POP_R / BAND) + 2;
 
-// LOD bands with hysteresis so agents don't flicker on the boundary.
 const L0_IN = 24 * 24, L0_OUT = 28 * 28;
 const L1_IN = 52 * 52, L1_OUT = 58 * 58;
 
@@ -81,11 +77,9 @@ function pickLod(cur: 0 | 1 | 2, tier: Tier, d2: number): 0 | 1 | 2 {
   return d2 < L1_IN ? (d2 < L0_IN ? 0 : 1) : 2;
 }
 
-// (all tier constants are used in assignTiers / tierFor / coarseAdvance / the tick loop)
 
 const tmpV = new THREE.Vector3();
 
-/** Reused player-image position for camp investigate calls — never handed out raw. */
 const CAMP_IMG = new THREE.Vector3();
 
 export class EnemyManager {
@@ -104,18 +98,16 @@ export class EnemyManager {
   private deps: EnemyDeps;
   private player: EnemyPlayer;
 
-  // Phase 2 — tier scheduler
   private bands        = new Int32Array(N_BANDS);
   private renderCutoff = Infinity;
   private hotCutoff    = 0;
   private warmCutoff   = 0;
   private coldCutoff   = 0;
 
-  // Phase 3 — grid broadphase
   private grid            = new EnemyGrid();
   private _spawnCredit    = 0;
   private _recycleCursor  = 0;
-  private _hostiles       = 0;   // maintained incrementally
+  private _hostiles       = 0;
 
   get aliveCount(): number { return this._hostiles; }
   get hostileCount(): number { return this._hostiles; }
@@ -146,7 +138,6 @@ export class EnemyManager {
     this.primed = false;
   }
 
-  /** Assign distToPlayer and derive tier cutoffs via counting sort. O(N+bands). */
   private assignTiers(ppx: number, ppz: number): void {
     const list  = this.enemies;
     const bands = this.bands;
@@ -183,7 +174,6 @@ export class EnemyManager {
       const e = list[i];
       if (!e.alive) continue;
       e.tier = this.tierFor(e);
-      // Render LOD: instanced hostiles never use their detailed scene graph.
       const shouldSleep = e.distToPlayer > this.renderCutoff;
       if (shouldSleep !== e.asleep) {
         e.asleep = shouldSleep;
@@ -223,29 +213,24 @@ export class EnemyManager {
     const active = this.activeScratch;
     active.length = 0;
 
-    // Phase 2: assign distances + tiers before the tick loop.
     this.assignTiers(ppx, ppz);
 
-    // Tick loop with tier-based time accumulation.
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
 
-      // Bank time every frame regardless of tier.
       e.tickAccum += dt;
 
       const period = TIER_PERIOD_S[e.tier];
-      if (e.alive && e.tickAccum < period) continue;   // not yet due
+      if (e.alive && e.tickAccum < period) continue;
 
       const budget = e.tickAccum;
       e.tickAccum  = 0;
 
-      // Dormant: cheap kinematic advance, no AI, no collision.
       if (e.tier === TIER_DORMANT) {
         this.coarseAdvance(e, budget, ppx, ppz);
         continue;
       }
 
-      // Substep for catch-up budgets (prevents tunnelling through floors).
       const n    = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(budget / MAX_TICK_DT)));
       const sdt  = Math.min(budget / n, MAX_TICK_DT);
       let keep   = true;
@@ -256,8 +241,6 @@ export class EnemyManager {
       if (!keep) {
         const g = e.group;
         g.parent?.remove(g);
-        // Swap-remove: the element swapped into slot i comes from a higher
-        // index, already processed this frame (reverse iteration) — safe, O(1).
         const last = this.enemies.length - 1;
         if (i !== last) this.enemies[i] = this.enemies[last];
         this.enemies.pop();
@@ -267,15 +250,12 @@ export class EnemyManager {
       }
     }
 
-    // Phase 3: grid-based O(N·ρ) separation instead of O(N²).
     this.grid.build(this.enemies, ppx, ppz);
     this.separateGrid(active, dt);
 
     this.respawnTick(dt);
     this.wildTick(dt);
 
-    // Camp proximity: squared distance (no sqrt for out-of-range camps) and a
-    // single reused scratch vector — investigate() copies it into lastKnown.
     const camps = this.camps;
     const py = this.player.pos.y;
     for (let ci = 0; ci < camps.length; ci++) {
@@ -299,7 +279,6 @@ export class EnemyManager {
     if (INSTANCED_ENEMIES) this.syncInstances(ppx, ppz);
   }
 
-  /** Grid-based O(N·ρ) separation — replaces the O(N²) double loop. */
   private separateGrid(active: Enemy[], dt: number): void {
     const SEP_R  = 0.95;
     const SEP_R2 = SEP_R * SEP_R;
@@ -318,11 +297,6 @@ export class EnemyManager {
         if (r2 >= SEP_R2 || r2 < 1e-6) continue;
         const d    = Math.sqrt(r2);
         const push = (SEP_R - d) * 2.4 * dt / d;
-        // EnemyGrid.query() defines qDX/qDZ as (candidate − query), i.e. b − a.
-        // To push A away from B we must move A opposite that vector (-dx,-dz),
-        // and B along it (+dx,+dz). The previous signs were swapped, which
-        // pulled every pair of nearby enemies toward each other instead of
-        // apart — the cause of the single-point crowding.
         a.nudge(-dx * push, -dz * push);
         b.nudge(dx * push, dz * push);
       }
@@ -505,18 +479,16 @@ export class EnemyManager {
   private wildTick(dt: number) {
     if (!this.night) return;
 
-    // Phase 5 spawn governor: credit-based rate with despawn + relocation.
     const deficit = MAX_POP - this._hostiles;
     const rate    = deficit <= 0 ? 0 :
       SPAWN_RATE_BASE + (SPAWN_RATE_MAX - SPAWN_RATE_BASE) * (deficit / MAX_POP);
     this._spawnCredit += rate * dt;
     if (this._spawnCredit > 6) this._spawnCredit = 6;
 
-    // Despawn wild agents that wandered too far out.
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (!e.alive || e.cfg.peaceful || e.home === null) continue;
-      const d2 = e.distToPlayer * e.distToPlayer;   // already computed by assignTiers
+      const d2 = e.distToPlayer * e.distToPlayer;
       if (d2 > DESPAWN_R_SQ) {
         e.group.parent?.remove(e.group);
         this.enemies.splice(i, 1);
@@ -524,7 +496,6 @@ export class EnemyManager {
       }
     }
 
-    // Spawn up to credit, but only if due.
     this.wildTimer -= dt;
     if (this.wildTimer > 0) return;
     this.wildTimer = 0.35 + Math.random() * 0.35;
@@ -534,7 +505,6 @@ export class EnemyManager {
     const w  = this.deps.world;
     const pp = this.player.pos;
 
-    // Expand the ring when the crowd is dense so we don't clog the near ring.
     const fill    = Math.min(1, this._hostiles / Math.max(1, MAX_POP));
     const rMin    = WILD_RING_MIN + fill * 30;
     const rMax    = WILD_RING_MAX + fill * 30;
@@ -554,7 +524,6 @@ export class EnemyManager {
       const preset = roll < 0.5 ? 'grunt' : roll < 0.82 ? 'runner' : 'heavy';
 
       if (this._hostiles >= MAX_POP) {
-        // Relocate the farthest distant wild enemy instead of spawning new.
         const candidate = this.findRelocatable();
         if (candidate) {
           candidate.pos.set(fx + 0.5, h, fz + 0.5);

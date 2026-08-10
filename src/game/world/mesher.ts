@@ -23,52 +23,34 @@ const FACES: Face[] = [
 
 const AO_SHADE = [0.68, 0.80, 0.91, 1.0];
 
-/* ----------------------------------------------------------------------
-   Padded neighbour shell + bitmask voxel iteration (snippet §2).
-
-   One linear pass builds per-row non-air / full-cube bitmasks and maxY;
-   the main loop then visits only non-air, non-buried voxels. A module-
-   scoped (S+2)x(H+2)x(S+2) PAD holds the chunk plus a 1-voxel border so
-   every neighbour read is a single unchecked array index.
-   ---------------------------------------------------------------------- */
 
 const PW    = S + 2;
 const PLANE = PW * PW;
 const PAD_LEN = (H + 2) * PLANE;
 const UNKNOWN = 255;
 
-/** pad index, valid for -1 <= x,z <= S and -1 <= y <= H */
 const pIdx = (x: number, y: number, z: number): number =>
   (y + 1) * PLANE + (z + 1) * PW + (x + 1);
 
-// One-time id tables: replace per-voxel DEFS / function-call lookups.
-const SKIP_ID  = new Uint8Array(256);  // inserter / laser miner / turret
-const IS_CUBE  = new Uint8Array(256);  // full opaque cube -> burial eligible
-const OCCLUDES = new Uint8Array(256);  // AO predicate: opaque OR leaves
+const SKIP_ID  = new Uint8Array(256);
+const IS_CUBE  = new Uint8Array(256);
+const OCCLUDES = new Uint8Array(256);
 for (let id = 0; id < 256; id++) {
   const d = DEFS[id];
   if (!d) continue;
   SKIP_ID[id]  = (isInserter(id) || isLaserMiner(id) || isTurret(id)) ? 1 : 0;
-  // Burial needs the strict face-hiding predicate: a cube face is hidden iff
-  // the neighbour is a full opaque cube. Leaves are NOT opaque, so they must
-  // not bury a cube (the cube's face stays visible against them).
   const fullOpaque = !!d.solid && !d.cross && !d.cutout && !d.water;
   IS_CUBE[id]  = fullOpaque ? 1 : 0;
-  // AO kept byte-identical to the original closure: opaque OR leaves.
   OCCLUDES[id] = (d.opaque || id === B.LEAVES) ? 1 : 0;
 }
-// `get()` can return -1 for unavailable neighbour data. In the Uint8Array pad
-// that becomes 255; keep the old mesher semantics for it: unknown neighbours
-// suppress faces and count as AO occluders.
 OCCLUDES[UNKNOWN] = 1;
 
-// Reused scratch — meshing is synchronous, one call at a time.
 const PAD      = new Uint8Array(PAD_LEN);
 const NONAIR   = new Uint32Array(H * S);
 const CUBEMASK = new Uint32Array(H * S);
 const OCC      = new Uint32Array((H + 2) * PW);
 const oIdx = (y: number, z: number): number => (y + 1) * PW + (z + 1);
-const INNER_BITS = (((1 << (S + 1)) - 1) & ~1);   // bits for x = 0..S-1
+const INNER_BITS = (((1 << (S + 1)) - 1) & ~1);
 const ALL_BITS   = (1 << (S + 2)) - 1;
 
 interface Bucket {
@@ -119,7 +101,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
   const baseX = cx * S;
   const baseZ = cz * S;
 
-  // Neighbour reads collapse to one unchecked PAD index.
   const localGet = (lx: number, ly: number, lz: number): number => {
     const id = PAD[pIdx(lx, ly, lz)];
     return id === UNKNOWN ? -1 : id;
@@ -129,7 +110,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
     return OCCLUDES[PAD[pIdx(lx, ly, lz)]] === 1;
   };
 
-  // ── Pass 1: row bitmasks + maxY (one linear sweep; rows are contiguous). ──
   NONAIR.fill(0); CUBEMASK.fill(0);
   let maxY = -1;
   for (let y = 0; y < H; y++) {
@@ -156,42 +136,34 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
       foliage: buildGeom(foliageB), water: buildGeom(waterB, true),
     };
   }
-  const yTop = Math.min(H - 1, maxY + 1);   // AO/water never sample above this
+  const yTop = Math.min(H - 1, maxY + 1);
 
-  // ── Pass 2: fill the padded shell (body + 1-voxel border), bounded by yTop. ─
-  PAD.fill(B.AIR, (yTop + 2) * PLANE, PAD_LEN);      // clear stale rows above
+  PAD.fill(B.AIR, (yTop + 2) * PLANE, PAD_LEN);
   for (let y = -1; y <= yTop + 1; y++) {
-    if (y < 0) {                                      // below world -> bedrock
+    if (y < 0) {
       PAD.fill(B.BEDROCK, pIdx(-1, y, -1), pIdx(-1, y, -1) + PLANE);
       continue;
     }
     if (y >= H) break;
-    // body
     for (let z = 0; z < S; z++) {
       const src = (y * S + z) * S;
       const dst = pIdx(0, y, z);
       for (let x = 0; x < S; x++) PAD[dst + x] = data[src + x];
     }
-    // ±X borders
     for (let z = 0; z < S; z++) {
       PAD[pIdx(-1, y, z)] = get(baseX - 1, y, baseZ + z);
       PAD[pIdx(S, y, z)]  = get(baseX + S, y, baseZ + z);
     }
-    // ±Z borders
     for (let x = 0; x < S; x++) PAD[pIdx(x, y, -1)] = get(baseX + x, y, baseZ - 1);
     for (let x = 0; x < S; x++) PAD[pIdx(x, y, S)]  = get(baseX + x, y, baseZ + S);
-    // 4 corner columns (AO diagonals)
     PAD[pIdx(-1, y, -1)] = get(baseX - 1, y, baseZ - 1);
     PAD[pIdx(S,  y, -1)] = get(baseX + S, y, baseZ - 1);
     PAD[pIdx(-1, y,  S)] = get(baseX - 1, y, baseZ + S);
     PAD[pIdx(S,  y,  S)] = get(baseX + S, y, baseZ + S);
   }
 
-  // ── Pass 3: full-cube bitmasks from the pad (x = -1..S per row). ─────────
-  // Used ONLY for buried-cube culling. (AO reads the OCCLUDES table directly,
-  // which — unlike this plane — also counts leaves as occluders.)
   OCC.fill(0);
-  for (let z = -1; z <= S; z++) OCC[oIdx(-1, z)] = ALL_BITS;   // bedrock floor
+  for (let z = -1; z <= S; z++) OCC[oIdx(-1, z)] = ALL_BITS;
   for (let y = 0; y <= yTop + 1 && y < H; y++) {
     for (let z = -1; z <= S; z++) {
       let m = 0;
@@ -201,15 +173,11 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
     }
   }
 
-  // ── Pass 4: visit only exposed voxels. ──────────────────────────────────
   for (let y = 0; y <= maxY; y++) {
     for (let z = 0; z < S; z++) {
       const rowNonAir = NONAIR[y * S + z];
       if (rowNonAir === 0) continue;
 
-      // Buried-cube culling via bit ops: a full opaque cube with solid
-      // neighbours on all six sides emits nothing. Cross/water/cutout keep
-      // exactly their original visit set.
       const cubes = CUBEMASK[y * S + z];
       let buried = 0;
       if (cubes !== 0) {
@@ -217,7 +185,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         const buriedPad = ((self >> 1) & (self << 1)
           & OCC[oIdx(y - 1, z)] & OCC[oIdx(y + 1, z)]
           & OCC[oIdx(y, z - 1)] & OCC[oIdx(y, z + 1)]) & INNER_BITS;
-        // Convert from padded x bits (1..S) back to chunk-local x bits (0..S-1).
         buried = buriedPad >>> 1;
       }
       let bits = (rowNonAir & ~cubes) | (cubes & ~buried);

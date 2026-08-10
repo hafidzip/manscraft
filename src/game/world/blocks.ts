@@ -270,12 +270,8 @@ const INS_TOPS = [TILES.inserter_top_n, TILES.inserter_top_e, TILES.inserter_top
 const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[], ghost = false): BlockDef => {
   const d = def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
   if (ghost) {
-    // Ghost machines occupy their cell (so they can be targeted, mined and
-    // cannot be built over) but render NO cube and are not solid: the machine
-    // mesh sits directly on top of whatever block is underneath.
     d.solid = false;
     d.opaque = false;
-    // Break instantly, exactly like tall grass / flowers / torches.
     d.hardness = 0.05;
   }
   return d;
@@ -291,7 +287,6 @@ INS.forEach((id, i) => {
   const lm = machineDef('Laser Miner', TILES.furnace_top, TILES.inserter_side, 1.4, [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34], true);
   LM.forEach((id) => { DEFS[id] = lm; });
 }
-// Turret: a 360° auto-targeting gun. Ghost block like the other machines.
 DEFS[B.TURRET] = machineDef(
   'Turret', TILES.furnace_top, TILES.inserter_side, 1.6,
   [0x4a4e56, 0x8c939c, 0xffcc44, 0x24272c], true,

@@ -10,7 +10,6 @@ const clampY = (y: number): number => {
 export const itemCellOf = (x: number, y: number, z: number): number =>
   packCell(Math.floor(x), clampY(y), Math.floor(z));
 
-/** One bucket per voxel cell. Zero allocation in steady state. */
 export class ItemGrid {
   readonly stats = { cells: 0, inserts: 0, moves: 0, removes: 0, queries: 0, candidates: 0 };
   private cells = new Map<number, DroppedItem[]>();

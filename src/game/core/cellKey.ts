@@ -2,7 +2,6 @@ import {
   CHUNK_LOG2, CHUNK_MASK, WORLD_CHUNKS_MASK, WORLD_HEIGHT,
 } from './constants';
 
-/** Packed voxel key: x bits 0..8, z bits 9..17, y bits 18..24. */
 export const packCell = (x: number, y: number, z: number): number =>
   (x & 511) | ((z & 511) << 9) | ((y & 127) << 18);
 

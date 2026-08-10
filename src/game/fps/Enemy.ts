@@ -109,11 +109,9 @@ export interface EnemyDeps {
   camera: THREE.Object3D;
   onPlayerHit(dmg: number, from: THREE.Vector3): void;
   onEnemyKilled(e: Enemy): void;
-  /** Phase 4: shared navigation field. Optional so tests can omit it. */
   flowField?: FlowField;
 }
 
-/** One shared sample object for the whole game — not one per enemy per frame. */
 const FLOW: FlowSample = { x: 0, z: 0, targetY: -1, climb: 0, cost: 0 };
 
 const tmpV = new THREE.Vector3();
@@ -146,7 +144,6 @@ export class Enemy {
   readonly halfW = 0.3;
   readonly height = 1.8;
 
-  // Phase 1 + 2: LOD fields written by EnemyManager, read by callers.
   distToPlayer = Infinity;
   tier: Tier = 0;
   tickAccum = 0;
@@ -435,7 +432,6 @@ export class Enemy {
   }
 
   invalidatePath() {
-    // A* is disabled — kept as a no-op for external call sites.
   }
 
   alert(pos: THREE.Vector3) {
@@ -611,15 +607,11 @@ export class Enemy {
       }
     }
 
-    // Hostiles are permanently aware of the player: they always know where he
-    // is and close the distance. Only merchants stay passive.
     if (!c.peaceful && !this.alerted && this.cooldownUntil <= 0) {
       this.alerted = true;
       this.alertT = 0;
     }
     if (!c.peaceful && this.cooldownUntil <= 0) {
-      // Keep the tracked position fresh even without line of sight so they
-      // hunt the player down instead of wandering off.
       this.lastKnown.copy(pp);
       this.hasTarget = true;
       this.searchT = 0;
@@ -642,7 +634,6 @@ export class Enemy {
       if (this.alertT > 12) { this.standDown(); hasLos = false; }
     }
 
-    // Hostiles never leash back home — they pursue the player indefinitely.
     if (this.home && c.peaceful) {
       const pd = Math.hypot(pp.x - this.home.x, pp.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
@@ -666,8 +657,6 @@ export class Enemy {
       this.state = this.cfg.behavior;
       patrolSteerGoal = this.cfg.behavior === 'idle' ? this.idleGoal(dt) : this.patrolGoal(dt);
     } else if ((hasLos || this.hasTarget) && (this.state === 'patrol' || this.state === 'idle')) {
-      // Hostiles commit to the chase even with no direct line of sight —
-      // they path toward the player's last known (continuously updated) spot.
       this.state = 'chase';
       this.returning = false; this.dwellT = 0; this.leashT = 0;
       this.idleGoalPt = null;
@@ -751,14 +740,7 @@ export class Enemy {
         wx = 0; wz = 0;
       }
     } else if (this.hasTarget) {
-      // ── 100% flow-field navigation ─────────────────────────────────────
-      // A* pathfinding is disabled. Combat-close enemies still use local
-      // orbit/strafe steering; everything else samples the shared flow field.
-      // If the field is not ready / unreachable / wrong storey, fall back to
-      // a simple direct vector toward lastKnown (still no A*).
 
-      // Prefer local combat steering when we already have line of sight and
-      // are inside preferred range — flow field would just pull straight in.
       if (hasLos && dist < c.preferredRange * 1.35) {
         const inv = 1 / (dist || 1);
         const fx = toPlayer.x * inv, fz = toPlayer.z * inv;
@@ -782,7 +764,6 @@ export class Enemy {
         }
         this.steerContext(dX, dZ, steerOut);
         if (steerOut.x === 0 && steerOut.z === 0) {
-          // Locally boxed — try the flow field as an escape route.
           if (this.deps.flowField?.sample(this.pos.x, this.pos.y, this.pos.z, FLOW)) {
             this.steerContext(FLOW.x, FLOW.z, steerOut);
           }
@@ -796,15 +777,12 @@ export class Enemy {
           }
         }
       } else if (this.deps.flowField?.sample(this.pos.x, this.pos.y, this.pos.z, FLOW)) {
-        // Long-range: pure flow-field gradient.
         this.steerContext(FLOW.x, FLOW.z, steerOut);
         if (steerOut.x !== 0 || steerOut.z !== 0) {
           wx = steerOut.x; wz = steerOut.z;
           if (steerOut.jump) wantJump = true;
-          // 2.5D payoff: the field knows the next column is a step up.
           if (FLOW.climb > 0 && this.grounded && this.jumpCd <= 0) wantJump = true;
         } else {
-          // Field direction is solid-blocked locally — push toward lastKnown.
           this.steerContext(
             this.lastKnown.x - this.pos.x,
             this.lastKnown.z - this.pos.z,
@@ -814,8 +792,6 @@ export class Enemy {
           if (steerOut.jump) wantJump = true;
         }
       } else {
-        // Field unavailable (still building / wrong storey / unreachable).
-        // Direct lastKnown vector — never A*.
         const dxw = this.lastKnown.x - this.pos.x;
         const dzw = this.lastKnown.z - this.pos.z;
         const hd = Math.hypot(dxw, dzw);
@@ -921,10 +897,6 @@ export class Enemy {
     this.instGaitGain = this.speedN;
     if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
 
-    // Phase 6: non-detailed enemies are rendered by EnemyInstancer. Keep all
-    // AI/physics/combat above, but skip the old per-part Object3D animation,
-    // healthbar billboarding, material emissive writes and group transform
-    // updates. Merchants remain detailed.
     if (!this.detailed) return true;
 
     const sw = Math.sin(this.walkPhase) * 0.65 * this.speedN;

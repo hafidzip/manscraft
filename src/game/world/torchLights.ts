@@ -1,16 +1,14 @@
 
 import * as THREE from 'three';
 
-const K = 6;                 // POOL_SIZE
-const LIGHT_R = 13;          // must match PointLight.distance
+const K = 6;
+const LIGHT_R = 13;
 const LIGHT_R2 = LIGHT_R * LIGHT_R;
 const BASE_INTENSITY = 2.4;
 const COLOR = 0xffb552;
 
-// Camera travel needed to trigger a re-rank.
 const RESCAN_MOVE2 = 0.75 * 0.75;
 
-// Fixed top-K selection buffer, ascending by squared distance. Zero allocation.
 const SEL_D = new Float64Array(K);
 const SEL_IDX = new Int32Array(K);
 
@@ -19,8 +17,6 @@ export class TorchLights {
   private torches = new Map<string, { pos: THREE.Vector3; support: string }>();
   private time = 0;
 
-  // Flat xyz triples of every torch. Torches never move once placed, so this
-  // is rebuilt only when the torch set changes (markDirty on add/remove).
   private flat = new Float32Array(0);
   private flatN = 0;
   private listDirty = true;
@@ -116,8 +112,6 @@ export class TorchLights {
       return;
     }
 
-    // The 150 ms timer is a throttle, not a trigger: a stationary player with
-    // an unchanged torch set does no work; placing a torch re-ranks at once.
     const dx = camera.x - this.scanX, dy = camera.y - this.scanY, dz = camera.z - this.scanZ;
     const camMoved = dx * dx + dy * dy + dz * dz > RESCAN_MOVE2;
     this.sortT -= dt;
@@ -134,8 +128,8 @@ export class TorchLights {
       for (let t = 0, o = 0; t < n; t++, o += 3) {
         const ddx = f[o] - cx, ddy = f[o + 1] - cy, ddz = f[o + 2] - cz;
         const d = ddx * ddx + ddy * ddy + ddz * ddz;
-        if (d > LIGHT_R2) continue;                // can't contribute: cull
-        if (count === K && d >= worst) continue;   // O(1) reject
+        if (d > LIGHT_R2) continue;
+        if (count === K && d >= worst) continue;
 
         let i = count < K ? count : K - 1;
         while (i > 0 && SEL_D[i - 1] > d) {

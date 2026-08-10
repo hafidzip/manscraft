@@ -1,11 +1,6 @@
-// src/game/fps/EnemyGrid.ts
-//
-// Counting-sort uniform grid over a player-centred window.
-// Zero allocation after construction. XZ only; callers filter on Y.
 
 import { minImageF, WORLD_SIZE } from '../core/constants';
 
-/* ------------------------------- tunables ------------------------------- */
 
 export const SIM_RADIUS = 112;
 
@@ -21,14 +16,12 @@ const CELLS = W * W;
 const MAX_AGENTS = 4096;
 const MAX_HITS   = 1024;
 
-/* -------------------------------- types --------------------------------- */
 
 export interface GridAgent {
   pos: { x: number; y: number; z: number };
   alive: boolean;
 }
 
-/* -------------------------------- grid ---------------------------------- */
 
 export class EnemyGrid {
   private cnt      = new Int32Array(CELLS);

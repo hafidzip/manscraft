@@ -4,23 +4,16 @@ import type { World } from './world';
 
 const FLOW_DELAY = 0.12;
 
-/* ------------------------------------------------------------------ keys */
 
 const KEY_Y_SHIFT = 9;
 const KEY_Z_SHIFT = 17;
 
-/**
- * Packs a world cell into a 26-bit non-negative SMI — zero allocation.
- * `x & 0x1FF` is exactly `x mod 512` for negative x too, so it matches the
- * torus world (WORLD_SIZE = 512) and cells across the seam dedupe correctly.
- */
 const cellKey = (x: number, y: number, z: number): number =>
   (x & 0x1FF) | ((y & 0xFF) << KEY_Y_SHIFT) | ((z & 0x1FF) << KEY_Z_SHIFT);
 
 const KEY_EMPTY = -1;
 const KEY_TOMB  = -2;
 
-/** Open-addressed integer set: linear probing + tombstones. No per-op alloc. */
 class IntSet {
   private keys: Int32Array;
   private mask: number;
@@ -31,16 +24,15 @@ class IntSet {
   constructor(capPow2 = 1024) {
     this.keys  = new Int32Array(capPow2).fill(KEY_EMPTY);
     this.mask  = capPow2 - 1;
-    this.limit = (capPow2 * 3) >> 2;   // keep >=25% of slots EMPTY
+    this.limit = (capPow2 * 3) >> 2;
   }
 
   get size(): number { return this.live; }
 
   private slotOf(k: number, mask: number): number {
-    return (Math.imul(k, 0x9E3779B1) >>> 15) & mask;   // Knuth multiplicative
+    return (Math.imul(k, 0x9E3779B1) >>> 15) & mask;
   }
 
-  /** has + add in a single probe. Returns true if newly inserted. */
   add(k: number): boolean {
     const t = this.keys, m = this.mask;
     let i = this.slotOf(k, m);
@@ -94,9 +86,7 @@ class IntSet {
   }
 }
 
-/* ------------------------------------------------------------ ring queue */
 
-// Next power of two >= the old MAX_QUEUE so head/count wrap with a mask.
 const QCAP  = 8192;
 const QMASK = QCAP - 1;
 
@@ -111,10 +101,10 @@ export class FluidSim {
   constructor(private world: World) {}
 
   poke(x: number, y: number, z: number, delay = FLOW_DELAY): void {
-    if (y < 0 || y >= 80) return;              // WORLD_HEIGHT guard
-    if (this.qCount >= QCAP) return;           // drop-on-overflow, as before
+    if (y < 0 || y >= 80) return;
+    if (this.qCount >= QCAP) return;
     const k = cellKey(x, y, z);
-    if (!this.pending.add(k)) return;          // already queued: one probe
+    if (!this.pending.add(k)) return;
     const w = (this.qHead + this.qCount) & QMASK;
     this.qKey[w]  = k;
     this.qTime[w] = this.now + delay;
@@ -135,17 +125,14 @@ export class FluidSim {
     this.now += dt;
     const keys = this.qKey, times = this.qTime;
 
-    // Nothing due -> don't open a world batch at all.
     if (this.qCount === 0 || times[this.qHead] > this.now) return;
 
     this.world.beginBatch();
     let processed = 0;
 
-    // qHead/qCount advance BEFORE recompute(), because recompute() re-enters
-    // poke() for neighbours and needs the live write cursor.
     while (this.qCount > 0 && processed < 420) {
       const h = this.qHead;
-      if (times[h] > this.now) break;          // monotone FIFO
+      if (times[h] > this.now) break;
       const k = keys[h];
       this.qHead = (h + 1) & QMASK;
       this.qCount--;
@@ -160,17 +147,12 @@ export class FluidSim {
     this.world.endBatch();
   }
 
-  /** Additive API — drop stale work on world regen / teleport. */
   clear(): void {
     this.qHead = 0;
     this.qCount = 0;
     this.pending.clear();
   }
 
-  /* -------------------------------------------------------- water physics
-     Unchanged from the original implementation; coordinates now arrive
-     normalised into [0,512)/[0,80) which world.getBlockRaw/setBlock already
-     wrap internally. */
 
   private g(x: number, y: number, z: number): number {
     return this.world.getBlockRaw(x, y, z);

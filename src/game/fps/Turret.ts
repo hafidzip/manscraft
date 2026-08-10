@@ -6,7 +6,6 @@ import type { MachineAgent, MachineView } from './machineScheduler';
 
 type WorldView = { get(x: number, y: number, z: number): number };
 
-/** A hostile the turret may engage (structurally matches `Enemy`). */
 export interface TurretTarget {
   pos: THREE.Vector3;
   alive: boolean;
@@ -14,19 +13,12 @@ export interface TurretTarget {
 }
 
 export interface TurretHooks {
-  /** All candidate hostiles (merchants are filtered out by the manager). */
   targets(): TurretTarget[];
-  /** Apply damage to a target that was hit. */
   damage(target: TurretTarget, amount: number, point: THREE.Vector3): void;
-  /** Muzzle flash at the barrel tip. */
   muzzle(pos: THREE.Vector3): void;
-  /** Bullet tracer from muzzle to impact. */
   tracer(from: THREE.Vector3, to: THREE.Vector3): void;
-  /** Impact spark/decal on terrain. */
   impact(point: THREE.Vector3, normal: THREE.Vector3, blockId: number): void;
-  /** Gunshot sound. */
   shot(dist: number): void;
-  /** Voxel raycast for line-of-sight and bullet terrain hits. */
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number):
     { point: THREE.Vector3; normal: THREE.Vector3; block: number; dist: number } | null;
 }
@@ -63,13 +55,11 @@ const SCAN_RADIUS = 26;
 const PRUNE_RADIUS = 42;
 const MAX_GUNS = 12;
 
-/** Engagement range in blocks. */
 const RANGE = 22;
 const DAMAGE = 9;
 const BURST = 3;
 const BURST_DELAY = 0.1;
 const COOLDOWN = 1.05;
-/** How closely the barrel must be aligned before it will fire (radians). */
 const AIM_TOLERANCE = 0.16;
 const SPREAD = 0.02;
 
@@ -104,23 +94,18 @@ export class TurretManager implements MachineAgent {
     const pitch = new THREE.Group();
     const tip = new THREE.Object3D();
 
-    // Base plate + pedestal
     group.add(boxMesh(darkMat, 0, 0.04, 0, 0.5, 0.08, 0.5));
     group.add(boxMesh(bodyMat, 0, 0.14, 0, 0.34, 0.14, 0.34));
     group.add(boxMesh(trimMat, 0, 0.22, 0, 0.2, 0.04, 0.2));
 
-    // Rotating head (full 360° yaw)
     yaw.position.set(0, 0.28, 0);
     yaw.add(pitch);
     group.add(yaw);
 
-    // Housing
     pitch.add(boxMesh(bodyMat, 0, 0.02, 0, 0.26, 0.2, 0.3));
     pitch.add(boxMesh(steelMat, 0, 0.14, 0, 0.18, 0.08, 0.22));
-    // Ammo drum on both sides
     pitch.add(boxMesh(darkMat, 0, 0.02, 0.19, 0.14, 0.14, 0.08));
     pitch.add(boxMesh(darkMat, 0, 0.02, -0.19, 0.14, 0.14, 0.08));
-    // Barrel along +X
     pitch.add(boxMesh(steelMat, 0.26, 0.02, 0, 0.34, 0.09, 0.09));
     pitch.add(boxMesh(darkMat, 0.46, 0.02, 0, 0.1, 0.07, 0.07));
     pitch.add(boxMesh(trimMat, 0.12, 0.02, 0, 0.06, 0.11, 0.11));
@@ -191,12 +176,10 @@ export class TurretManager implements MachineAgent {
     }
   }
 
-  /** Muzzle world position of this turret (barrel pivot height). */
   private eyeOf(g: Gun, ix: number, iz: number, out: THREE.Vector3): THREE.Vector3 {
     return out.set(ix + 0.5, g.y + 0.3, iz + 0.5);
   }
 
-  /** Pick the closest living hostile in range with clear line of sight. */
   private acquire(g: Gun, ix: number, iz: number): void {
     const eye = this.eyeOf(g, ix, iz, tmpEye);
     let best: TurretTarget | null = null;
@@ -204,7 +187,6 @@ export class TurretManager implements MachineAgent {
 
     for (const t of this.hooks.targets()) {
       if (!t.alive || t.cfg.peaceful) continue;
-      // Nearest world image (torus wrap).
       const ex = ix + 0.5 + minImageF(t.pos.x - (ix + 0.5));
       const ez = iz + 0.5 + minImageF(t.pos.z - (iz + 0.5));
       const cx = ex - eye.x;
@@ -213,7 +195,6 @@ export class TurretManager implements MachineAgent {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > bestD) continue;
 
-      // Line of sight — no terrain between muzzle and torso.
       tmpDir.set(cx, cy, cz).divideScalar(d || 1);
       const hit = this.hooks.raycast(eye, tmpDir, d);
       if (hit && hit.dist < d - 0.4) continue;
@@ -261,13 +242,11 @@ export class TurretManager implements MachineAgent {
   }
 
   private tickGun(g: Gun, ix: number, iz: number, dt: number): void {
-    // No cube of its own: base sits on the block below.
     g.group.position.set(ix + 0.5, g.y, iz + 0.5);
 
     g.cooldown -= dt;
     g.recoil = Math.max(0, g.recoil - dt * 8);
 
-    // Drop dead / out-of-range targets.
     if (g.target && !g.target.alive) { g.target = null; g.burstLeft = 0; }
 
     g.scanCd -= dt;
@@ -288,7 +267,6 @@ export class TurretManager implements MachineAgent {
       const horiz = Math.hypot(aimX, aimZ);
       const dist = Math.hypot(aimX, aimY, aimZ);
 
-      // 360° yaw: shortest angular path, no clamping.
       const yawWant = Math.atan2(-aimZ, aimX);
       const pitchWant = Math.atan2(aimY, Math.max(0.05, horiz));
       let dYaw = yawWant - g.curYaw;
@@ -299,7 +277,6 @@ export class TurretManager implements MachineAgent {
 
       const aimed = Math.abs(dYaw) < AIM_TOLERANCE;
 
-      // Burst fire
       if (g.burstLeft > 0) {
         g.burstTimer -= dt;
         if (g.burstTimer <= 0 && aimed) {
@@ -313,7 +290,6 @@ export class TurretManager implements MachineAgent {
         g.cooldown = COOLDOWN;
       }
     } else {
-      // Idle: slow 360° sweep looking for hostiles.
       g.idleSweep += dt * 0.55;
       g.curYaw = g.idleSweep;
       g.curPitch += (-0.03 - g.curPitch) * Math.min(1, 3 * dt);
@@ -322,7 +298,6 @@ export class TurretManager implements MachineAgent {
 
     g.yaw.rotation.y = g.curYaw;
     g.pitch.rotation.z = g.curPitch;
-    // Recoil kick pushes the barrel back along its local -X.
     g.pitch.position.x = -g.recoil * 0.06;
   }
 
@@ -343,7 +318,6 @@ export class TurretManager implements MachineAgent {
     this.hooks.muzzle(tmpTip.clone());
     this.hooks.shot(dist);
 
-    // Does the bullet reach the target, or does terrain stop it first?
     const toT = tmpVis.copy(tmpAim).sub(tmpTip);
     const along = toT.dot(tmpDir);
     let hitTarget = false;

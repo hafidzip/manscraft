@@ -116,22 +116,14 @@ export class TerrainGenerator {
     };
   }
 
-  /* ------------------------------------------------------------------
-     Column cache (snippet §10a): SoA planes over ONE eagerly-allocated
-     buffer. Validity lives in `state` (zero-initialised by the allocator,
-     so the old 512 KB fill(-1) disappears entirely) and `height` is free
-     to hold any value. The hit path is ~3 int ops + one Uint8 load —
-     small enough to inline into callers.
-     ------------------------------------------------------------------ */
   private static readonly COL_N = W * W;
   private readonly colBuf = new ArrayBuffer(TerrainGenerator.COL_N * 5);
-  private readonly colState = new Uint8Array(this.colBuf, 0, TerrainGenerator.COL_N);            // 0=empty 1=ready
+  private readonly colState = new Uint8Array(this.colBuf, 0, TerrainGenerator.COL_N);
   private readonly colBiome = new Uint8Array(this.colBuf, TerrainGenerator.COL_N, TerrainGenerator.COL_N);
   private readonly colHeight = new Int16Array(this.colBuf, TerrainGenerator.COL_N * 2, TerrainGenerator.COL_N);
   private readonly colMount = new Uint8Array(this.colBuf, TerrainGenerator.COL_N * 4, TerrainGenerator.COL_N);
   private colArea: Uint8Array | null = null;
 
-  /** Scalar terrain math for one column — unchanged from the original. */
   private computeScalar(px: number, pz: number): { h: number; biome: Biome; mount: number } {
     const f = this.fields(px, pz);
     let biome: Biome;
@@ -156,15 +148,11 @@ export class TerrainGenerator {
     };
   }
 
-  /** A miss is never isolated: fill the whole 16-wide, 16-aligned row.
-   *  16 divides 512, so a run never crosses a z-row and writes are
-   *  contiguous. Delegates to the scalar path -> bit-identical worlds. */
   private fillColumnRow(px0: number, pz: number): void {
     const k0 = pz * W + px0;
     for (let i = 0; i < S; i++) {
       const r = this.computeScalar(px0 + i, pz);
       const k = k0 + i;
-      // payload first, validity last
       this.colHeight[k] = r.h;
       this.colBiome[k]  = r.biome;
       this.colMount[k]  = r.mount;
@@ -174,8 +162,8 @@ export class TerrainGenerator {
 
   private computeColumn(px: number, pz: number): number {
     const k = pz * W + px;
-    if (this.colState[k] !== 0) return k;                 // hit: inlineable
-    this.fillColumnRow(px & ~(S - 1), pz);                // miss: fill all 16
+    if (this.colState[k] !== 0) return k;
+    this.fillColumnRow(px & ~(S - 1), pz);
     return k;
   }
 

@@ -10,7 +10,6 @@ interface Group {
   dirty: boolean;
 }
 
-/** One InstancedMesh per distinct dropped block id. */
 export class ItemInstancer {
   readonly stats = { groups: 0, instances: 0, grows: 0, writes: 0 };
   private groups = new Map<number, Group>();

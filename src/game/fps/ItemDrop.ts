@@ -286,7 +286,6 @@ export class ItemDropManager {
     return false;
   }
 
-  /* --------------------------------------------------------------- takeAt */
   private takeX = 0; private takeY = 0; private takeZ = 0;
   private takeR2 = 0; private takeBest: DroppedItem | null = null;
   private takeBestD2 = 0;
@@ -319,7 +318,6 @@ export class ItemDropManager {
     return it;
   }
 
-  /* ---------------------------------------------------------------- update */
   update(dt: number, playerPos: THREE.Vector3): void {
     const step = Math.min(dt, 1 / 30);
     const px = playerPos.x, pz = playerPos.z;
@@ -404,7 +402,7 @@ export class ItemDropManager {
       this.stats.wakeChecks++;
       const dx = minImageF(it.pos.x - px);
       const dz = minImageF(it.pos.z - pz);
-      if (dx * dx + dz * dz < SLEEP_DIST2) this.wake(it);   // wake() swap-removes
+      if (dx * dx + dz * dz < SLEEP_DIST2) this.wake(it);
       else this.wakeCursor++;
     }
   }
@@ -436,7 +434,6 @@ export class ItemDropManager {
     if (this.items.length === 0) return;
     this.pickX = playerPos.x; this.pickY = playerPos.y + 0.9; this.pickZ = playerPos.z;
     const r = PICKUP_DIST;
-    // Repeatedly pick the nearest, since addBlock may succeed for several items.
     for (let guard = 0; guard < 8; guard++) {
       this.pickBest = null; this.pickBestD2 = Infinity;
       this.grid.forEachBox(
@@ -446,7 +443,7 @@ export class ItemDropManager {
       );
       const it = this.consumePickBest();
       if (it === null) return;
-      if (!this.inv.addBlock(it.blockId, 1)) return;   // inventory full
+      if (!this.inv.addBlock(it.blockId, 1)) return;
       this.audio.foley('snap');
       this.onPickup?.(it.blockId);
       this.stats.pickups++;
