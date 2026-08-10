@@ -25,7 +25,8 @@ import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { Enemy, EnemyManager, ENEMY_PRESETS } from './fps/Enemy';
+import { Enemy, ENEMY_PRESETS } from './fps/Enemy';
+import { EnemyManager } from './fps/EnemyManager';
 import { Effects } from './fps/effects';
 import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
 import { session, saveCoins } from './session';
@@ -41,142 +42,15 @@ import {
 } from './crafting/smelting';
 import { ItemDropManager } from './fps/ItemDrop';
 import { buildExtrudedItem, paintDrumstick, pixelTexture } from './fps/textures';
-import { Spring1 } from './fps/anim';
 import type { BodyRig } from './fps/models';
+import type { Target, HotbarItem, HudStats, EngineEvents } from './engine/types';
+import {
+  SPACE_ALTITUDE, LOAD_LABELS, UNDERWATER_FOG, NIGHT_MIST, LASER_NAME, DEATH_DURATION,
+  CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_HALF_EXTENT, GRASS_SHADOW_RADIUS,
+  TO_FPS, FROM_FPS, B_COAL, B_STICK, GUN_ICON_COLORS,
+} from './engine/constants';
 
-interface Target {
-  group: THREE.Group;
-  board: THREE.Mesh;
-  boardMat: THREE.MeshLambertMaterial;
-  wobbleX: Spring1;
-  wobbleZ: Spring1;
-  flash: number;
-}
-
-export interface HotbarItem {
-  id: number | string;
-  name: string;
-  icon: string;
-  count?: number;
-}
-
-export interface HudStats {
-  fps: number;
-  x: number;
-  y: number;
-  z: number;
-  biome: string;
-  time: number;
-  underwater: boolean;
-  muted: boolean;
-  isDay: boolean;
-  piloting: boolean;
-  shipSpeed: number;
-  shipAlt: number;
-  shipNear: boolean;
-  hp: number;
-  maxHp: number;
-  kills: number;
-  campsTotal: number;
-  campsCleared: number;
-  enemiesAlive: number;
-  dead: boolean;
-  respawnIn: number;
-  toolMode: 'weapon' | 'laser' | 'block' | 'food';
-  weaponId: string;
-  weaponName: string;
-  ammo: number;
-  mag: number;
-  reloading: boolean;
-  reloadT: number;
-  inventoryOpen: boolean;
-  craftingOpen: boolean;
-  furnaceOpen: boolean;
-  furnaceBurn: number;
-  furnaceCook: number;
-  slot: number;
-  enemiesEnabled: boolean;
-  mineCharge: number;
-  heldBlockId: number | null;
-  scoped: boolean;
-  ads: number;
-  hitSeq: number;
-  damageSeq: number;
-  dmgAngle: number;
-  demolition: number;
-  blocksMined: number;
-  targetsHit: number;
-  session: number;
-  switchAt: number;
-  spread: number;
-  coins: number;
-  coinSeq: number;
-  lastCoinGain: number;
-  nearMerchant: boolean;
-  shopOpen: boolean;
-  shopMerchantName: string | null;
-  shopStock: { itemId: string; quantity: number; maxQuantity: number }[];
-  shopSellOpen: boolean;
-}
-
-export interface EngineEvents {
-  onProgress: (p: number, label: string) => void;
-  onReady: (items: HotbarItem[], seed: number) => void;
-  onLock: (locked: boolean) => void;
-  onSelect: (index: number) => void;
-  onStats: (s: HudStats) => void;
-  onEnterSpace?: (theme: PlanetTheme | null) => void;
-}
-
-const SPACE_ALTITUDE = 170;
-
-const LOAD_LABELS = [
-  'Baking pixel textures',
-  'Carving mountains',
-  'Growing forests',
-  'Filling oceans',
-  'Placing torches of the sun',
-];
-
-const UNDERWATER_FOG = new THREE.Color(0x0a2a5e);
-
-const NIGHT_MIST = new THREE.Color(0x39465e);
-
-const LASER_NAME = "MK-7 'PROSPECTOR'";
-const DEATH_DURATION = 4;
-
-const CELESTIAL_SHADOW_SIZE = 2048;
-const CELESTIAL_SHADOW_HALF_EXTENT = 44;
-
-const GRASS_SHADOW_RADIUS = 0;
-
-const TO_FPS: Record<number, number> = {
-  [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,
-  [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
-  [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
-  [B.COBBLE]: 11,
-  [B.COAL_ORE]: 58, [B.TORCH]: 60,
-  [B.CONVEYOR_N]: 61, [B.CONVEYOR_E]: 61, [B.CONVEYOR_S]: 61, [B.CONVEYOR_W]: 61,
-  [B.INSERTER_N]: 62, [B.INSERTER_E]: 62, [B.INSERTER_S]: 62, [B.INSERTER_W]: 62,
-  [B.LASER_MINER_N]: 63, [B.LASER_MINER_E]: 63, [B.LASER_MINER_S]: 63, [B.LASER_MINER_W]: 63,
-  [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
-  [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
-  [B.ORE_JADE]: 56, [B.ORE_EMERALD]: 57,
-};
-const FROM_FPS: Record<number, number> = Object.fromEntries(
-  Object.entries(TO_FPS).map(([k, v]) => [v, Number(k)])
-);
-FROM_FPS[58] = B.COAL_ITEM;
-FROM_FPS[59] = B.STICK_ITEM;
-FROM_FPS[60] = B.TORCH;
-FROM_FPS[61] = B.CONVEYOR_E;
-FROM_FPS[62] = B.INSERTER_E;
-FROM_FPS[63] = B.LASER_MINER_E;
-
-const B_COAL = 58;
-const B_STICK = 59;
-
-const GUN_ICON_COLORS = ['#9aa4ae', '#565b3c', '#3f4650', '#6b5136', '#5d6142', '#ff8a3c'];
+export type { HotbarItem, HudStats, EngineEvents } from './engine/types';
 
 export class GameEngine {
   private renderer: THREE.WebGLRenderer;
