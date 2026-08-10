@@ -6,9 +6,19 @@ import { Biome } from '../world/biomes';
 import { B, isWaterId } from '../world/blocks';
 import { mulberry32 } from '../core/noise';
 import {
-  Enemy, CAMP_CONFIG, pathBudget,
+  Enemy, CAMP_CONFIG,
   type EnemyBehavior, type EnemyDeps, type EnemyPlayer,
 } from './Enemy';
+import { EnemyGrid, SIM_RADIUS as GRID_SIM_RADIUS } from './EnemyGrid';
+import {
+  TIER_HOT, TIER_WARM, TIER_COLD, TIER_DORMANT,
+  TIER_PERIOD_S, MAX_TICK_DT, MAX_SUBSTEPS,
+  RENDER_BUDGET, HOT_BUDGET, WARM_BUDGET, COLD_BUDGET,
+  RENDER_R, HOT_R, WARM_R, COLD_R,
+  TIER_HYST, DORMANT_SPEED_SCALE, MAX_POP_R,
+  type Tier,
+} from './tiers';
+import { EnemyInstancer, INSTANCED_ENEMIES } from './EnemyInstancer';
 
 export const CAMP_MEMBER_RESPAWN = CAMP_CONFIG.respawnDelay;
 export const CAMP_REPOPULATE_DELAY = CAMP_CONFIG.repopulateDelay;
@@ -43,13 +53,40 @@ function campRoster(s: CampSite, size: number): string[] {
 
 export interface EnemyHit { enemy: Enemy; point: THREE.Vector3; headshot: boolean; dist: number }
 
-const SIM_RADIUS = 112;
+// Keep the old constant name for compat with respawnTick/wildTick.
+const SIM_RADIUS = GRID_SIM_RADIUS;
 
-const WILD_CAP = 12;
-const WILD_RING_MIN = 30;
-const WILD_RING_MAX = 68;
+// Wild spawn governor (Phase 5 — scaled-up from the original WILD_CAP = 12).
+export const MAX_POP         = 96;    // hard hostile cap; raise gradually
+const WILD_RING_MIN          = 28;
+const WILD_RING_MAX          = 88;
+const DESPAWN_R_SQ           = 136 * 136;
+const RELOCATE_R_SQ          = 96 * 96;
+const SPAWN_RATE_BASE        = 2;   // hostiles/s at empty world
+const SPAWN_RATE_MAX         = 20;  // hostiles/s approaching empty
+
+// Counting-sort histogram for tier assignment.
+const BAND      = 4;
+const INV_BAND  = 1 / BAND;
+const N_BANDS   = Math.ceil(MAX_POP_R / BAND) + 2;
+
+// LOD bands with hysteresis so agents don't flicker on the boundary.
+const L0_IN = 24 * 24, L0_OUT = 28 * 28;
+const L1_IN = 52 * 52, L1_OUT = 58 * 58;
+
+function pickLod(cur: 0 | 1 | 2, tier: Tier, d2: number): 0 | 1 | 2 {
+  if (tier >= TIER_COLD) return 2;
+  if (cur === 0) return d2 > L0_OUT ? (d2 > L1_OUT ? 2 : 1) : 0;
+  if (cur === 1) return d2 < L0_IN ? 0 : (d2 > L1_OUT ? 2 : 1);
+  return d2 < L1_IN ? (d2 < L0_IN ? 0 : 1) : 2;
+}
+
+// (all tier constants are used in assignTiers / tierFor / coarseAdvance / the tick loop)
 
 const tmpV = new THREE.Vector3();
+
+/** Reused player-image position for camp investigate calls — never handed out raw. */
+const CAMP_IMG = new THREE.Vector3();
 
 export class EnemyManager {
   enemies: Enemy[] = [];
@@ -60,11 +97,29 @@ export class EnemyManager {
   campsTotal = 0;
   campsCleared = 0;
   private primed = false;
-  private wildTimer = 2.5;
+  private wildTimer = 1.2;
   private night = true;
   private scene: THREE.Object3D | null = null;
+  private instancer: EnemyInstancer | null = null;
   private deps: EnemyDeps;
   private player: EnemyPlayer;
+
+  // Phase 2 — tier scheduler
+  private bands        = new Int32Array(N_BANDS);
+  private renderCutoff = Infinity;
+  private hotCutoff    = 0;
+  private warmCutoff   = 0;
+  private coldCutoff   = 0;
+
+  // Phase 3 — grid broadphase
+  private grid            = new EnemyGrid();
+  private _spawnCredit    = 0;
+  private _recycleCursor  = 0;
+  private _hostiles       = 0;   // maintained incrementally
+
+  get aliveCount(): number { return this._hostiles; }
+  get hostileCount(): number { return this._hostiles; }
+  get cap(): number { return MAX_POP; }
 
   constructor(
     player: EnemyPlayer,
@@ -91,75 +146,149 @@ export class EnemyManager {
     this.primed = false;
   }
 
-  get aliveCount(): number {
-    let n = 0;
-    for (let i = 0; i < this.enemies.length; i++) if (this.enemies[i].alive) n++;
-    return n;
+  /** Assign distToPlayer and derive tier cutoffs via counting sort. O(N+bands). */
+  private assignTiers(ppx: number, ppz: number): void {
+    const list  = this.enemies;
+    const bands = this.bands;
+    bands.fill(0);
+
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!e.alive) { e.distToPlayer = Infinity; continue; }
+      const dx = wrapDelta(e.pos.x - ppx, WORLD_SIZE);
+      const dz = wrapDelta(e.pos.z - ppz, WORLD_SIZE);
+      const d  = Math.sqrt(dx * dx + dz * dz);
+      e.distToPlayer = d;
+      if (e.cfg.peaceful) continue;
+      bands[Math.min(N_BANDS - 1, (d * INV_BAND) | 0)]++;
+    }
+
+    const rCap = RENDER_BUDGET, hCap = HOT_BUDGET;
+    const wCap = hCap + WARM_BUDGET, cCap = wCap + COLD_BUDGET;
+    let acc = 0;
+    let rB = N_BANDS, hB = N_BANDS, wB = N_BANDS, cB = N_BANDS;
+    for (let b = 0; b < N_BANDS; b++) {
+      acc += bands[b];
+      if (rB === N_BANDS && acc >= rCap) rB = b;
+      if (hB === N_BANDS && acc >= hCap) hB = b;
+      if (wB === N_BANDS && acc >= wCap) wB = b;
+      if (cB === N_BANDS && acc >= cCap) cB = b;
+    }
+    this.renderCutoff = Math.min((rB + 1) * BAND, RENDER_R);
+    this.hotCutoff    = Math.min((hB + 1) * BAND, HOT_R);
+    this.warmCutoff   = Math.min((wB + 1) * BAND, WARM_R);
+    this.coldCutoff   = Math.min((cB + 1) * BAND, COLD_R);
+
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!e.alive) continue;
+      e.tier = this.tierFor(e);
+      // Render LOD: instanced hostiles never use their detailed scene graph.
+      const shouldSleep = e.distToPlayer > this.renderCutoff;
+      if (shouldSleep !== e.asleep) {
+        e.asleep = shouldSleep;
+        if (!INSTANCED_ENEMIES || e.cfg.peaceful) e.group.visible = !shouldSleep;
+      }
+    }
+  }
+
+  private tierFor(e: Enemy): Tier {
+    const d = e.distToPlayer;
+    if (e.cfg.peaceful) {
+      return d < HOT_R ? TIER_HOT : d < COLD_R ? TIER_WARM : TIER_COLD;
+    }
+    const h = TIER_HYST;
+    if (d < this.hotCutoff  || (e.tier === TIER_HOT  && d < this.hotCutoff  * h)) return TIER_HOT;
+    if (d < this.warmCutoff || (e.tier === TIER_WARM && d < this.warmCutoff * h)) return TIER_WARM;
+    if (d < this.coldCutoff || (e.tier === TIER_COLD && d < this.coldCutoff * h)) return TIER_COLD;
+    return TIER_DORMANT;
+  }
+
+  private coarseAdvance(e: Enemy, dt: number, ppx: number, ppz: number): void {
+    if (e.cfg.peaceful) return;
+    const dx   = wrapDelta(ppx - e.pos.x, WORLD_SIZE);
+    const dz   = wrapDelta(ppz - e.pos.z, WORLD_SIZE);
+    const d    = Math.sqrt(dx * dx + dz * dz) || 1;
+    const step = e.cfg.speed * DORMANT_SPEED_SCALE * dt;
+    e.pos.x    = ((e.pos.x + (dx / d) * step) % WORLD_SIZE + WORLD_SIZE) % WORLD_SIZE;
+    e.pos.z    = ((e.pos.z + (dz / d) * step) % WORLD_SIZE + WORLD_SIZE) % WORLD_SIZE;
   }
 
   update(dt: number) {
     if (!this.enabled) return;
     if (!this.primed) this.primed = true;
 
-    pathBudget.tokens = pathBudget.maxTokens;
-
     const ppx = this.player.pos.x;
     const ppz = this.player.pos.z;
     const active = this.activeScratch;
     active.length = 0;
 
+    // Phase 2: assign distances + tiers before the tick loop.
+    this.assignTiers(ppx, ppz);
+
+    // Tick loop with tier-based time accumulation.
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
-      const dx = wrapDelta(e.pos.x - ppx, WORLD_SIZE);
-      const dz = wrapDelta(e.pos.z - ppz, WORLD_SIZE);
-      if (e.alive && dx * dx + dz * dz > SIM_RADIUS * SIM_RADIUS) {
-        if (e.group.visible) e.group.visible = false;
+
+      // Bank time every frame regardless of tier.
+      e.tickAccum += dt;
+
+      const period = TIER_PERIOD_S[e.tier];
+      if (e.alive && e.tickAccum < period) continue;   // not yet due
+
+      const budget = e.tickAccum;
+      e.tickAccum  = 0;
+
+      // Dormant: cheap kinematic advance, no AI, no collision.
+      if (e.tier === TIER_DORMANT) {
+        this.coarseAdvance(e, budget, ppx, ppz);
         continue;
       }
-      if (!e.group.visible) e.group.visible = true;
-      const keep = e.update(dt, this.player);
+
+      // Substep for catch-up budgets (prevents tunnelling through floors).
+      const n    = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(budget / MAX_TICK_DT)));
+      const sdt  = Math.min(budget / n, MAX_TICK_DT);
+      let keep   = true;
+      for (let s = 0; s < n && keep; s++) {
+        keep = e.update(sdt, this.player);
+      }
+
       if (!keep) {
         const g = e.group;
         g.parent?.remove(g);
-        this.enemies.splice(i, 1);
+        // Swap-remove: the element swapped into slot i comes from a higher
+        // index, already processed this frame (reverse iteration) — safe, O(1).
+        const last = this.enemies.length - 1;
+        if (i !== last) this.enemies[i] = this.enemies[last];
+        this.enemies.pop();
+        if (!e.cfg.peaceful) this._hostiles = Math.max(0, this._hostiles - 1);
       } else if (e.alive) {
         active.push(e);
       }
     }
-    for (let i = 0; i < active.length; i++) {
-      for (let j = i + 1; j < active.length; j++) {
-        const a = active[i], b = active[j];
-        if (Math.abs(a.pos.y - b.pos.y) > 2) continue;
-        const rx = a.pos.x - b.pos.x, rz = a.pos.z - b.pos.z;
-        if (rx * rx + rz * rz > 4 && Math.abs(rx) < WORLD_SIZE * 0.5) continue;
-        const dx = wrapDelta(rx, WORLD_SIZE);
-        const dz = wrapDelta(rz, WORLD_SIZE);
-        const d = Math.hypot(dx, dz);
-        if (d < 0.95 && d > 0.001) {
-          const push = (0.95 - d) * 2.4 * dt;
-          a.nudge((dx / d) * push, (dz / d) * push);
-          b.nudge(-(dx / d) * push, -(dz / d) * push);
-        }
-      }
-    }
+
+    // Phase 3: grid-based O(N·ρ) separation instead of O(N²).
+    this.grid.build(this.enemies, ppx, ppz);
+    this.separateGrid(active, dt);
 
     this.respawnTick(dt);
     this.wildTick(dt);
 
-    for (const camp of this.camps) {
+    // Camp proximity: squared distance (no sqrt for out-of-range camps) and a
+    // single reused scratch vector — investigate() copies it into lastKnown.
+    const camps = this.camps;
+    const py = this.player.pos.y;
+    for (let ci = 0; ci < camps.length; ci++) {
+      const camp = camps[ci];
       if (camp.cleared || camp.squad.length === 0) continue;
       const cdx = wrapDelta(ppx - camp.site.cx, WORLD_SIZE);
       const cdz = wrapDelta(ppz - camp.site.cz, WORLD_SIZE);
-      const dist = Math.hypot(cdx, cdz);
-      if (dist <= camp.site.radius) {
-        const pImg = new THREE.Vector3(
-          camp.site.cx + cdx,
-          this.player.pos.y,
-          camp.site.cz + cdz,
-        );
-        for (const e of camp.squad) {
-          if (e.alive) e.investigate(pImg.clone());
-        }
+      const r = camp.site.radius;
+      if (cdx * cdx + cdz * cdz > r * r) continue;
+      CAMP_IMG.set(camp.site.cx + cdx, py, camp.site.cz + cdz);
+      const squad = camp.squad;
+      for (let si = 0; si < squad.length; si++) {
+        if (squad[si].alive) squad[si].investigate(CAMP_IMG);
       }
     }
 
@@ -167,11 +296,69 @@ export class EnemyManager {
     for (const c of this.camps) if (c.cleared) cleared++;
     this.campsCleared = cleared;
     this.campsTotal = this.camps.length;
+    if (INSTANCED_ENEMIES) this.syncInstances(ppx, ppz);
+  }
+
+  /** Grid-based O(N·ρ) separation — replaces the O(N²) double loop. */
+  private separateGrid(active: Enemy[], dt: number): void {
+    const SEP_R  = 0.95;
+    const SEP_R2 = SEP_R * SEP_R;
+    for (let i = 0; i < active.length; i++) {
+      const a  = active[i];
+      const n  = this.grid.query(a.pos.x, a.pos.y, a.pos.z, SEP_R + 0.1);
+      for (let k = 0; k < n; k++) {
+        const j = this.grid.qIdx[k];
+        const b = this.enemies[j];
+        if (b === a || !b || !b.alive) continue;
+        const dy = a.pos.y - b.pos.y;
+        if (Math.abs(dy) > 2) continue;
+        const dx = this.grid.qDX[k];
+        const dz = this.grid.qDZ[k];
+        const r2 = dx * dx + dz * dz;
+        if (r2 >= SEP_R2 || r2 < 1e-6) continue;
+        const d    = Math.sqrt(r2);
+        const push = (SEP_R - d) * 2.4 * dt / d;
+        // EnemyGrid.query() defines qDX/qDZ as (candidate − query), i.e. b − a.
+        // To push A away from B we must move A opposite that vector (-dx,-dz),
+        // and B along it (+dx,+dz). The previous signs were swapped, which
+        // pulled every pair of nearby enemies toward each other instead of
+        // apart — the cause of the single-point crowding.
+        a.nudge(-dx * push, -dz * push);
+        b.nudge(dx * push, dz * push);
+      }
+    }
   }
 
   private attach(e: Enemy) {
     const parent = this.scene ?? this.deps.world.group.parent;
+    if (INSTANCED_ENEMIES && !e.cfg.peaceful) {
+      e.detailed = false;
+      e.group.parent?.remove(e.group);
+      e.group.visible = false;
+      return;
+    }
+    e.detailed = true;
     if (parent && !e.group.parent) parent.add(e.group);
+  }
+
+  private syncInstances(ppx: number, ppz: number): void {
+    const inst = this.instancer;
+    if (!inst) return;
+    inst.begin();
+    for (const e of this.enemies) {
+      if (e.cfg.peaceful) continue;
+      e.detailed = false;
+      e.group.parent?.remove(e.group);
+      e.group.visible = false;
+      if (!e.alive || e.asleep) { e.rendered = false; continue; }
+      const dx = wrapDelta(e.pos.x - ppx, WORLD_SIZE);
+      const dz = wrapDelta(e.pos.z - ppz, WORLD_SIZE);
+      const d2 = dx * dx + dz * dz;
+      e.lod = pickLod(e.lod, e.tier, d2);
+      e.rendered = true;
+      if (!inst.push(e, ppx, ppz)) break;
+    }
+    inst.end();
   }
 
   private isValidGroundPos(w: WorldLike, fx: number, y: number, fz: number, hintY: number): boolean {
@@ -261,6 +448,7 @@ export class EnemyManager {
     this.enemies.push(e);
     this.attach(e);
     camp.squad.push(e);
+    this._hostiles++;
     return true;
   }
 
@@ -316,39 +504,89 @@ export class EnemyManager {
 
   private wildTick(dt: number) {
     if (!this.night) return;
+
+    // Phase 5 spawn governor: credit-based rate with despawn + relocation.
+    const deficit = MAX_POP - this._hostiles;
+    const rate    = deficit <= 0 ? 0 :
+      SPAWN_RATE_BASE + (SPAWN_RATE_MAX - SPAWN_RATE_BASE) * (deficit / MAX_POP);
+    this._spawnCredit += rate * dt;
+    if (this._spawnCredit > 6) this._spawnCredit = 6;
+
+    // Despawn wild agents that wandered too far out.
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!e.alive || e.cfg.peaceful || e.home === null) continue;
+      const d2 = e.distToPlayer * e.distToPlayer;   // already computed by assignTiers
+      if (d2 > DESPAWN_R_SQ) {
+        e.group.parent?.remove(e.group);
+        this.enemies.splice(i, 1);
+        this._hostiles = Math.max(0, this._hostiles - 1);
+      }
+    }
+
+    // Spawn up to credit, but only if due.
     this.wildTimer -= dt;
     if (this.wildTimer > 0) return;
-    this.wildTimer = 1.4 + Math.random() * 1.4;
+    this.wildTimer = 0.35 + Math.random() * 0.35;
 
-    let hostiles = 0;
-    for (const e of this.enemies) if (e.alive && !e.cfg.peaceful) hostiles++;
-    if (hostiles >= WILD_CAP) return;
+    if (this._spawnCredit < 1) return;
 
-    const w = this.deps.world;
+    const w  = this.deps.world;
     const pp = this.player.pos;
+
+    // Expand the ring when the crowd is dense so we don't clog the near ring.
+    const fill    = Math.min(1, this._hostiles / Math.max(1, MAX_POP));
+    const rMin    = WILD_RING_MIN + fill * 30;
+    const rMax    = WILD_RING_MAX + fill * 30;
+
     for (let tries = 0; tries < 8; tries++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = WILD_RING_MIN + Math.random() * (WILD_RING_MAX - WILD_RING_MIN);
+      const a  = Math.random() * Math.PI * 2;
+      const r  = rMin + Math.random() * (rMax - rMin);
       const fx = ((Math.floor(pp.x + Math.cos(a) * r) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
       const fz = ((Math.floor(pp.z + Math.sin(a) * r) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
-      const h = w.highestY(fx, fz);
+      const h  = w.highestY(fx, fz);
       if (h < 2 || h >= WORLD_HEIGHT - 3) continue;
       const floor = w.get(fx, h - 1, fz);
       if (isWaterId(floor) || floor === B.LEAVES || floor === B.AIR) continue;
       if (w.solid(fx, h, fz) || w.solid(fx, h + 1, fz)) continue;
 
-      const roll = Math.random();
+      const roll   = Math.random();
       const preset = roll < 0.5 ? 'grunt' : roll < 0.82 ? 'runner' : 'heavy';
-      const p = new THREE.Vector3(fx + 0.5, h, fz + 0.5);
-      const e = new Enemy(preset, p, this.deps, {
-        behavior: Math.random() < 0.5 ? 'patrol' : 'idle',
-      });
-      e.home = { x: p.x, z: p.z };
-      this.enemies.push(e);
-      this.attach(e);
-      e.alert(new THREE.Vector3(pp.x, pp.y, pp.z));
+
+      if (this._hostiles >= MAX_POP) {
+        // Relocate the farthest distant wild enemy instead of spawning new.
+        const candidate = this.findRelocatable();
+        if (candidate) {
+          candidate.pos.set(fx + 0.5, h, fz + 0.5);
+          candidate.home = { x: fx + 0.5, z: fz + 0.5 };
+          candidate.alert(new THREE.Vector3(pp.x, pp.y, pp.z));
+        }
+      } else {
+        const p = new THREE.Vector3(fx + 0.5, h, fz + 0.5);
+        const e = new Enemy(preset, p, this.deps, { behavior: 'idle' });
+        e.home = { x: p.x, z: p.z };
+        this.enemies.push(e);
+        this.attach(e);
+        e.alert(new THREE.Vector3(pp.x, pp.y, pp.z));
+        this._hostiles++;
+      }
+      this._spawnCredit -= 1;
       return;
     }
+  }
+
+  private findRelocatable(): Enemy | null {
+    const n = this.enemies.length;
+    if (n === 0) return null;
+    for (let k = 0; k < n; k++) {
+      const i = (this._recycleCursor + k) % n;
+      const e = this.enemies[i];
+      if (e.alive && !e.cfg.peaceful && e.home !== null && e.distToPlayer * e.distToPlayer > RELOCATE_R_SQ) {
+        this._recycleCursor = (i + 1) % n;
+        return e;
+      }
+    }
+    return null;
   }
 
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): EnemyHit | null {
@@ -460,12 +698,24 @@ export class EnemyManager {
 
   addScene(scene: THREE.Scene) {
     this.scene = scene;
-    for (const e of this.enemies) if (!e.group.parent) scene.add(e.group);
+    if (INSTANCED_ENEMIES && !this.instancer) this.instancer = new EnemyInstancer(scene);
+    for (const e of this.enemies) {
+      if (INSTANCED_ENEMIES && !e.cfg.peaceful) {
+        e.detailed = false;
+        e.group.parent?.remove(e.group);
+        e.group.visible = false;
+      } else {
+        e.detailed = true;
+        if (!e.group.parent) scene.add(e.group);
+      }
+    }
   }
 
   clearAll() {
     for (const e of this.enemies) if (e.group.parent) e.group.parent.remove(e.group);
     this.enemies = [];
+    this._hostiles = 0;
+    if (this.instancer) { this.instancer.begin(); this.instancer.end(); }
     for (const c of this.camps) {
       c.squad.length = 0;
       if (!c.cleared) {

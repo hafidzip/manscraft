@@ -48,6 +48,7 @@ export const B = {
   LASER_MINER_E: 61,
   LASER_MINER_S: 62,
   LASER_MINER_W: 63,
+  TURRET: 64,
 } as const;
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
@@ -269,8 +270,12 @@ const INS_TOPS = [TILES.inserter_top_n, TILES.inserter_top_e, TILES.inserter_top
 const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[], ghost = false): BlockDef => {
   const d = def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
   if (ghost) {
+    // Ghost machines occupy their cell (so they can be targeted, mined and
+    // cannot be built over) but render NO cube and are not solid: the machine
+    // mesh sits directly on top of whatever block is underneath.
     d.solid = false;
     d.opaque = false;
+    // Break instantly, exactly like tall grass / flowers / torches.
     d.hardness = 0.05;
   }
   return d;
@@ -286,6 +291,11 @@ INS.forEach((id, i) => {
   const lm = machineDef('Laser Miner', TILES.furnace_top, TILES.inserter_side, 1.4, [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34], true);
   LM.forEach((id) => { DEFS[id] = lm; });
 }
+// Turret: a 360° auto-targeting gun. Ghost block like the other machines.
+DEFS[B.TURRET] = machineDef(
+  'Turret', TILES.furnace_top, TILES.inserter_side, 1.6,
+  [0x4a4e56, 0x8c939c, 0xffcc44, 0x24272c], true,
+);
 
 const CONV_DIR = orient(CONV, (i) => DIRS[i]);
 const INS_DIR = orient(INS, (i) => DIRS[i]);
@@ -294,7 +304,9 @@ const LM_DIR = orient(LM, (i) => DIRS[i]);
 export const isConveyor = (id: number): boolean => CONV_DIR.has(id);
 export const isInserter = (id: number): boolean => INS_DIR.has(id);
 export const isLaserMiner = (id: number): boolean => LM_DIR.has(id);
-export const isMachine = (id: number): boolean => CONV_DIR.has(id) || INS_DIR.has(id) || LM_DIR.has(id);
+export const isTurret = (id: number): boolean => id === B.TURRET;
+export const isMachine = (id: number): boolean =>
+  CONV_DIR.has(id) || INS_DIR.has(id) || LM_DIR.has(id) || id === B.TURRET;
 export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;
 export const inserterDir = (id: number): Dir | null => INS_DIR.get(id) ?? null;
 export const laserMinerDir = (id: number): Dir | null => LM_DIR.get(id) ?? null;

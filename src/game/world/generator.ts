@@ -116,24 +116,23 @@ export class TerrainGenerator {
     };
   }
 
-  private colHeight: Int16Array | null = null;
-  private colBiome: Uint8Array | null = null;
-  private colMount: Uint8Array | null = null;
+  /* ------------------------------------------------------------------
+     Column cache (snippet §10a): SoA planes over ONE eagerly-allocated
+     buffer. Validity lives in `state` (zero-initialised by the allocator,
+     so the old 512 KB fill(-1) disappears entirely) and `height` is free
+     to hold any value. The hit path is ~3 int ops + one Uint8 load —
+     small enough to inline into callers.
+     ------------------------------------------------------------------ */
+  private static readonly COL_N = W * W;
+  private readonly colBuf = new ArrayBuffer(TerrainGenerator.COL_N * 5);
+  private readonly colState = new Uint8Array(this.colBuf, 0, TerrainGenerator.COL_N);            // 0=empty 1=ready
+  private readonly colBiome = new Uint8Array(this.colBuf, TerrainGenerator.COL_N, TerrainGenerator.COL_N);
+  private readonly colHeight = new Int16Array(this.colBuf, TerrainGenerator.COL_N * 2, TerrainGenerator.COL_N);
+  private readonly colMount = new Uint8Array(this.colBuf, TerrainGenerator.COL_N * 4, TerrainGenerator.COL_N);
   private colArea: Uint8Array | null = null;
 
-  private computeColumn(px: number, pz: number): number {
-    let hCache = this.colHeight;
-    let bCache = this.colBiome;
-    let mCache = this.colMount;
-    if (!hCache || !bCache || !mCache) {
-      hCache = this.colHeight = new Int16Array(W * W).fill(-1);
-      bCache = this.colBiome = new Uint8Array(W * W);
-      mCache = this.colMount = new Uint8Array(W * W);
-    }
-    const k = pz * W + px;
-    const cached = hCache[k];
-    if (cached >= 0) return k;
-
+  /** Scalar terrain math for one column — unchanged from the original. */
+  private computeScalar(px: number, pz: number): { h: number; biome: Biome; mount: number } {
     const f = this.fields(px, pz);
     let biome: Biome;
     if (this.forced !== null) biome = this.forced;
@@ -150,16 +149,40 @@ export class TerrainGenerator {
     const m = smoothstep(0.64, 0.9, f.mount);
     if (m > 0) h += this.mountAmp * (m * m * 12 + m * f.hills * 2 + m * Math.abs(f.pv) * 5);
 
-    hCache[k] = Math.max(3, Math.min(H - 16, Math.floor(h)));
-    bCache[k] = biome;
-    mCache[k] = Math.min(255, Math.round(m * 255));
+    return {
+      h: Math.max(3, Math.min(H - 16, Math.floor(h))),
+      biome,
+      mount: Math.min(255, Math.round(m * 255)),
+    };
+  }
+
+  /** A miss is never isolated: fill the whole 16-wide, 16-aligned row.
+   *  16 divides 512, so a run never crosses a z-row and writes are
+   *  contiguous. Delegates to the scalar path -> bit-identical worlds. */
+  private fillColumnRow(px0: number, pz: number): void {
+    const k0 = pz * W + px0;
+    for (let i = 0; i < S; i++) {
+      const r = this.computeScalar(px0 + i, pz);
+      const k = k0 + i;
+      // payload first, validity last
+      this.colHeight[k] = r.h;
+      this.colBiome[k]  = r.biome;
+      this.colMount[k]  = r.mount;
+      this.colState[k]  = 1;
+    }
+  }
+
+  private computeColumn(px: number, pz: number): number {
+    const k = pz * W + px;
+    if (this.colState[k] !== 0) return k;                 // hit: inlineable
+    this.fillColumnRow(px & ~(S - 1), pz);                // miss: fill all 16
     return k;
   }
 
   biomeAt(x: number, z: number): Biome {
     if (this.forced !== null) return this.forced;
     const k = this.computeColumn(wrapBlock(x), wrapBlock(z));
-    return this.colBiome![k] as Biome;
+    return this.colBiome[k] as Biome;
   }
 
   biomeDefAt(x: number, z: number) {
@@ -168,7 +191,7 @@ export class TerrainGenerator {
 
   heightAt(x: number, z: number): number {
     const k = this.computeColumn(wrapBlock(x), wrapBlock(z));
-    return this.colHeight![k];
+    return this.colHeight[k];
   }
 
   areaAt(x: number, z: number): TerrainArea {
@@ -180,12 +203,12 @@ export class TerrainGenerator {
     if (cached !== 0) return (cached - 1) as TerrainArea;
 
     this.computeColumn(px, pz);
-    const h = this.colHeight![k];
+    const h = this.colHeight[k];
     let area: TerrainArea;
 
     if (h < this.sea) {
       area = TerrainArea.WATER;
-    } else if (this.colMount![k] >= MOUNTAIN_MASK_MIN || h > 50 + this.dSea) {
+    } else if (this.colMount[k] >= MOUNTAIN_MASK_MIN || h > 50 + this.dSea) {
       area = TerrainArea.MOUNTAIN;
     } else {
       const s = 2;

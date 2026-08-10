@@ -5,8 +5,9 @@ import { Effects } from './effects';
 import { AudioSynth } from './audio';
 import { box, MATS } from './models';
 import { pixelTexture } from './textures';
-import { findPath } from './Pathfinder';
 import type { CampBuild } from '../world/camps';
+import type { Tier } from './tiers';
+import type { FlowField, FlowSample } from './FlowField';
 
 export const CAMP_CONFIG = {
   squadSize: [3, 5] as [number, number],
@@ -15,8 +16,6 @@ export const CAMP_CONFIG = {
   patrolSpeedFactor: 0.55,
   maxLeash: 70,
 };
-
-export const pathBudget = { tokens: 0, maxTokens: 5 };
 
 export type EnemyState = 'spawn' | 'idle' | 'patrol' | 'chase' | 'attack' | 'dead';
 
@@ -110,7 +109,12 @@ export interface EnemyDeps {
   camera: THREE.Object3D;
   onPlayerHit(dmg: number, from: THREE.Vector3): void;
   onEnemyKilled(e: Enemy): void;
+  /** Phase 4: shared navigation field. Optional so tests can omit it. */
+  flowField?: FlowField;
 }
+
+/** One shared sample object for the whole game — not one per enemy per frame. */
+const FLOW: FlowSample = { x: 0, z: 0, targetY: -1, climb: 0, cost: 0 };
 
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
@@ -142,6 +146,18 @@ export class Enemy {
   readonly halfW = 0.3;
   readonly height = 1.8;
 
+  // Phase 1 + 2: LOD fields written by EnemyManager, read by callers.
+  distToPlayer = Infinity;
+  tier: Tier = 0;
+  tickAccum = 0;
+  asleep = false;
+  rendered = false;
+  detailed = true;
+  lod: 0 | 1 | 2 = 2;
+  instGait = 0;
+  instGaitGain = 0;
+  hitFlash = 0;
+
   private walkPhase = 0;
   private speedN = 0;
   private losTimer = 0;
@@ -154,10 +170,6 @@ export class Enemy {
   private stuckTimer = 0;
   private lastX = 0; private lastZ = 0;
 
-  private path: THREE.Vector3[] = [];
-  private pathIdx = 0;
-  private repathT = Math.random() * 0.6;
-  private pathGoal = new THREE.Vector3();
   private lastKnown = new THREE.Vector3();
   private hasTarget = false;
   alerted = false;
@@ -166,18 +178,13 @@ export class Enemy {
   private searchT = 0;
   private grounded = false;
   private jumpCd = 0;
-  private directBlockT = 0;
   private lastSteerIdx = -1;
-  private boxedT = 0;
   private steerT = Math.random() * 0.1;
   private steerX = 0;
   private steerZ = 0;
   private steerJump = false;
   private steerBoxed = false;
-  private corridorT = Math.random() * 0.15;
-  private corridorOk = false;
   private steerInterval = 0.08;
-  private repathFails = 0;
   private wanderAngle = Math.random() * Math.PI * 2;
   private flashT = 0;
   private stateT = 0;
@@ -367,6 +374,7 @@ export class Enemy {
     if (!this.cfg.peaceful) this.alert(point);
     this.hp -= headshot ? amount * 2 : amount;
     this.flashT = 0.09;
+    this.hitFlash = 0.12;
     tmpV.copy(this.pos).sub(point).setY(0);
     if (tmpV.lengthSq() < 0.001) tmpV.set(Math.random() - 0.5, 0, Math.random() - 0.5);
     tmpV.normalize().multiplyScalar(headshot ? 2.2 : 1.2);
@@ -427,9 +435,7 @@ export class Enemy {
   }
 
   invalidatePath() {
-    this.path.length = 0;
-    this.pathIdx = 0;
-    this.repathT = 0;
+    // A* is disabled — kept as a no-op for external call sites.
   }
 
   alert(pos: THREE.Vector3) {
@@ -485,7 +491,7 @@ export class Enemy {
     }
   }
 
-  get navigating(): boolean { return this.pathIdx < this.path.length; }
+  get navigating(): boolean { return this.hasTarget; }
 
   assignCamp(build: CampBuild): void {
     this.patrolPoints = (build.patrolPoints.length ? build.patrolPoints : build.posts).slice();
@@ -605,6 +611,21 @@ export class Enemy {
       }
     }
 
+    // Hostiles are permanently aware of the player: they always know where he
+    // is and close the distance. Only merchants stay passive.
+    if (!c.peaceful && !this.alerted && this.cooldownUntil <= 0) {
+      this.alerted = true;
+      this.alertT = 0;
+    }
+    if (!c.peaceful && this.cooldownUntil <= 0) {
+      // Keep the tracked position fresh even without line of sight so they
+      // hunt the player down instead of wandering off.
+      this.lastKnown.copy(pp);
+      this.hasTarget = true;
+      this.searchT = 0;
+      this.alertT = 0;
+    }
+
     let hasLos = this.hasLos;
     if (!this.alerted) {
       hasLos = false;
@@ -621,7 +642,8 @@ export class Enemy {
       if (this.alertT > 12) { this.standDown(); hasLos = false; }
     }
 
-    if (this.home) {
+    // Hostiles never leash back home — they pursue the player indefinitely.
+    if (this.home && c.peaceful) {
       const pd = Math.hypot(pp.x - this.home.x, pp.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
         this.leashT += dt;
@@ -643,7 +665,9 @@ export class Enemy {
       if (this.searchT > 6) { this.hasTarget = false; this.lastKnown.set(0, 0, 0); }
       this.state = this.cfg.behavior;
       patrolSteerGoal = this.cfg.behavior === 'idle' ? this.idleGoal(dt) : this.patrolGoal(dt);
-    } else if (hasLos && (this.state === 'patrol' || this.state === 'idle')) {
+    } else if ((hasLos || this.hasTarget) && (this.state === 'patrol' || this.state === 'idle')) {
+      // Hostiles commit to the chase even with no direct line of sight —
+      // they path toward the player's last known (continuously updated) spot.
       this.state = 'chase';
       this.returning = false; this.dwellT = 0; this.leashT = 0;
       this.idleGoalPt = null;
@@ -663,9 +687,10 @@ export class Enemy {
       haveFace = true;
     } else if (!passiveStance) {
       if (hasLos) { faceX = toPlayer.x; faceZ = toPlayer.z; haveFace = true; }
-      else if (this.pathIdx < this.path.length) {
-        const wp = this.path[this.pathIdx];
-        faceX = wp.x - this.pos.x; faceZ = wp.z - this.pos.z; haveFace = true;
+      else if (this.hasTarget) {
+        faceX = this.lastKnown.x - this.pos.x;
+        faceZ = this.lastKnown.z - this.pos.z;
+        haveFace = true;
       }
     }
     if (!haveFace && hSpeed > 0.8) {
@@ -701,8 +726,6 @@ export class Enemy {
 
     this.steerInterval = dist < 24 ? 0.08 : dist < 60 ? 0.2 : 0.45;
     this.steerT -= dt;
-    this.corridorT -= dt;
-    this.repathT -= dt;
     this.jumpCd = Math.max(0, this.jumpCd - dt);
     let wx = 0, wz = 0;
     let wantJump = false;
@@ -727,106 +750,72 @@ export class Enemy {
       } else {
         wx = 0; wz = 0;
       }
-    } else if (hasLos && this.directBlockT <= 0 && this.corridorCached(pp.x, pp.z)) {
-      this.path.length = 0;
-      this.pathIdx = 0;
-      const inv = 1 / (dist || 1);
-      const fx = toPlayer.x * inv, fz = toPlayer.z * inv;
-      const rx = fz, rz = -fx;
-      const want = c.preferredRange;
-
-      let dX = 0, dZ = 0;
-      if (dist > want) {
-        const urgency = Math.min(1, (dist - want) / 7);
-        dX += fx; dZ += fz;
-        const orbit = 0.6 * (1 - urgency);
-        dX += rx * this.strafeDir * orbit;
-        dZ += rz * this.strafeDir * orbit;
-      } else if (dist < want * 0.55) {
-        dX -= fx * 0.85; dZ -= fz * 0.85;
-        dX += rx * this.strafeDir * 0.7;
-        dZ += rz * this.strafeDir * 0.7;
-      } else {
-        dX += fx * 0.3; dZ += fz * 0.3;
-        dX += rx * this.strafeDir * 0.7;
-        dZ += rz * this.strafeDir * 0.7;
-      }
-
-      this.steerContext(dX, dZ, steerOut);
-      if (steerOut.x === 0 && steerOut.z === 0) {
-        this.boxedT += dt;
-        this.directBlockT = 0.9;
-        this.lastKnown.copy(pp);
-        this.hasTarget = true;
-        this.repathT = 0;
-      } else {
-        this.boxedT = 0;
-        wx = steerOut.x; wz = steerOut.z;
-        if (steerOut.jump) wantJump = true;
-        if (steerOut.x * dX + steerOut.z * dZ < 0.25 && this.strafeTimer > 0.6) {
-          this.strafeDir = -this.strafeDir;
-          this.strafeTimer = 0.5;
-        }
-      }
     } else if (this.hasTarget) {
-      const goalMoved = this.pathGoal.distanceToSquared(this.lastKnown) > 4;
-      const needPath = this.path.length === 0 || this.pathIdx >= this.path.length;
-      const nearGoal = this.pos.distanceToSquared(this.lastKnown) < 2.5;
-      if ((this.repathT <= 0 || goalMoved || needPath) && pathBudget.tokens > 0 && !nearGoal) {
-        pathBudget.tokens--;
-        this.repathT = 0.26 + Math.random() * 0.3;
-        this.pathGoal.copy(this.lastKnown);
-        const ok = findPath(
-          this.deps.world,
-          Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z),
-          Math.floor(this.lastKnown.x), Math.floor(this.lastKnown.y), Math.floor(this.lastKnown.z),
-          this.path,
-          { maxNodes: 1800, maxFall: 8, maxJump: 2, reachRadius: 1.5 }
-        );
-        this.pathIdx = 0;
-        if (!ok && this.path.length === 0) {
-          this.repathFails++;
-          if (this.repathFails > 4) { this.hasTarget = false; this.repathFails = 0; }
+      // ── 100% flow-field navigation ─────────────────────────────────────
+      // A* pathfinding is disabled. Combat-close enemies still use local
+      // orbit/strafe steering; everything else samples the shared flow field.
+      // If the field is not ready / unreachable / wrong storey, fall back to
+      // a simple direct vector toward lastKnown (still no A*).
+
+      // Prefer local combat steering when we already have line of sight and
+      // are inside preferred range — flow field would just pull straight in.
+      if (hasLos && dist < c.preferredRange * 1.35) {
+        const inv = 1 / (dist || 1);
+        const fx = toPlayer.x * inv, fz = toPlayer.z * inv;
+        const rx = fz, rz = -fx;
+        const want = c.preferredRange;
+        let dX = 0, dZ = 0;
+        if (dist > want) {
+          const urgency = Math.min(1, (dist - want) / 7);
+          dX += fx; dZ += fz;
+          const orbit = 0.6 * (1 - urgency);
+          dX += rx * this.strafeDir * orbit;
+          dZ += rz * this.strafeDir * orbit;
+        } else if (dist < want * 0.55) {
+          dX -= fx * 0.85; dZ -= fz * 0.85;
+          dX += rx * this.strafeDir * 0.7;
+          dZ += rz * this.strafeDir * 0.7;
         } else {
-          this.repathFails = 0;
+          dX += fx * 0.3; dZ += fz * 0.3;
+          dX += rx * this.strafeDir * 0.7;
+          dZ += rz * this.strafeDir * 0.7;
         }
-      }
-
-      if (this.pathIdx < this.path.length) {
-        if (this.steerT <= 0) {
-          let look = this.pathIdx;
-          const maxLook = Math.min(this.path.length - 1, this.pathIdx + 3);
-          for (let k = maxLook; k > this.pathIdx; k--) {
-            const cand = this.path[k];
-            if (Math.abs(cand.y - this.pos.y) <= MAX_JUMP_UP &&
-                this.corridorClear(cand.x, cand.z, 6)) { look = k; break; }
+        this.steerContext(dX, dZ, steerOut);
+        if (steerOut.x === 0 && steerOut.z === 0) {
+          // Locally boxed — try the flow field as an escape route.
+          if (this.deps.flowField?.sample(this.pos.x, this.pos.y, this.pos.z, FLOW)) {
+            this.steerContext(FLOW.x, FLOW.z, steerOut);
           }
-          this.pathIdx = look;
         }
-
-        const wp = this.path[this.pathIdx];
-        const dxw = wp.x - this.pos.x;
-        const dzw = wp.z - this.pos.z;
-        const dyw = wp.y - this.pos.y;
-        const hd = Math.hypot(dxw, dzw);
-
-        if (hd < 0.42 && dyw < 0.6 && dyw > -1.6) {
-          this.pathIdx++;
+        if (steerOut.x !== 0 || steerOut.z !== 0) {
+          wx = steerOut.x; wz = steerOut.z;
+          if (steerOut.jump) wantJump = true;
+          if (steerOut.x * dX + steerOut.z * dZ < 0.25 && this.strafeTimer > 0.6) {
+            this.strafeDir = -this.strafeDir;
+            this.strafeTimer = 0.5;
+          }
+        }
+      } else if (this.deps.flowField?.sample(this.pos.x, this.pos.y, this.pos.z, FLOW)) {
+        // Long-range: pure flow-field gradient.
+        this.steerContext(FLOW.x, FLOW.z, steerOut);
+        if (steerOut.x !== 0 || steerOut.z !== 0) {
+          wx = steerOut.x; wz = steerOut.z;
+          if (steerOut.jump) wantJump = true;
+          // 2.5D payoff: the field knows the next column is a step up.
+          if (FLOW.climb > 0 && this.grounded && this.jumpCd <= 0) wantJump = true;
         } else {
-          this.steerContext(dxw, dzw, steerOut);
-          if (steerOut.x === 0 && steerOut.z === 0) {
-            this.repathT = 0;
-            this.path.length = 0;
-            this.pathIdx = 0;
-          } else {
-            wx = steerOut.x; wz = steerOut.z;
-            if (steerOut.jump) wantJump = true;
-          }
-          if (this.grounded && this.jumpCd <= 0 && dyw > 0.55 && hd < 1.6) wantJump = true;
+          // Field direction is solid-blocked locally — push toward lastKnown.
+          this.steerContext(
+            this.lastKnown.x - this.pos.x,
+            this.lastKnown.z - this.pos.z,
+            steerOut,
+          );
+          wx = steerOut.x; wz = steerOut.z;
+          if (steerOut.jump) wantJump = true;
         }
-
-        if (hd > 4.5) this.repathT = Math.min(this.repathT, 0.1);
       } else {
+        // Field unavailable (still building / wrong storey / unreachable).
+        // Direct lastKnown vector — never A*.
         const dxw = this.lastKnown.x - this.pos.x;
         const dzw = this.lastKnown.z - this.pos.z;
         const hd = Math.hypot(dxw, dzw);
@@ -893,15 +882,10 @@ export class Enemy {
         }
         this.lastSteerIdx = -1;
         this.strafeDir = -this.strafeDir;
-        this.directBlockT = 1.1;
         if (this.alerted && hasLos) { this.lastKnown.copy(pp); this.hasTarget = true; this.searchT = 0; }
         this.stuckTimer = 0;
-        this.repathT = 0;
-        this.path.length = 0;
-        this.pathIdx = 0;
       }
     } else this.stuckTimer = 0;
-    this.directBlockT = Math.max(0, this.directBlockT - dt);
     this.lastX = this.pos.x; this.lastZ = this.pos.z;
 
     this.moveAxis(0, this.vel.x * dt);
@@ -932,6 +916,17 @@ export class Enemy {
     const moving = hs > 0.4;
     this.speedN += ((moving ? Math.min(1, hs / 4) : 0) - this.speedN) * Math.min(1, dt * 8);
     if (grounded.v && moving) this.walkPhase += dt * (5 + hs * 1.1);
+    if (this.walkPhase > Math.PI * 2) this.walkPhase -= Math.PI * 2;
+    this.instGait = this.walkPhase;
+    this.instGaitGain = this.speedN;
+    if (this.hitFlash > 0) this.hitFlash = Math.max(0, this.hitFlash - dt);
+
+    // Phase 6: non-detailed enemies are rendered by EnemyInstancer. Keep all
+    // AI/physics/combat above, but skip the old per-part Object3D animation,
+    // healthbar billboarding, material emissive writes and group transform
+    // updates. Merchants remain detailed.
+    if (!this.detailed) return true;
+
     const sw = Math.sin(this.walkPhase) * 0.65 * this.speedN;
     this.legL.rotation.x = -sw;
     this.legR.rotation.x = sw;
@@ -997,7 +992,13 @@ export class Enemy {
   private fireOneShot(playerPos: THREE.Vector3, dist: number) {
     this.recoilT = 0.06;
     this.weaponKick = 1;
-    const muzzle = this.muzzle.getWorldPosition(new THREE.Vector3());
+    const muzzle = this.detailed
+      ? this.muzzle.getWorldPosition(new THREE.Vector3())
+      : new THREE.Vector3(
+        this.pos.x + Math.sin(this.yaw) * 0.78,
+        this.pos.y + 1.12,
+        this.pos.z + Math.cos(this.yaw) * 0.78,
+      );
     muzzle.x = this.pos.x + wrapDelta(muzzle.x - this.pos.x, WORLD_SIZE);
     muzzle.z = this.pos.z + wrapDelta(muzzle.z - this.pos.z, WORLD_SIZE);
     const target = playerPos.clone().add(tmpV.set(0, 1.0, 0));
@@ -1028,12 +1029,12 @@ export class Enemy {
     }
     const end = muzzle.clone().addScaledVector(dir, 200);
     if (hitPlayer) {
-      this.deps.effects.tracer(vis(muzzle), vis(playerPos).add(tmpV.set(0, 1.0, 0)));
+      this.deps.effects.tracer(vis(muzzle), vis(playerPos).add(tmpV.set(0, 1.0, 0)), undefined, true);
       this.deps.onPlayerHit(this.cfg.damage, muzzle);
     } else {
       const worldHit = this.deps.world.raycast(muzzle, dir, 200);
       const endPoint = worldHit ? worldHit.point : end;
-      this.deps.effects.tracer(vis(muzzle), vis(endPoint));
+      this.deps.effects.tracer(vis(muzzle), vis(endPoint), undefined, true);
       if (worldHit) this.deps.effects.impact(vis(worldHit.point), worldHit.normal, worldHit.block, worldHit);
     }
   }
@@ -1146,33 +1147,6 @@ export class Enemy {
     out.x = STEER_COS[bestIdx];
     out.z = STEER_SIN[bestIdx];
     out.jump = bestCost >= 1.6;
-  }
-
-  private corridorCached(tx: number, tz: number): boolean {
-    if (this.corridorT > 0) return this.corridorOk;
-    this.corridorT = this.steerInterval * 1.5;
-    this.corridorOk = this.corridorClear(tx, tz);
-    return this.corridorOk;
-  }
-
-  private corridorClear(tx: number, tz: number, maxLen = 14): boolean {
-    const dx = tx - this.pos.x, dz = tz - this.pos.z;
-    const len = Math.hypot(dx, dz);
-    if (len < 0.001) return true;
-    if (len > maxLen) return false;
-    const nx = dx / len, nz = dz / len;
-    const steps = Math.ceil(len / 1.6);
-    let y = this.pos.y;
-    for (let i = 1; i <= steps; i++) {
-      const t = (i / steps) * len;
-      const sx = this.pos.x + nx * t;
-      const sz = this.pos.z + nz * t;
-      const gy = this.groundNear(sx, sz, y);
-      if (gy < 0) return false;
-      if (Math.abs(gy - y) > MAX_JUMP_UP) return false;
-      y = gy;
-    }
-    return true;
   }
 
   private fits(x: number, y: number, z: number): boolean {

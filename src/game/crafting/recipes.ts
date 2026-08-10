@@ -78,6 +78,14 @@ export const RECIPES: Recipe[] = [
   R('laser_miner', 'Laser Miner', 3, 'redstone', {
     shaped: [row(P.GLASS, P.COAL, P.GLASS), fill(3, P.STONE), fill(3, P.COBBLE)],
   }, out(B.LASER_MINER, 1)),
+  // Turret — 3×3 only, so it can be crafted at a crafting table exclusively.
+  R('turret', 'Turret', 3, 'redstone', {
+    shaped: [
+      row(null, P.STICK, null),
+      row(P.STONE, P.COBBLE, P.STONE),
+      row(P.COBBLE, P.COAL, P.COBBLE),
+    ],
+  }, out(B.TURRET, 1)),
 ];
 
 export function recipeIngredients(r: Recipe): Ingredient[] {

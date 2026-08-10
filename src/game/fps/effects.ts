@@ -35,6 +35,40 @@ const tmpQuatV = new THREE.Vector3();
 const tmpColor = new THREE.Color();
 const WHITE = new THREE.Color(0xffffff);
 
+// Batched scene-graph removal: collect dead meshes during the update loop,
+// then remove them all in one pass instead of N × indexOf + splice.
+const DETACH: THREE.Object3D[] = [];
+
+function swapPop<T>(arr: T[], i: number): void {
+  const last = arr.length - 1;
+  if (i !== last) arr[i] = arr[last];
+  arr.pop();
+}
+
+function flushDetach(parent: THREE.Object3D): void {
+  const n = DETACH.length;
+  if (n === 0) return;
+  if (n < 6) {
+    for (let i = 0; i < n; i++) parent.remove(DETACH[i]);
+    DETACH.length = 0;
+    return;
+  }
+  for (let i = 0; i < n; i++) (DETACH[i] as any).__fxDead = true;
+  const kids = parent.children;
+  let w = 0;
+  for (let r = 0, m = kids.length; r < m; r++) {
+    const o = kids[r] as any;
+    if (o.__fxDead === true) {
+      o.__fxDead = false;
+      o.parent = null;
+    } else {
+      kids[w++] = kids[r];
+    }
+  }
+  kids.length = w;
+  DETACH.length = 0;
+}
+
 export class Effects {
   private scene: THREE.Scene;
   private world: WorldLike;
@@ -52,6 +86,7 @@ export class Effects {
   private tracers: { mesh: THREE.Mesh; life: number; anchor: THREE.Object3D | null; end: THREE.Vector3 }[] = [];
   private tracerPool: THREE.Mesh[] = [];
   private tracerMat = new THREE.MeshBasicMaterial({ color: '#ffe9a8', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+  private enemyTracerMat = new THREE.MeshBasicMaterial({ color: '#ff2a2a', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
   private tracerGeo = new THREE.BoxGeometry(0.014, 0.014, 1);
 
   private decals: Decal[] = [];
@@ -114,19 +149,34 @@ export class Effects {
     this.rocketTemplate = this.makeRocketModel();
   }
 
+  /**
+   * Spawn one live instance of EVERY effect type so a full-pipeline render
+   * during the loading screen compiles all their shader program variants
+   * (tracer/casing/decal/smoke/muzzle/particle/flash-light). Otherwise those
+   * programs compile mid-game on the first shot + subsequent weapon swap,
+   * causing a multi-second freeze. Call `endWarmup()` after rendering.
+   */
   beginWarmup(colors: Iterable<number>): void {
-    const base = tmpV.set(0, -600, 0);
+    const base = tmpV.set(0, -600, 0); // far below the world; never visible
+    // Muzzle flash sprites + flash light
     this.muzzleFlash(base.clone(), 1);
+    // Tracer
     this.tracer(base.clone(), base.clone().add(new THREE.Vector3(0, 0, 1)));
+    // Casing
     this.casing(base.clone(), new THREE.Vector3(1, 0, 0), true);
+    // Smoke puff
     this.puff(base.clone(), new THREE.Vector3(0, 1, 0), 0.4, 999, '#ffffff');
+    // Particles (one per distinct color so every particle material compiles)
     for (const c of colors) {
       this.spawnParticle(base.clone(), new THREE.Vector3(0, 0, 0), c, 0.05, 999, false);
     }
+    // Decal (force-create one bypassing the world air check)
     this.forceWarmDecal(base.clone());
+    // Keep them alive through the warmup render(s)
     this.flashT = 999;
   }
 
+  /** Force a decal into the scene for warmup, ignoring the world-air guard. */
   private forceWarmDecal(point: THREE.Vector3): void {
     let e = this.decalPool.pop();
     if (!e) {
@@ -155,6 +205,7 @@ export class Effects {
     });
   }
 
+  /** Remove every transient effect spawned by beginWarmup(). */
   endWarmup(): void {
     this.flashT = 0;
     for (const s of this.flashSprites) s.visible = false;
@@ -177,6 +228,11 @@ export class Effects {
     this.flashAnchor = anchor ?? null;
     this.flashIntensity = 3.2 * scale;
 
+    // IMPORTANT: never re-parent the PointLight into a weapon rig. If the light
+    // lives inside a rig that later gets hidden/stowed on weapon swap, three.js
+    // sees the scene light count change and recompiles EVERY material's shader
+    // program synchronously -> multi-second freeze. Keep it in the scene
+    // permanently and just follow the anchor's world position instead.
     if (this.flashLight.parent !== this.scene) this.scene.add(this.flashLight);
     if (anchor) {
       anchor.updateWorldMatrix(true, false);
@@ -201,9 +257,12 @@ export class Effects {
     }
   }
 
-  tracer(from: THREE.Vector3, to: THREE.Vector3, anchor?: THREE.Object3D) {
+  tracer(from: THREE.Vector3, to: THREE.Vector3, anchor?: THREE.Object3D, enemy = false) {
     let m = this.tracerPool.pop();
     if (!m) m = new THREE.Mesh(this.tracerGeo, this.tracerMat);
+    // Pool meshes are shared, so pick the material per shot: enemy shots are
+    // red, the player's are the default warm yellow.
+    m.material = enemy ? this.enemyTracerMat : this.tracerMat;
     const len = from.distanceTo(to);
     m.position.lerpVectors(from, to, 0.5);
     m.scale.set(1, 1, Math.max(0.06, len));
@@ -444,6 +503,7 @@ export class Effects {
   update(dt: number) {
     if (this.flashT > 0) {
       this.flashT -= dt;
+      // Light stays parented to the scene; follow the muzzle in world space.
       if (this.flashAnchor) {
         this.flashAnchor.updateWorldMatrix(true, false);
         this.flashLight.position.setFromMatrixPosition(this.flashAnchor.matrixWorld);
@@ -453,6 +513,8 @@ export class Effects {
       if (this.flashT <= 0) {
         for (const s of this.flashSprites) {
           s.visible = false;
+          // Detach sprites from the weapon rig so they don't ride into the
+          // hidden stow group on the next weapon swap.
           if (s.parent !== this.scene) this.scene.add(s);
         }
         this.flashLight.intensity = 0;
@@ -464,9 +526,9 @@ export class Effects {
       const p = this.particles[i];
       p.life -= dt;
       if (p.life <= 0) {
-        this.scene.remove(p.mesh);
+        DETACH.push(p.mesh);
         this.particlePool.push(p.mesh);
-        this.particles.splice(i, 1);
+        swapPop(this.particles, i);
         continue;
       }
       p.vel.y -= p.gravity * dt;
@@ -490,9 +552,9 @@ export class Effects {
       const c = this.casings[i];
       c.life -= dt;
       if (c.life <= 0) {
-        this.scene.remove(c.mesh);
+        DETACH.push(c.mesh);
         this.casingPool.push(c.mesh);
-        this.casings.splice(i, 1);
+        swapPop(this.casings, i);
         continue;
       }
       if (!c.grounded) {
@@ -516,9 +578,9 @@ export class Effects {
       const t = this.tracers[i];
       t.life -= dt;
       if (t.life <= 0) {
-        this.scene.remove(t.mesh);
+        DETACH.push(t.mesh);
         this.tracerPool.push(t.mesh);
-        this.tracers.splice(i, 1);
+        swapPop(this.tracers, i);
         continue;
       }
       if (t.anchor) {
@@ -535,9 +597,9 @@ export class Effects {
       const s = this.smokes[i];
       s.life -= dt;
       if (s.life <= 0) {
-        this.scene.remove(s.sprite);
+        DETACH.push(s.sprite);
         this.smokePool.push(s.sprite);
-        this.smokes.splice(i, 1);
+        swapPop(this.smokes, i);
         continue;
       }
       s.sprite.position.addScaledVector(s.vel, dt);
@@ -597,6 +659,9 @@ export class Effects {
         }
       }
     }
+
+    // One scene-graph mutation for all four pools instead of N × indexOf + splice.
+    flushDetach(this.scene);
   }
 
   static blockColor(id: number): number { return BLOCK_COLORS[id] ?? BLOCK_COLORS[B.STONE]; }

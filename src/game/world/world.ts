@@ -9,8 +9,15 @@ import { TerrainGenerator } from './generator';
 import { buildChunkGeometry } from './mesher';
 import { raycastVoxel } from '../player/raycast';
 
-const EVICT_SCAN_PER_PASS = 96;
-const EVICT_RETIRE_PER_PASS = 6;
+// Adaptive clock batching: a performance.now() read (~100ns) is noise next to
+// a 2ms mesh build, so when the cost EMA is expensive we still check every
+// item (better budget accuracy); we only batch to CLOCK_STRIDE when items are
+// cheap — exactly the case where per-item clock cost was hurting.
+const CLOCK_STRIDE  = 8;
+const CHEAP_ITEM_MS = 0.5;
+const COMPACT_AFTER = 64;
+const EVICT_SCAN    = 32;   // chunks examined per frame
+const EVICT_RETIRE  = 2;    // chunks retired per frame
 
 export interface ChunkMaterials {
   opaque: THREE.Material;
@@ -56,11 +63,10 @@ export class World {
   private dirtyHead = 0;
   private dirtySet = new Set<Chunk>();
   private lastCenter = -1;
-  private lastUnloadCheck = 0;
   private batchDepth = 0;
   private meshCost = 1;
   private loadCost = 2;
-  private evictCursor = 0;
+  private evictIter: IterableIterator<[number, Chunk]> | null = null;
   private syncX = Infinity;
   private syncZ = Infinity;
   private camX = 8;
@@ -71,6 +77,8 @@ export class World {
   private loadRadius = VIEW_DISTANCE;
 
   onChanged: ((x: number, y: number, z: number, oldId: number, newId: number) => void) | null = null;
+  onChunkData: ((cx: number, cz: number, data: Uint8Array, fromGenerator: boolean) => void) | null = null;
+  onChunkGone: ((cx: number, cz: number) => void) | null = null;
 
   spawn = new THREE.Vector3(8.5, 45, 8.5);
 
@@ -189,6 +197,10 @@ export class World {
     return this.chunks.get(this.key(cx, cz));
   }
 
+  forEachLoadedChunk(cb: (cx: number, cz: number, data: Uint8Array) => void): void {
+    for (const c of this.chunks.values()) cb(c.cx, c.cz, c.data);
+  }
+
   private ensureData(rawCx: number, rawCz: number): Chunk {
     const cx = wrapChunk(rawCx);
     const cz = wrapChunk(rawCz);
@@ -207,6 +219,7 @@ export class World {
       };
       this.chunks.set(k, c);
       this.buildColumnCache(c);
+      this.onChunkData?.(cx, cz, c.data, true);
       if (!this.bulkPreparing) this.markNeighborBorders(cx, cz);
     }
     this.memoKey = k;
@@ -486,21 +499,44 @@ export class World {
 
     let now = t0;
 
-    while (this.dirtyHead < this.dirtyQueue.length) {
-      if (this.dirtyHead > 0 && now - t0 + this.meshCost > budgetMs) break;
-      const c = this.dirtyQueue[this.dirtyHead++];
-      if (!this.dirtySet.has(c)) continue;
-      const s = now;
-      this.buildMesh(c);
-      now = performance.now();
-      this.meshCost = this.meshCost * 0.6 + (now - s) * 0.4;
-    }
-    if (this.dirtyHead >= this.dirtyQueue.length) {
-      this.dirtyQueue.length = 0;
-      this.dirtyHead = 0;
-    } else if (this.dirtyHead > 64) {
-      this.dirtyQueue = this.dirtyQueue.slice(this.dirtyHead);
-      this.dirtyHead = 0;
+    // ── Dirty queue: re-mesh modified chunks ─────────────────────────────
+    {
+      const dq = this.dirtyQueue;
+      let dh = this.dirtyHead;
+      const stride = this.meshCost > CHEAP_ITEM_MS ? 1 : CLOCK_STRIDE;
+      let batchStart = now, batchItems = 0;
+      let didAny = false;
+      while (dh < dq.length) {
+        // Original "at least one" semantics: only gate at batch boundaries.
+        if (didAny && batchItems === 0 && now - t0 + this.meshCost > budgetMs) break;
+        const c = dq[dh++];
+        if (!this.dirtySet.has(c)) continue;      // stale entry
+        this.buildMesh(c);
+        didAny = true;
+        if (++batchItems >= stride) {
+          const t = performance.now();
+          this.meshCost = this.meshCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+          batchStart = now = t;
+          batchItems = 0;
+        }
+      }
+      if (batchItems > 0) {
+        const t = performance.now();
+        this.meshCost = this.meshCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+        now = t;
+      }
+      this.dirtyHead = dh;
+      // Compaction: in-place shift + truncate (slice() allocated a new array).
+      if (dh >= dq.length) {
+        dq.length = 0;
+        this.dirtyHead = 0;
+      } else if (dh > COMPACT_AFTER) {
+        const n = dq.length;
+        let w = 0;
+        for (let i = dh; i < n; i++) dq[w++] = dq[i];
+        dq.length = w;
+        this.dirtyHead = 0;
+      }
     }
 
     const ccx = wrapChunk(Math.floor(wrapBlock(px) / S));
@@ -512,56 +548,84 @@ export class World {
       this.lastCenter = centerKey;
     }
 
-    while (this.loadHead < this.loadQueue.length) {
-      if (processed > 0 && now - t0 + this.loadCost > budgetMs) break;
-      const item = this.loadQueue[this.loadHead++];
-      const s = now;
-      const c = this.ensureData(item.cx, item.cz);
-      if (!c.hasMesh) {
-        this.buildMesh(c);
-        processed++;
+    // ── Load queue: generate + mesh new chunks ───────────────────────────
+    {
+      const lq = this.loadQueue;
+      let lh = this.loadHead;
+      const stride = this.loadCost > CHEAP_ITEM_MS ? 1 : CLOCK_STRIDE;
+      let batchStart = now, batchItems = 0;
+      while (lh < lq.length) {
+        if (processed > 0 && batchItems === 0 && now - t0 + this.loadCost > budgetMs) break;
+        const item = lq[lh++];
+        const c = this.ensureData(item.cx, item.cz);
+        if (!c.hasMesh) {
+          this.buildMesh(c);
+          processed++;
+        }
+        if (++batchItems >= stride) {
+          const t = performance.now();
+          this.loadCost = this.loadCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+          batchStart = now = t;
+          batchItems = 0;
+        }
       }
-      now = performance.now();
-      this.loadCost = this.loadCost * 0.6 + (now - s) * 0.4;
-    }
-    if (this.loadHead >= this.loadQueue.length) {
-      this.loadQueue.length = 0;
-      this.loadHead = 0;
+      if (batchItems > 0) {
+        const t = performance.now();
+        this.loadCost = this.loadCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+        now = t;
+      }
+      this.loadHead = lh;
+      if (lh >= lq.length) {
+        lq.length = 0;
+        this.loadHead = 0;
+      } else if (lh > COMPACT_AFTER) {
+        const n = lq.length;
+        let w = 0;
+        for (let i = lh; i < n; i++) lq[w++] = lq[i];
+        lq.length = w;
+        this.loadHead = 0;
+      }
     }
 
-    if (t0 - this.lastUnloadCheck > 350) {
-      this.lastUnloadCheck = t0;
+    // ── Amortized eviction: a persistent Map iterator walks a bounded
+    //    number of chunks per frame instead of a periodic burst scan. Safe
+    //    under concurrent delete (JS Map iterators tolerate it), zero alloc.
+    if (now - t0 < budgetMs) {
+      if (!this.evictIter) this.evictIter = this.chunks.entries();
       const lim2 = (EVICT_DISTANCE + 2) * (EVICT_DISTANCE + 2);
+      const evictSq = EVICT_DISTANCE * EVICT_DISTANCE;
       let scanned = 0;
       let retired = 0;
-      const cursorStart = this.evictCursor;
-      let i = 0;
-      for (const [k, c] of this.chunks) {
-        if (i++ < cursorStart) continue;
-        this.evictCursor = i;
-        if (++scanned > EVICT_SCAN_PER_PASS || retired >= EVICT_RETIRE_PER_PASS) break;
-
+      while (scanned < EVICT_SCAN && retired < EVICT_RETIRE) {
+        let step = this.evictIter.next();
+        if (step.done) {
+          this.evictIter = this.chunks.entries();
+          step = this.evictIter.next();
+          if (step.done) break;                    // empty map
+        }
+        scanned++;
+        const [key, c] = step.value;
         const dx = wrapDelta(c.cx - ccx, WORLD_CHUNKS);
         const dz = wrapDelta(c.cz - ccz, WORLD_CHUNKS);
         const d2 = dx * dx + dz * dz;
+        if (d2 <= evictSq) continue;               // still near: keep
+
         if (c.hasMesh) {
-          if (d2 > EVICT_DISTANCE * EVICT_DISTANCE) {
-            for (const m of c.meshes) {
-              this.group.remove(m);
-              m.geometry.dispose();
-            }
-            c.meshes.length = 0;
-            c.hasMesh = false;
-            this.meshedChunks.delete(c);
-            retired++;
+          for (const m of c.meshes) {
+            this.group.remove(m);
+            m.geometry.dispose();
           }
+          c.meshes.length = 0;
+          c.hasMesh = false;
+          this.meshedChunks.delete(c);
+          retired++;
         } else if (!this.fullyPrepared && !c.dirty && d2 > lim2) {
-          this.chunks.delete(k);
-          if (this.memoKey === k) { this.memoKey = -1; this.memoChunk = null; }
+          this.chunks.delete(key);
+          if (this.memoChunk === c) { this.memoKey = -1; this.memoChunk = null; }
+          this.onChunkGone?.(c.cx, c.cz);
           retired++;
         }
       }
-      if (i >= this.chunks.size) this.evictCursor = 0;
     }
 
     return processed;

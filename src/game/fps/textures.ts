@@ -529,6 +529,7 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 61: return T.CONVEYOR;
     case 62: return T.INSERTER;
     case 63: return T.LASER_MINER;
+    case 64: return T.INSERTER;
     default: return T.STONE;
   }
 }

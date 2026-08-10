@@ -1,8 +1,13 @@
 import * as THREE from 'three';
 import { B, DEFS, isWaterId, laserMinerDir, isLaserMiner } from '../world/blocks';
 import { wrapBlock, minImageF } from '../core/constants';
+import { MK_LASER, type MachineRecord } from '../world/machineRegistry';
+import type { MachineAgent, MachineView } from './machineScheduler';
 
-type WorldView = { get(x: number, y: number, z: number): number };
+type WorldView = {
+  get(x: number, y: number, z: number): number;
+  peekBlock?(x: number, y: number, z: number): number;
+};
 
 export interface LaserMinerHooks {
   mineable(id: number): boolean;
@@ -158,8 +163,15 @@ const tmpTip = new THREE.Vector3();
 const tmpTarget = new THREE.Vector3();
 const tmpDrop = new THREE.Vector3();
 
-export class LaserMinerManager {
-  private turrets = new Map<string, Turret>();
+export class LaserMinerManager implements MachineAgent {
+  readonly kind = MK_LASER;
+  readonly maxLive = MAX_TURRETS;
+  readonly scanRadius = SCAN_RADIUS;
+  readonly pruneRadius = PRUNE_RADIUS;
+  readonly yLo = -4;
+  readonly yHi = 4;
+  readonly thinkPerFrame = 0;
+  private turrets = new Map<string | number, Turret>();
   private scanT = 0;
   private pruneT = 0;
 
@@ -171,6 +183,10 @@ export class LaserMinerManager {
 
   private static yawFor(dx: number, dz: number): number {
     return Math.atan2(-dz, dx);
+  }
+
+  private vox(x: number, y: number, z: number): number {
+    return this.world.peekBlock ? this.world.peekBlock(x, y, z) : this.world.get(x, y, z);
   }
 
   private buildTurret(wx: number, y: number, wz: number, id: number): Turret {
@@ -227,6 +243,39 @@ export class LaserMinerManager {
     t.beam.dispose(this.scene);
   }
 
+  has(key: number): boolean { return this.turrets.has(key); }
+  create(rec: MachineRecord): void {
+    if (this.turrets.has(rec.key)) return;
+    const t = this.buildTurret(rec.x, rec.y, rec.z, rec.id);
+    t.group.visible = false;
+    t.beam.setVisible(false);
+    this.turrets.set(rec.key, t);
+  }
+  destroy(key: number): void {
+    const t = this.turrets.get(key);
+    if (!t) return;
+    this.destroyTurret(t);
+    this.turrets.delete(key);
+  }
+  setActive(key: number, active: boolean): void {
+    const t = this.turrets.get(key);
+    if (!t) return;
+    t.group.visible = active;
+    if (!active) t.beam.setVisible(false);
+  }
+  onIdChanged(rec: MachineRecord): void {
+    const t = this.turrets.get(rec.key);
+    if (!t) return;
+    t.lastId = rec.id;
+    t.dir = [rec.dx, rec.dz];
+    t.target = null;
+    t.charge = 0;
+  }
+  tick(rec: MachineRecord, view: MachineView, dt: number): void {
+    const t = this.turrets.get(rec.key);
+    if (t) this.tickTurret(t, view.ix, view.iz, dt);
+  }
+
   private scan(px: number, py: number, pz: number): void {
     const cx = Math.floor(px), cy = Math.floor(py), cz = Math.floor(pz);
     for (let y = cy - 4; y <= cy + 4; y++) {
@@ -235,7 +284,7 @@ export class LaserMinerManager {
           if (dx * dx + dz * dz > SCAN_RADIUS * SCAN_RADIUS) continue;
           const wx = wrapBlock(cx + dx);
           const wz = wrapBlock(cz + dz);
-          const id = this.world.get(wx, y, wz);
+          const id = this.vox(wx, y, wz);
           if (id < 0 || !isLaserMiner(id)) continue;
           const key = `${wx},${y},${wz}`;
           if (!this.turrets.has(key)) this.turrets.set(key, this.buildTurret(wx, y, wz, id));
@@ -250,14 +299,19 @@ export class LaserMinerManager {
     let best: { ox: number; oy: number; oz: number } | null = null;
     let bestScore = Infinity;
     for (let step = 1; step <= RANGE; step++) {
+      // The sweep is a CONE, never a single point: it always covers at least
+      // a 3×3 plane (9 blocks) directly in front of the turret and widens
+      // slightly with distance.
       const spread = Math.min(2, Math.max(1, Math.round((step - 1) * 0.5)));
       for (let lat = -spread; lat <= spread; lat++) {
         for (let vert = -spread; vert <= spread; vert++) {
           const ox = fx * step + lx * lat;
           const oz = fz * step + lz * lat;
           const oy = vert;
-          const id = this.world.get(wrapBlock(t.wx + ox), t.y + oy, wrapBlock(t.wz + oz));
+          const id = this.vox(wrapBlock(t.wx + ox), t.y + oy, wrapBlock(t.wz + oz));
           if (id < 0 || !this.hooks.mineable(id)) continue;
+          // Occlusion: a block hidden behind another solid block must NEVER
+          // be targeted — the beam cannot pass through terrain.
           if (!this.reachable(t, ox, oy, oz, lx, lz)) continue;
           const score = step * 10 + Math.abs(lat) * 2 + Math.abs(vert) * 2;
           if (score < bestScore) { bestScore = score; best = { ox, oy, oz }; }
@@ -268,6 +322,19 @@ export class LaserMinerManager {
     t.charge = 0;
   }
 
+  /**
+   * Wide-cone occlusion test. The sweep doesn't originate from a single
+   * point — it originates from a 3×3 origin plane at the turret mouth (the
+   * lateral direction across the cell + a small vertical band). A target is
+   * reachable if AT LEAST ONE ray from that plane arrives at the target
+   * centre without crossing a solid cell.
+   *
+   * Consequences:
+   *  - The miner sweeps the full 3×3 plane in front (9 blocks), not one cell.
+   *  - If only part of the front is walled off, the visible part still mines.
+   *  - A block fully behind a wall can never be reached by ANY ray, so the
+   *    beam never lasers (or mines) through blocks.
+   */
   private reachable(t: Turret, ox: number, oy: number, oz: number, lx: number, lz: number): boolean {
     const gx = wrapBlock(t.wx + ox);
     const gy = t.y + oy;
@@ -275,6 +342,7 @@ export class LaserMinerManager {
     const tgtX = t.wx + ox + 0.5;
     const tgtY = t.y + oy + 0.5;
     const tgtZ = t.wz + oz + 0.5;
+    // 3×3 origin plane: lateral offset ±0.45 across the cell, vertical ±0.2.
     for (let a = -1; a <= 1; a++) {
       for (let b = -1; b <= 1; b++) {
         const sx = t.wx + 0.5 + lx * a * 0.45;
@@ -286,6 +354,7 @@ export class LaserMinerManager {
     return false;
   }
 
+  /** Sample a straight segment; false if any solid cell is crossed (target cell excluded). */
   private clearPath(
     sx: number, sy: number, sz: number,
     tx: number, ty: number, tz: number,
@@ -294,18 +363,18 @@ export class LaserMinerManager {
     const dx = tx - sx, dy = ty - sy, dz = tz - sz;
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (dist < 0.01) return true;
-    const steps = Math.ceil(dist * 4);
+    const steps = Math.ceil(dist * 4); // 4 samples per block
     for (let i = 1; i < steps; i++) {
       const frac = i / steps;
       const bx = wrapBlock(Math.floor(sx + dx * frac));
       const by = Math.floor(sy + dy * frac);
       const bz = wrapBlock(Math.floor(sz + dz * frac));
-      if (bx === gx && by === gy && bz === gz) continue;
-      const id = this.world.get(bx, by, bz);
-      if (id < 0) continue;
+      if (bx === gx && by === gy && bz === gz) continue; // the target itself
+      const id = this.vox(bx, by, bz);
+      if (id < 0) continue;                  // unloaded → treat as open (never targets anything)
       if (id === B.AIR || isWaterId(id)) continue;
-      if (!DEFS[id]?.solid) continue;
-      return false;
+      if (!DEFS[id]?.solid) continue;        // plants, ghost machines, etc. don't block
+      return false;                          // a solid block is in the way
     }
     return true;
   }
@@ -324,7 +393,7 @@ export class LaserMinerManager {
     for (const [key, t] of this.turrets) {
       const ix = px + minImageF(t.wx - px);
       const iz = pz + minImageF(t.wz - pz);
-      const id = this.world.get(t.wx, t.y, t.wz);
+      const id = this.vox(t.wx, t.y, t.wz);
 
       if (id >= 0 && !isLaserMiner(id)) {
         this.destroyTurret(t);
@@ -359,12 +428,15 @@ export class LaserMinerManager {
   }
 
   private tickTurret(t: Turret, ix: number, iz: number, dt: number): void {
+    // The miner has no cube of its own: its cell sits directly on the block
+    // below, so the machine base is at t.y (the top face of that block).
     t.group.position.set(ix + 0.5, t.y, iz + 0.5);
 
     if (t.target) {
-      const id = this.world.get(
+      const id = this.vox(
         wrapBlock(t.wx + t.target.ox), t.y + t.target.oy, wrapBlock(t.wz + t.target.oz));
       if (id < 0 || !this.hooks.mineable(id)) { t.target = null; t.charge = 0; }
+      // If a wall appeared between the miner and the target, drop it.
       else if (!this.reachable(t, t.target.ox, t.target.oy, t.target.oz, -t.dir[1], t.dir[0])) {
         t.target = null; t.charge = 0;
       }
@@ -375,6 +447,7 @@ export class LaserMinerManager {
     }
 
     const time = performance.now() * 0.001;
+    // Emitter world height = group base (t.y) + local emitter height (0.24).
     const pivotY = t.y + 0.24;
 
     if (t.target) {

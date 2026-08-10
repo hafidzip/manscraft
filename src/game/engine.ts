@@ -6,6 +6,11 @@ import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, i
 import { World, type ChunkMaterials } from './world/world';
 import { InserterManager } from './fps/Inserter';
 import { LaserMinerManager } from './fps/LaserMiner';
+import { TurretManager } from './fps/Turret';
+import { FlowField } from './fps/FlowField';
+import { ChangeBus } from './world/changeBus';
+import { MachineRegistry, MK_GHOST } from './world/machineRegistry';
+import { MachineScheduler } from './fps/machineScheduler';
 import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
 import type { PlanetTheme } from './space/theme';
@@ -25,7 +30,7 @@ import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { Enemy, ENEMY_PRESETS, pathBudget } from './fps/Enemy';
+import { Enemy, ENEMY_PRESETS } from './fps/Enemy';
 import { EnemyManager } from './fps/EnemyManager';
 import { Effects } from './fps/effects';
 import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
@@ -81,6 +86,14 @@ export class GameEngine {
   public inventory!: Inventory;
   private inserters!: InserterManager;
   private laserMiners!: LaserMinerManager;
+  private turrets!: TurretManager;
+  private changeBus!: ChangeBus;
+  private machineRegistry!: MachineRegistry;
+  private machines!: MachineScheduler;
+  private flow = new FlowField();
+  private lastFieldX = NaN;
+  private lastFieldY = NaN;
+  private lastFieldZ = NaN;
   private enemiesEnabled = true;
   private triggerDown = false;
   private prevLeft = false;
@@ -187,6 +200,15 @@ export class GameEngine {
   private snapT = 0;
   private cachedBiomeName = '';
   private biomeCheckT = 0;
+
+  // Deadline-gated simulation + adaptive post quality (snippet §1)
+  private simMsEma = 0;
+  private postQ: 0 | 1 | 2 = 0;  // 0=full, 1=no volumetric, 2=no bloom+vol
+  private postQAt = 0;
+  private dtFluid = 0;
+  private dtParticles = 0;
+  private dtSky = 0;
+  private dtBloom = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -473,6 +495,10 @@ export class GameEngine {
 
     this.fluid = new FluidSim(this.world);
     this.world.onChanged = (x, y, z, oldId, newId) => {
+      // Phase 4: any block edit can change a column's walkable surface.
+      // This hook fires for batched edits (explosions) too, so it is the
+      // single place the nav field needs to learn about terrain changes.
+      this.flow.markColumnDirty(x, z);
       if (isWaterId(oldId) || isWaterId(newId)) {
         this.fluid.pokeAround(x, y, z);
         return;
@@ -485,6 +511,14 @@ export class GameEngine {
         }
       }
     };
+
+    // Attach after the existing onChanged assignment so ChangeBus preserves
+    // that handler and fans subsequent world/chunk changes out to all caches.
+    this.changeBus = new ChangeBus();
+    this.changeBus.attach(this.world);
+    this.machineRegistry = new MachineRegistry({ indexedKinds: MK_GHOST, trustGenerator: true });
+    this.machineRegistry.attach(this.changeBus);
+    this.machineRegistry.bootstrap(this.world);
 
     if (this.sky) this.sky.applyTheme(this.theme?.skyHex ?? null);
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
@@ -627,6 +661,7 @@ export class GameEngine {
       camera: this.camera,
       onPlayerHit: (dmg, from) => this.damagePlayer(dmg, from),
       onEnemyKilled: (e) => { this.kills++; this.rewardCoins(e); },
+      flowField: this.flow,
     }, this.camps);
     if (this.initialClearedCamps?.length) {
       this.enemies.markCampsCleared(this.initialClearedCamps);
@@ -655,12 +690,31 @@ export class GameEngine {
 
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
       this.syncHotbarMode();
-    });
+    }, { bus: this.changeBus });
     this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
     this.laserMiners = new LaserMinerManager(this.scene, this.world, {
       mineable: (id) => this.laserMinerCanMine(id),
       mine: (x, y, z, dropPos) => this.laserMinerMine(x, y, z, dropPos),
     });
+    this.turrets = new TurretManager(this.scene, this.world, {
+      targets: () => this.enemies.enemies,
+      damage: (t, amount, point) => {
+        const e = t as Enemy;
+        e.takeDamage(amount, point, false);
+        this.enemies.alertSquadOf(e);
+      },
+      muzzle: (pos) => this.fx.muzzleFlash(pos, 0.42),
+      tracer: (from, to) => this.fx.tracer(from, to),
+      impact: (point, normal, block) => this.fx.impact(point, normal, block),
+      shot: (dist) => this.fpsAudio.shot({
+        freq: 1850, dur: 0.06,
+        gain: 0.22 * THREE.MathUtils.clamp(1 - dist / 90, 0.15, 1), sub: 240,
+      }),
+      raycast: (origin, dir, maxDist) => this.world.raycast(origin, dir, maxDist),
+    });
+    this.machines = new MachineScheduler(this.machineRegistry, [
+      this.inserters, this.laserMiners, this.turrets,
+    ]);
     this.itemDrops.prewarm(new Set(Object.values(TO_FPS)));
 
     for (const id of new Set(Object.values(FROM_FPS))) {
@@ -750,8 +804,15 @@ export class GameEngine {
   }
 
   private async warmupRenderPipeline(): Promise<void> {
+    // Expose EVERY weapon rig under the camera and make it visible, so the
+    // compile + full-pipeline render below covers all program variants
+    // (base material, shadow depth material, post passes). Without this the
+    // first weapon swap compiles shaders mid-frame and freezes the game.
     const restoreWeapons = this.weapons?.beginWarmupAll?.() ?? (() => { });
 
+    // Spawn one live instance of every combat effect (tracer, casing, decal,
+    // muzzle flash, smoke, particles) so their shader programs also compile
+    // now instead of on the first shot / subsequent weapon swap.
     const effectColors = Object.values(DEFS).flatMap((def) => def.colors);
     this.fx?.beginWarmup?.(effectColors);
 
@@ -774,6 +835,8 @@ export class GameEngine {
 
       this.sky.update(0, this.camera.position);
 
+      // Two passes: the first compiles/uploads, the second confirms everything
+      // is resident so no work is deferred to the first real gameplay frame.
       for (let pass = 0; pass < 2; pass++) {
         this.renderer.shadowMap.needsUpdate = true;
         this.renderer.setRenderTarget(this.mainRT);
@@ -805,6 +868,7 @@ export class GameEngine {
       this.fx?.endWarmup?.();
     }
 
+    // Force a shadow refresh on the first real frame now that weapons are hidden.
     this.renderer.shadowMap.needsUpdate = true;
     await this.nextFrame();
   }
@@ -812,6 +876,7 @@ export class GameEngine {
   private captureSnapshot(dt: number): void {
     this.snapT -= dt;
     if (this.snapT > 0) return;
+    // Skip snapshot capture during heavy frames to avoid GPU readback stalls
     this.snapT = this.fps < 40 ? 0.5 : 0.25;
     const src = this.canvas;
     if (!src.width || !src.height) return;
@@ -885,7 +950,7 @@ export class GameEngine {
   private laserMinerCanMine(id: number): boolean {
     if (id === B.AIR || id < 0) return false;
     if (isWaterId(id)) return false;
-    if (isConveyor(id) || isInserter(id) || isLaserMiner(id)) return false;
+    if (isConveyor(id) || isInserter(id) || isLaserMiner(id) || id === B.TURRET) return false;
     const d = DEFS[id];
     if (!d || !d.solid || !isFinite(d.hardness)) return false;
     return TO_FPS[id] !== undefined;
@@ -1546,6 +1611,7 @@ export class GameEngine {
 
   private tick = (): void => {
     if (this.disposed) return;
+    const frameStart = performance.now();
     const dt = Math.min(this.clock.getDelta(), 0.05);
     const fpsNow = 1 / Math.max(dt, 1e-4);
     this.fps += (fpsNow - this.fps) * 0.06;
@@ -1569,7 +1635,16 @@ export class GameEngine {
       this.textures.water.offset.y += dt * 0.006;
       animateConveyorTiles(this.textures, this.time);
     }
-    if (this.locked && this.fps > 30) this.fluid.update(dt);
+    // Deadline-gated fluid: carry dt so flow speed is unchanged when skipped.
+    this.dtFluid += dt;
+    if (this.locked && performance.now() < frameStart + 8.0) {
+      this.fluid.update(this.dtFluid);
+      this.dtFluid = 0;
+    } else if (this.dtFluid > 0.1) {
+      // Hard floor: never stall fluid longer than ~6 frames.
+      if (this.locked) this.fluid.update(this.dtFluid);
+      this.dtFluid = 0;
+    }
     if (this.locked) {
       let streamX = this.player.pos.x;
       let streamZ = this.player.pos.z;
@@ -1577,13 +1652,30 @@ export class GameEngine {
         streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
         streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
       }
-      const frameBudget = this.fps > 50 ? 5.5 : this.fps > 35 ? 3.5 : 2.0;
+      // Streaming gets the time actually left in the sim window, not an fps EMA.
+      const simLeft = (frameStart + 8.0) - performance.now();
+      const frameBudget = Math.max(1.0, Math.min(5.5, simLeft));
       this.world.update(streamX, streamZ, frameBudget);
       this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
+
+      // Phase 4: the nav field must see this frame's streamed chunks, so it
+      // runs AFTER world.update(). Rebuild once the player has travelled 8 m
+      // or changed storey. The `!(a < b)` form is deliberate — it evaluates
+      // true while lastFieldX is still NaN, so frame 1 always builds, and it
+      // does not misfire when the player stands exactly at x = 0.
+      const fpx = this.player.pos.x, fpy = this.player.pos.y, fpz = this.player.pos.z;
+      const mdx = C.wrapDelta(fpx - this.lastFieldX, C.WORLD_SIZE);
+      const mdz = C.wrapDelta(fpz - this.lastFieldZ, C.WORLD_SIZE);
+      const fieldMoved = !(mdx * mdx + mdz * mdz < 64)
+                      || !(Math.abs(fpy - this.lastFieldY) < 4);
+      if (fieldMoved) {
+        this.flow.invalidate();
+        this.lastFieldX = fpx; this.lastFieldY = fpy; this.lastFieldZ = fpz;
+      }
+      this.flow.update(fpx, fpy, fpz, this.world);
       if (this.ship && !this.piloting) this.ship.updateParked(dt);
     }
     if (this.locked && (!this.piloting || this.shipAltitude() < 26)) {
-      pathBudget.maxTokens = this.fps > 50 ? 5 : this.fps > 35 ? 3 : 1;
       this.enemies.update(dt);
     }
     if (this.locked) {
@@ -1591,8 +1683,15 @@ export class GameEngine {
       if (this.openFurnaceKey) this.events.onStats(this.buildStats());
       this.updateMerchantProximity();
       this.updateShop();
-      this.particles.update(dt);
-      this.sky.update(dt, this.camera.position);
+
+      // Cosmetic systems: deadline-gated with carried dt so rates are unchanged.
+      const cosmeticsOk = performance.now() < frameStart + 8.0;
+      this.dtParticles += dt;
+      this.dtSky += dt;
+      if (cosmeticsOk || this.dtParticles > 0.1) {
+        this.particles.update(this.dtParticles); this.dtParticles = 0;
+        this.sky.update(this.dtSky, this.camera.position); this.dtSky = 0;
+      }
     }
     const moonAsKey = this.sky.dayFactor < 0.32;
     if (moonAsKey !== this.moonIsKey) {
@@ -1699,10 +1798,29 @@ export class GameEngine {
       this.reportStats(dt);
     }
 
+    // Decide post-processing quality for this frame.
+    const simMs = performance.now() - frameStart;
+    this.simMsEma += (simMs - this.simMsEma) * 0.15;
+    {
+      const sim = this.simMsEma;
+      let want: 0 | 1 | 2 = this.postQ;
+      if (sim > 11.0)            want = 2;       // shed bloom + volumetric
+      else if (sim > 8.0)        want = 1;       // shed volumetric only
+      else if (sim < 4.8)        want = 0;       // full quality
+      else if (this.postQ === 2 && sim < 8.25)  want = 1;
+      if (want !== this.postQ && performance.now() - this.postQAt > 250) {
+        this.postQ = want;
+        this.postQAt = performance.now();
+      }
+    }
+
     if (this.mainRT) {
+      const q = this.postQ;
+
       this.renderer.setRenderTarget(this.mainRT);
       this.renderer.render(this.scene, this.camera);
 
+      // 1) Lighting + GI — never skipped (stale lightingRT ghosts the screen).
       this.lumenLite!.configure(
         this.sky.skyColor,
         this.sky.sunColor,
@@ -1712,18 +1830,34 @@ export class GameEngine {
       );
       this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
 
+      // 2) Depth fog — cheap, drives readability, never skipped.
       this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture);
 
-      this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, dt, false);
+      let finalTex: THREE.Texture = this.fogRT!.texture;
 
-      this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+      // 3) Bloom — shed at quality 2. Accumulated dt keeps temporal response.
+      this.dtBloom += dt;
+      if (q < 2) {
+        this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, this.dtBloom, false);
+        this.dtBloom = 0;
+      }
 
-      this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
+      // 4) Volumetric — shed at quality 1+.
+      if (q === 0) {
+        this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+        finalTex = this.volumetricRT!.texture;
+      }
+
+      // 5) Output always runs, reading whichever RT is the last live one.
+      this.outputStage!.render(this.renderer, finalTex);
     } else {
       this.renderer.render(this.scene, this.camera);
     }
 
-    this.captureSnapshot(dt);
+    // Snapshot readback only with real headroom left (avoids GPU sync stall).
+    if (performance.now() - frameStart < 10.0) {
+      this.captureSnapshot(dt);
+    }
   };
 
   private tickMenuCamera(dt: number): void {
@@ -1927,8 +2061,7 @@ export class GameEngine {
       this.weapons.update(dt, this.time, false, false, false);
       this.updateDroppedWeapon(dt);
       this.itemDrops.update(sdt, this.player.pos);
-      this.inserters.update(sdt, this.player.pos);
-      this.laserMiners.update(sdt, this.player.pos);
+      this.machines.update(sdt, this.player.pos);
       this.player.updateDeath(dt);
       this.player.applyDeathCamera(this.camera);
       if (this.deadTimer >= DEATH_DURATION) this.respawn();
@@ -2014,8 +2147,7 @@ export class GameEngine {
     if (this.invulnT > 0) this.invulnT -= dt;
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
-    this.inserters.update(dt, this.player.pos);
-    this.laserMiners.update(dt, this.player.pos);
+    this.machines.update(dt, this.player.pos);
 
     this.torchLights.update(dt, this.camera.position);
 
@@ -2264,6 +2396,12 @@ export class GameEngine {
       ourId = this.facingBlock('miner', this.player.yaw);
     }
 
+    // Turret rotates a full 360° on its own, so it has no facing variant —
+    // it just needs solid ground beneath it.
+    if (ourId === B.TURRET) {
+      if (!DEFS[this.world.getBlockRaw(x, y - 1, z)]?.solid) return;
+    }
+
     const d = DEFS[ourId];
     if (d.solid && this.playerIntersectsBlock(x, y, z)) return;
     if (ourId === B.TORCH && !atPlant) {
@@ -2451,6 +2589,9 @@ export class GameEngine {
     }
 
     this.player.resetDeath();
+    // Phase 4: a respawn is a teleport — abandon the in-flight field build.
+    this.flow.invalidateNow();
+    this.lastFieldX = NaN; this.lastFieldY = NaN; this.lastFieldZ = NaN;
     this.player.setSpawn(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
     this.player.yaw = this.ship.yaw;
     this.player.pitch = 0;
@@ -2606,7 +2747,7 @@ export class GameEngine {
   private getBiomeName(x: number, z: number): string {
     this.biomeCheckT--;
     if (this.biomeCheckT <= 0) {
-      this.biomeCheckT = 3;
+      this.biomeCheckT = 3; // Only re-compute every 3rd stats call
       this.cachedBiomeName = this.world.gen.biomeDefAt(Math.floor(x), Math.floor(z)).name;
     }
     return this.cachedBiomeName;
@@ -2733,8 +2874,10 @@ export class GameEngine {
     this.renderer.setAnimationLoop(null);
     this.sound.stopShip();
     this.itemDrops?.clear();
+    this.machines?.dispose();
     this.inserters?.clear();
     this.laserMiners?.clear();
+    this.turrets?.clear();
     this.removeListeners();
     window.removeEventListener('resize', this.resize);
     this.world?.materials.cutoutDepth?.dispose();

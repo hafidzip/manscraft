@@ -24,6 +24,7 @@ export const B = {
   CONVEYOR: 61,
   INSERTER: 62,
   LASER_MINER: 63,
+  TURRET: 64,
 } as const;
 
 export const BLOCK_COLORS: Record<number, number> = {
@@ -46,6 +47,7 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.CONVEYOR]: 0x484854,
   [B.INSERTER]: 0x505058,
   [B.LASER_MINER]: 0x9aa0a8,
+  [B.TURRET]: 0x8c939c,
 };
 
 export interface RayHit {
@@ -63,6 +65,7 @@ export interface WorldLike {
   spawn: THREE.Vector3;
   solid(x: number, y: number, z: number): boolean;
   get(x: number, y: number, z: number): number;
+  peekBlock(x: number, y: number, z: number): number;
   set(x: number, y: number, z: number, id: number, markDirty?: boolean): void;
   highestY(x: number, z: number): number;
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist?: number): RayHit | null;

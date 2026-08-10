@@ -47,6 +47,7 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.CONVEYOR]: 'Conveyor Belt',
   [B.INSERTER]: 'Inserter',
   [B.LASER_MINER]: 'Laser Miner',
+  [B.TURRET]: 'Turret',
   50: 'Ruby Ore',
   51: 'Amber Ore',
   52: 'Luminescence Ore',
@@ -108,7 +109,8 @@ export class Inventory {
     arr[0] = { kind: 'block', blockId: B.INSERTER, count: 64 };
     arr[1] = { kind: 'block', blockId: B.LASER_MINER, count: 64 };
     arr[2] = { kind: 'block', blockId: B.CONVEYOR, count: 64 };
-    arr[3] = { kind: 'block', blockId: B.COBBLE, count: 64 };
+    arr[3] = { kind: 'block', blockId: B.TURRET, count: 64 };
+    arr[4] = { kind: 'block', blockId: B.COBBLE, count: 64 };
     arr[9] = { kind: 'food', foodId: 'chicken-drum', count: 64 };
     return arr;
   })();

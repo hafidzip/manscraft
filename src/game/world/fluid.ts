@@ -3,72 +3,174 @@ import { B, DEFS, waterId, waterInfo, WATER_MAX_LEVEL } from './blocks';
 import type { World } from './world';
 
 const FLOW_DELAY = 0.12;
-const MAX_PER_FRAME = 160;
-const MAX_QUEUE = 6000;
 
-interface Task {
-  x: number;
-  y: number;
-  z: number;
-  time: number;
+/* ------------------------------------------------------------------ keys */
+
+const KEY_Y_SHIFT = 9;
+const KEY_Z_SHIFT = 17;
+
+/**
+ * Packs a world cell into a 26-bit non-negative SMI — zero allocation.
+ * `x & 0x1FF` is exactly `x mod 512` for negative x too, so it matches the
+ * torus world (WORLD_SIZE = 512) and cells across the seam dedupe correctly.
+ */
+const cellKey = (x: number, y: number, z: number): number =>
+  (x & 0x1FF) | ((y & 0xFF) << KEY_Y_SHIFT) | ((z & 0x1FF) << KEY_Z_SHIFT);
+
+const KEY_EMPTY = -1;
+const KEY_TOMB  = -2;
+
+/** Open-addressed integer set: linear probing + tombstones. No per-op alloc. */
+class IntSet {
+  private keys: Int32Array;
+  private mask: number;
+  private limit: number;
+  private live = 0;
+  private used = 0;
+
+  constructor(capPow2 = 1024) {
+    this.keys  = new Int32Array(capPow2).fill(KEY_EMPTY);
+    this.mask  = capPow2 - 1;
+    this.limit = (capPow2 * 3) >> 2;   // keep >=25% of slots EMPTY
+  }
+
+  get size(): number { return this.live; }
+
+  private slotOf(k: number, mask: number): number {
+    return (Math.imul(k, 0x9E3779B1) >>> 15) & mask;   // Knuth multiplicative
+  }
+
+  /** has + add in a single probe. Returns true if newly inserted. */
+  add(k: number): boolean {
+    const t = this.keys, m = this.mask;
+    let i = this.slotOf(k, m);
+    let tomb = -1;
+    for (;;) {
+      const v = t[i];
+      if (v === k) return false;
+      if (v === KEY_EMPTY) {
+        if (tomb >= 0) { t[tomb] = k; } else { t[i] = k; this.used++; }
+        this.live++;
+        if (this.used >= this.limit) this.rehash();
+        return true;
+      }
+      if (v === KEY_TOMB && tomb < 0) tomb = i;
+      i = (i + 1) & m;
+    }
+  }
+
+  delete(k: number): boolean {
+    const t = this.keys, m = this.mask;
+    let i = this.slotOf(k, m);
+    for (;;) {
+      const v = t[i];
+      if (v === k) { t[i] = KEY_TOMB; this.live--; return true; }
+      if (v === KEY_EMPTY) return false;
+      i = (i + 1) & m;
+    }
+  }
+
+  clear(): void {
+    this.keys.fill(KEY_EMPTY);
+    this.live = 0; this.used = 0;
+  }
+
+  private rehash(): void {
+    const old = this.keys;
+    let cap = old.length;
+    if (this.live * 2 >= cap) cap <<= 1;
+    const t = new Int32Array(cap).fill(KEY_EMPTY);
+    const m = cap - 1;
+    for (let i = 0; i < old.length; i++) {
+      const k = old[i];
+      if (k < 0) continue;
+      let j = this.slotOf(k, m);
+      while (t[j] >= 0) j = (j + 1) & m;
+      t[j] = k;
+    }
+    this.keys = t; this.mask = m;
+    this.used = this.live;
+    this.limit = (cap * 3) >> 2;
+  }
 }
 
-const H_OFF = [
-  [1, 0], [-1, 0], [0, 1], [0, -1],
-] as const;
+/* ------------------------------------------------------------ ring queue */
+
+// Next power of two >= the old MAX_QUEUE so head/count wrap with a mask.
+const QCAP  = 8192;
+const QMASK = QCAP - 1;
 
 export class FluidSim {
-  private queue: Task[] = [];
-  private head = 0;
-  private pending = new Set<string>();
+  private qKey   = new Int32Array(QCAP);
+  private qTime  = new Float64Array(QCAP);
+  private qHead  = 0;
+  private qCount = 0;
+  private pending = new IntSet();
   private now = 0;
 
   constructor(private world: World) {}
 
-  private key(x: number, y: number, z: number): string {
-    return `${x},${y},${z}`;
-  }
-
   poke(x: number, y: number, z: number, delay = FLOW_DELAY): void {
-    const k = this.key(x, y, z);
-    if (this.pending.has(k) || this.queue.length > MAX_QUEUE) return;
-    this.pending.add(k);
-    this.queue.push({ x, y, z, time: this.now + delay });
+    if (y < 0 || y >= 80) return;              // WORLD_HEIGHT guard
+    if (this.qCount >= QCAP) return;           // drop-on-overflow, as before
+    const k = cellKey(x, y, z);
+    if (!this.pending.add(k)) return;          // already queued: one probe
+    const w = (this.qHead + this.qCount) & QMASK;
+    this.qKey[w]  = k;
+    this.qTime[w] = this.now + delay;
+    this.qCount++;
   }
 
   pokeAround(x: number, y: number, z: number, delay = FLOW_DELAY): void {
     this.poke(x, y, z, delay);
-    for (const [ox, oz] of H_OFF) this.poke(x + ox, y, z + oz, delay);
+    this.poke(x + 1, y, z, delay);
+    this.poke(x - 1, y, z, delay);
+    this.poke(x, y, z + 1, delay);
+    this.poke(x, y, z - 1, delay);
     this.poke(x, y + 1, z, delay);
     this.poke(x, y - 1, z, delay);
   }
 
   update(dt: number): void {
     this.now += dt;
-    if (this.head >= this.queue.length) {
-      this.queue.length = 0;
-      this.head = 0;
-      return;
-    }
+    const keys = this.qKey, times = this.qTime;
+
+    // Nothing due -> don't open a world batch at all.
+    if (this.qCount === 0 || times[this.qHead] > this.now) return;
 
     this.world.beginBatch();
     let processed = 0;
-    while (this.head < this.queue.length && processed < MAX_PER_FRAME) {
-      const t = this.queue[this.head];
-      if (t.time > this.now) break;
-      this.head++;
-      this.pending.delete(this.key(t.x, t.y, t.z));
-      this.recompute(t.x, t.y, t.z);
+
+    // qHead/qCount advance BEFORE recompute(), because recompute() re-enters
+    // poke() for neighbours and needs the live write cursor.
+    while (this.qCount > 0 && processed < 420) {
+      const h = this.qHead;
+      if (times[h] > this.now) break;          // monotone FIFO
+      const k = keys[h];
+      this.qHead = (h + 1) & QMASK;
+      this.qCount--;
+      this.pending.delete(k);
+      this.recompute(
+        k & 0x1FF,
+        (k >>> KEY_Y_SHIFT) & 0xFF,
+        (k >>> KEY_Z_SHIFT) & 0x1FF,
+      );
       processed++;
     }
     this.world.endBatch();
-
-    if (this.head >= this.queue.length) {
-      this.queue.length = 0;
-      this.head = 0;
-    }
   }
 
+  /** Additive API — drop stale work on world regen / teleport. */
+  clear(): void {
+    this.qHead = 0;
+    this.qCount = 0;
+    this.pending.clear();
+  }
+
+  /* -------------------------------------------------------- water physics
+     Unchanged from the original implementation; coordinates now arrive
+     normalised into [0,512)/[0,80) which world.getBlockRaw/setBlock already
+     wrap internally. */
 
   private g(x: number, y: number, z: number): number {
     return this.world.getBlockRaw(x, y, z);
@@ -115,6 +217,7 @@ export class FluidSim {
       return;
     }
 
+    const H_OFF: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     let best = Infinity;
     for (const [ox, oz] of H_OFF) {
       const ni = waterInfo(this.g(x + ox, y, z + oz));
@@ -151,6 +254,7 @@ export class FluidSim {
   }
 
   private spreadHorizontal(x: number, y: number, z: number, childLevel: number): void {
+    const H_OFF: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     for (const [ox, oz] of H_OFF) {
       const nx = x + ox;
       const nz = z + oz;

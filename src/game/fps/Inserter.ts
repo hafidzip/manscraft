@@ -4,6 +4,8 @@ import { wrapBlock, minImageF } from '../core/constants';
 import { getAtlas, blockCubeGeometry } from './textures';
 import type { ItemDropManager } from './ItemDrop';
 import type { AudioSynth } from './audio';
+import { MK_INSERTER, type MachineRecord } from '../world/machineRegistry';
+import type { MachineAgent, MachineView } from './machineScheduler';
 
 type WorldView = { get(x: number, y: number, z: number): number };
 
@@ -51,8 +53,15 @@ const MAX_ARMS = 24;
 
 const smoothstep = (t: number) => t * t * (3 - 2 * t);
 
-export class InserterManager {
-  private arms = new Map<string, Arm>();
+export class InserterManager implements MachineAgent {
+  readonly kind = MK_INSERTER;
+  readonly maxLive = MAX_ARMS;
+  readonly scanRadius = SCAN_RADIUS;
+  readonly pruneRadius = PRUNE_RADIUS;
+  readonly yLo = -2;
+  readonly yHi = 3;
+  readonly thinkPerFrame = 0;
+  private arms = new Map<string | number, Arm>();
   private scanT = 0;
   private pruneT = 0;
   private cubeGeoCache = new Map<number, THREE.BufferGeometry>();
@@ -122,6 +131,36 @@ export class InserterManager {
   private destroyArm(arm: Arm): void {
     if (arm.itemCube) arm.tilt.remove(arm.itemCube);
     this.scene.remove(arm.group);
+  }
+
+  has(key: number): boolean { return this.arms.has(key); }
+  create(rec: MachineRecord): void {
+    if (this.arms.has(rec.key)) return;
+    const arm = this.buildArm(rec.x, rec.y, rec.z, rec.id);
+    arm.group.visible = false;
+    this.arms.set(rec.key, arm);
+  }
+  destroy(key: number): void {
+    const arm = this.arms.get(key);
+    if (!arm) return;
+    this.destroyArm(arm);
+    this.arms.delete(key);
+  }
+  setActive(key: number, active: boolean): void {
+    const arm = this.arms.get(key);
+    if (arm) arm.group.visible = active;
+  }
+  onIdChanged(rec: MachineRecord): void {
+    const arm = this.arms.get(rec.key);
+    if (arm) arm.lastId = rec.id;
+  }
+  tick(rec: MachineRecord, view: MachineView, dt: number): void {
+    const arm = this.arms.get(rec.key);
+    if (arm) this.tickArm(arm, rec.id, view.ix, view.iz, dt);
+  }
+  retain(key: number): boolean {
+    const arm = this.arms.get(key);
+    return !!arm && arm.state !== 'idle';
   }
 
   private scan(px: number, py: number, pz: number): void {
@@ -206,6 +245,8 @@ export class InserterManager {
     const dir = inserterDir(id) ?? [0, 0];
     const rest = InserterManager.angleFor(-dir[0], -dir[1]);
     const g = arm.group;
+    // The inserter has no cube of its own: its cell sits directly on the block
+    // below, so the machine base is at arm.y (the top face of that block).
     g.position.set(ix + 0.5, arm.y, iz + 0.5);
 
     arm.t += dt;
@@ -216,9 +257,11 @@ export class InserterManager {
         arm.swingAngle += (rest - arm.swingAngle) * Math.min(1, 14 * dt);
         tiltTarget = -0.18;
         if (arm.t > 0.12) {
+          // Items rest on the block below the machine cell, i.e. at arm.y.
           const taken = this.drops.takeAt(ix + 0.5 - dir[0], arm.y, iz + 0.5 - dir[1], 0.52);
           if (taken) {
             arm.heldId = taken.blockId;
+            this.drops.recycle(taken);
             const cube = new THREE.Mesh(this.cubeGeo(arm.heldId), this.getCubeMat());
             cube.position.set(0.9, -0.5, 0);
             cube.castShadow = true;
