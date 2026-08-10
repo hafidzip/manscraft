@@ -684,7 +684,7 @@ export class GameEngine {
 
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
       this.syncHotbarMode();
-    }, { bus: this.changeBus });
+    }, { bus: this.changeBus, instanced: true });
     this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
     this.laserMiners = new LaserMinerManager(this.scene, this.world, {
       mineable: (id) => this.laserMinerCanMine(id),

@@ -143,6 +143,7 @@ export class ItemDropManager {
     if (this.instancer) {
       it.mesh = null;
       it.inst = this.instancer.acquire(it);
+      this.instancer.set(it, it.pos.x, it.pos.y + 0.12, it.pos.z, it.spin);
     } else {
       const mesh = this.meshPool.pop() ?? new THREE.Mesh(this.getGeometry(blockId), this.getMaterial());
       mesh.geometry = this.getGeometry(blockId);
@@ -466,5 +467,16 @@ export class ItemDropManager {
     this.sleepers.length = 0;
     this.grid.clear();
     this.stats.live = 0; this.stats.awake = 0; this.stats.sleeping = 0;
+  }
+
+  dispose(): void {
+    this.clear();
+    if (this.instancer) {
+      this.instancer.dispose();
+      this.instancer = null;
+    }
+    for (const geo of this.geoCache.values()) geo.dispose();
+    this.geoCache.clear();
+    if (this.mat) { this.mat.dispose(); this.mat = null; }
   }
 }
