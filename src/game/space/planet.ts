@@ -35,16 +35,6 @@ function smoothRange(edge0: number, edge1: number, value: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/**
- * A planet whose expensive meshes are built asynchronously.
- *
- * The constructor is near-instant: it seeds RNGs and enqueues build steps.
- * The scene drains the queue each frame under a strict time budget, so
- * arriving in a new system (or hyper-jumping) never blocks the render loop.
- *
- * Build order is important — coarsest LOD + atmosphere first, so the planet
- * has something to show immediately, then progressively finer detail.
- */
 export class PlanetBody {
   readonly spec: PlanetSpec;
   readonly group = new THREE.Group();
@@ -64,7 +54,6 @@ export class PlanetBody {
   private ringsHolder: THREE.Group | null = null;
   private ringsMesh: THREE.InstancedMesh | null = null;
 
-  // Multi-LOD voxel shells (built on demand). Index 0 is full detail.
   private lodMeshes: (THREE.InstancedMesh | null)[] = [null, null, null, null, null];
   private lodBuilt: boolean[] = [false, false, false, false, false];
   private voxelMat = new THREE.MeshLambertMaterial({
@@ -79,10 +68,9 @@ export class PlanetBody {
   private voxelVisible = false;
   private scratchColor = new THREE.Color();
   private t = 0;
-  private cityLightAccum = 0; // throttle city-light color recompute
+  private cityLightAccum = 0;
   private sunDirWorldTmp = new THREE.Vector3();
 
-  /** Async build queue — the scene calls runBuildStep() each frame. */
   private pendingSteps: Array<() => void> = [];
   private disposed = false;
 
@@ -96,27 +84,17 @@ export class PlanetBody {
     this.enqueueBuild();
   }
 
-  /**
-   * Queue all build work. Ordered so the planet becomes visible fast:
-   *   1. Coarsest LOD (< 200 iterations)
-   *   2. Atmosphere (one sphere geo)
-   *   3. Medium LODs
-   *   4. Rings / moons / clouds
-   *   5. Fine LODs
-   *   6. City lights & lava (cheap fibonacci sample, not a full grid walk)
-   */
   private enqueueBuild() {
     const spec = this.spec;
     const pal = this.palette;
 
-    this.pendingSteps.push(() => this.buildLOD(4));  // coarsest — instant
+    this.pendingSteps.push(() => this.buildLOD(4));
     this.pendingSteps.push(() => this.buildAtmosphere());
     this.pendingSteps.push(() => this.buildLOD(3));
     this.pendingSteps.push(() => this.buildLOD(2));
     if (pal.clouds) this.pendingSteps.push(() => this.buildClouds());
     if (spec.hasRings) this.pendingSteps.push(() => this.buildRings());
     if (spec.hasMoons) {
-      // enqueue moons one at a time so they don't group into a single spike
       const moonRng = new Rng(derive(spec.seed, 6));
       const count = moonRng.next() < 0.4 ? 1 : moonRng.next() < 0.8 ? 2 : 3;
       for (let i = 0; i < count; i++) {
@@ -130,19 +108,16 @@ export class PlanetBody {
     if (pal.lava) this.pendingSteps.push(() => this.buildLava());
   }
 
-  /** True if more build steps remain. */
   hasPending(): boolean {
     return !this.disposed && this.pendingSteps.length > 0;
   }
 
-  /** Run a single build step. Called by the scene under a time budget. */
   runBuildStep() {
     if (this.disposed) return;
     const step = this.pendingSteps.shift();
     if (step) step();
   }
 
-  // ---------- individual build steps (each cheap enough to run per frame) ----------
 
   private buildLOD(level: number) {
     if (this.lodBuilt[level]) return;
@@ -169,7 +144,7 @@ export class PlanetBody {
     });
     const mesh = instancedVoxelMesh(shell, this.voxelMat, 1.02, step);
     mesh.frustumCulled = false;
-    mesh.visible = false; // LOD picker will enable the right one
+    mesh.visible = false;
     this.lodMeshes[level] = mesh;
     this.lodBuilt[level] = true;
     this.planetSpin.add(mesh);
@@ -288,10 +263,6 @@ export class PlanetBody {
     this.moons.push({ pivot, spin, speed, phase, atmoMat });
   }
 
-  /**
-   * Cheap city-light placement via fibonacci sphere sampling — one noise
-   * lookup per candidate instead of walking a full 40³ voxel grid.
-   */
   private buildCityLights() {
     const spec = this.spec;
     const pal = this.palette;
@@ -311,14 +282,14 @@ export class PlanetBody {
       const nz = s * Math.sin(th);
       const lat = Math.abs(ny);
       if (lat >= 0.78) continue;
-      if (rng.next() > 0.28) continue; // sparse city presence
+      if (rng.next() > 0.28) continue;
       const h = fbm(
         nx * spec.terrainFreq + noiseOff,
         ny * spec.terrainFreq - noiseOff,
         nz * spec.terrainFreq + noiseOff * 0.5,
         4
       );
-      if (h <= 0.02) continue; // ocean / basin
+      if (h <= 0.02) continue;
       const surfR = R * (1 + h * spec.terrainAmp);
       items.push({
         x: nx * surfR,
@@ -377,12 +348,7 @@ export class PlanetBody {
     }
   }
 
-  // ---------- per-frame update ----------
 
-  /**
-   * Projected-size LOD driven by pixel diameter. Independent of screen size.
-   * Falls back to the closest built LOD when the ideal one is still queued.
-   */
   updateDistance(dist: number, viewportHeight: number, cameraFov: number) {
     const R = Math.max(1, this.spec.radius);
     const focalPx =
@@ -396,18 +362,15 @@ export class PlanetBody {
     }
     this.group.visible = true;
 
-    // ideal LOD from pixel size
     let ideal =
       pixelDiameter > 150 ? 0 :
       pixelDiameter > 70 ? 1 :
       pixelDiameter > 28 ? 2 :
       pixelDiameter > 9 ? 3 : 4;
 
-    // walk toward coarser LODs looking for one that is already built
     let level = ideal;
     while (level < this.lodMeshes.length && !this.lodBuilt[level]) level++;
     if (level >= this.lodMeshes.length) {
-      // no coarser LOD ready; try finer (shouldn't happen but safe)
       level = ideal;
       while (level >= 0 && !this.lodBuilt[level]) level--;
     }
@@ -508,9 +471,6 @@ export class PlanetBody {
     }
 
     if (this.cityLights?.mesh.visible) {
-      // Recompute per-instance brightness only ~10 Hz. Cities flicker slowly
-      // and re-uploading the whole instanceColor buffer every frame for
-      // every visible planet was a major FPS cost.
       this.cityLightAccum += dt;
       if (this.cityLightAccum >= 0.1) {
         this.cityLightAccum = 0;

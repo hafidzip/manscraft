@@ -1,15 +1,9 @@
-// Weapon system: state machine + pose compositor for the viewmodel.
-// Every frame it layers base pose -> ADS -> sway -> bob -> sprint -> recoil
-// springs onto the rig, then plays keyframe timelines over the bones
-// (reload / bolt / inspect). Hands are glued to the gun, forearms stretch
-// to follow, exactly like a real FPS.
 import * as THREE from 'three';
 import { buildWeapon, WeaponRig, WEAPONS, WEAPON_ORDER, WeaponDef } from './models';
 import { Timeline, Spring3, Spring1 } from './anim';
 import { buildTimeline, ReloadCtx } from './reloads';
 import { AudioSynth } from './audio';
 
-/** minimal player surface the weapon viewmodel needs (engine Player satisfies it) */
 export interface WeaponPlayer {
   pos: THREE.Vector3;
   vel: THREE.Vector3;
@@ -62,7 +56,6 @@ export class WeaponSystem {
   private bridge: GameBridge;
   private onHud: (h: HudPush) => void;
 
-  // springs
   private recoilPos = new Spring3(240, 15);
   private recoilRot = new Spring3(190, 13);
   private swayPos = new Spring3(120, 12);
@@ -73,40 +66,25 @@ export class WeaponSystem {
   private equipKick = new Spring1(180, 15, 0);
 
   private fireTimer = 0;
-  private boltTimer = -1;           // pending bolt cycle delay (sniper)
-  private autoReloadTimer = -1;     // bazooka auto reload
+  private boltTimer = -1;
+  private autoReloadTimer = -1;
   private switchT = 0;
   private switchNext = '';
   private bloom = 0;
-  private deathT = -1;          // >= 0 while the weapon is being dropped
-  private holstered = false;    // true while a non-gun tool (laser) is equipped
+  private deathT = -1;
+  private holstered = false;
   private lastSwitchFoley = 0;
   private magDrops: MagDrop[] = [];
   private dropMat = new THREE.MeshLambertMaterial({ color: '#33363c' });
   private magGeo = new Map<string, THREE.BufferGeometry>();
 
-  /**
-   * Parking bay for every weapon that is not currently in the hands.
-   *
-   * `stow` is deliberately NOT attached to the camera (or to anything else),
-   * so the five idle rigs are invisible to the scene graph: three.js never
-   * walks them in `scene.updateMatrixWorld()`, never frustum-tests them and
-   * never sorts them. Keeping all six rigs permanently parented to the camera
-   * meant ~350 surplus Object3D matrix composes *three times every frame* —
-   * the bulk of the cost that made holding (and swapping) a weapon expensive.
-   */
   private stow = new THREE.Group();
   private mountedId = '';
 
-  /** reload callback tables, built once per weapon instead of per reload */
   private ctxCache = new Map<string, ReloadCtx>();
 
-  // scratch objects — the pose compositor runs every frame, so it must not
-  // allocate (each allocation is GC pressure that shows up as a swap hitch)
   private adsScratch = new THREE.Vector3();
 
-  // last HUD payload fields, compared primitively so the 60 Hz pose pass does
-  // not build a template-string key + object literal it usually throws away
   private hudW = '';
   private hudAmmo = -1;
   private hudReload = false;
@@ -125,27 +103,17 @@ export class WeaponSystem {
     for (const id of WEAPON_ORDER) {
       const rig = buildWeapon(id);
       rig.root.visible = false;
-      // Viewmodels sit inside the near plane and are always on screen, so the
-      // per-mesh frustum test is pure overhead — and skipping it guarantees
-      // the warm-up draw below really touches every buffer.
       rig.root.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.frustumCulled = false; });
       this.stow.add(rig.root);
       this.rigs.set(id, rig);
       this.ammo[id] = WEAPONS[id].magSize;
     }
-    // initial equip raise (start mid-switch so the rifle pulls up on spawn)
     this.switchT = 0.17;
     this.switchNext = this.currentId;
     this.state = 'switch';
     this.mount(this.currentId);
   }
 
-  /**
-   * Make `id` the one rig that lives under the camera; park the outgoing rig.
-   *
-   * Attach/detach is O(1) (a splice on `children`), so this is far cheaper
-   * than the per-frame traversal tax of leaving every rig mounted.
-   */
   private mount(id: string): void {
     const rig = this.rigs.get(id);
     if (!rig) return;
@@ -156,24 +124,15 @@ export class WeaponSystem {
     const prev = this.mountedId ? this.rigs.get(this.mountedId) : undefined;
     if (prev) {
       prev.root.visible = false;
-      this.stow.add(prev.root);          // reparent: drops it out of the graph
+      this.stow.add(prev.root);
     }
     this.camera.add(rig.root);
     this.mountedId = id;
     rig.root.visible = !this.holstered;
-    // The rig's world matrices went stale while parked — refresh the subtree
-    // once here so its very first rendered frame is already correct.
     this.camera.updateWorldMatrix(true, false);
     rig.root.updateMatrixWorld(true);
   }
 
-  /**
-   * Refresh only what the viewmodel actually needs: the camera's own world
-   * matrix plus the single mounted rig. The old code called
-   * `camera.updateMatrixWorld(true)` three times a frame, and `force = true`
-   * recursed through *every* camera child — all six guns, both hand rigs, the
-   * laser tool, the held block and the food model.
-   */
   private syncMatrices(): void {
     this.camera.updateWorldMatrix(true, false);
     const rig = this.rigs.get(this.mountedId);
@@ -183,17 +142,10 @@ export class WeaponSystem {
   get rig(): WeaponRig { return this.rigs.get(this.currentId)!; }
   get def(): WeaponDef { return this.rig.def; }
 
-  /**
-   * Upload every weapon texture and compile every hidden rig while the loading
-   * screen is still up. Without this, Three.js defers the work until a rig is
-   * made visible for its first swap, producing a multi-second gameplay hitch.
-   */
   async warmup(renderer: THREE.WebGLRenderer, scene: THREE.Scene): Promise<void> {
     const textures = new Set<THREE.Texture>();
     const hidden: THREE.Object3D[] = [];
 
-    // Temporarily hoist every parked rig under the camera so the compiler and
-    // the warm draw below can see them, then put them straight back.
     for (const rig of this.rigs.values()) {
       if (rig.root.parent !== this.camera) {
         hidden.push(rig.root);
@@ -213,15 +165,9 @@ export class WeaponSystem {
     const prevTarget = renderer.getRenderTarget();
     let warmRT: THREE.WebGLRenderTarget | null = null;
     try {
-      // compileAsync uses KHR_parallel_shader_compile where available.
       for (const texture of textures) renderer.initTexture(texture);
       await renderer.compileAsync(scene, this.camera);
 
-      // Shader programs are only half the story: a geometry's vertex buffers
-      // and its VAO are created lazily on the first *draw* that references
-      // them. With ~60 boxes per gun that is ~300 buffer uploads deferred
-      // until the player pressed a hotbar key mid-fight. Draw one throwaway
-      // 4x4 frame with every rig mounted so the driver does that work now.
       warmRT = new THREE.WebGLRenderTarget(4, 4);
       renderer.setRenderTarget(warmRT);
       renderer.render(scene, this.camera);
@@ -235,7 +181,6 @@ export class WeaponSystem {
     }
   }
 
-  /** Free every geometry owned by the (mostly off-graph) weapon rigs. */
   dispose(): void {
     for (const rig of this.rigs.values()) {
       rig.root.traverse((o) => {
@@ -248,12 +193,10 @@ export class WeaponSystem {
     this.dropMat.dispose();
   }
 
-  /** unified engine HUD: current weapon ammo / magazine */
   get ammoInfo(): { ammo: number; mag: number } {
     return { ammo: this.ammo[this.currentId], mag: this.def.magSize };
   }
 
-  /** Top every weapon's reserve up to its magazine size. (Merchant service.) */
   refillAllAmmo(): void {
     for (const id of Object.keys(this.ammo)) {
       const mag = WEAPONS[id]?.magSize;
@@ -262,14 +205,12 @@ export class WeaponSystem {
     this.refreshHud();
   }
 
-  /** Grant extra rounds for one weapon (bazooka warheads, …). */
   giveAmmo(id: string, amount: number): void {
     if (this.ammo[id] === undefined) return;
     this.ammo[id] += amount;
     this.refreshHud();
   }
 
-  /** unified engine HUD: reload progress 0..1 (0 when not reloading) */
   get reloadProgress(): number {
     if (this.state === 'reload' && this.timeline) {
       return Math.min(1, this.timeline.t / this.timeline.def.duration);
@@ -277,7 +218,6 @@ export class WeaponSystem {
     return 0;
   }
 
-  /** unified engine: hide/show the viewmodel (menu / pause) */
   setAllVisible(v: boolean) {
     const rig = this.rigs.get(this.mountedId);
     if (rig) rig.root.visible = v && !this.holstered;
@@ -289,17 +229,11 @@ export class WeaponSystem {
   get reloading(): boolean { return this.state === 'reload'; }
   sensFactor(): number { return this.scoped ? 0.24 : 1 - this.adsSpring.v * 0.35; }
 
-  // ------------------------------------------------------------ inputs
   notifyLook(dx: number, dy: number) {
     this.swayRot.impulse(-dx * 0.0018, -dy * 0.0015, dx * 0.0007);
     this.swayPos.impulse(-dx * 0.0012, dy * 0.0010, 0);
   }
 
-  /**
-   * Reload callback tables are pure functions of the rig, so build one per
-   * weapon and reuse it. Previously every reload / bolt cycle / inspect
-   * allocated eleven closures and two Vector3s.
-   */
   private makeCtx(): ReloadCtx {
     const cached = this.ctxCache.get(this.currentId);
     if (cached) return cached;
@@ -332,16 +266,6 @@ export class WeaponSystem {
     };
   }
 
-  /**
-   * Put a rig's swappable parts back into a sane visual state.
-   *
-   * The reload timelines are authored so the magazine bone is already back in
-   * the magwell before it is revealed, but a reload can also be *interrupted*
-   * (weapon switch, death, holster) at any arbitrary frame — leaving the mag
-   * bone parked at the "dropped away" pose. Snapping the bones to rest here
-   * guarantees the magazine can never be revealed at a stale pose and then
-   * pop into place a moment later.
-   */
   private restoreRigVisuals(rig: WeaponRig, loaded: boolean) {
     for (const name of ['mag', 'maghand', 'warhead', 'warheadhand']) {
       const bone = rig.bones.get(name);
@@ -357,7 +281,6 @@ export class WeaponSystem {
   }
 
   private spawnMagDrop(rig: WeaponRig) {
-    // one shared BoxGeometry per weapon instead of a fresh one per reload
     let geo = this.magGeo.get(this.currentId);
     if (!geo) {
       const size = MAG_DROP_SIZE[this.currentId] ?? [0.03, 0.08, 0.04];
@@ -396,10 +319,6 @@ export class WeaponSystem {
 
     if (this.state === 'switch') {
       if (this.switchNext === id) return;
-      // Hotbar key presses can arrive while the previous lower/raise animation
-      // is still running. The old code ignored them, which made 1-6 feel
-      // unreliable. Retarget the pending switch instead and keep the animation
-      // in its lowering phase so the selected weapon appears on this swap.
       this.switchNext = id;
       this.switchT = Math.min(this.switchT, 0.12);
       this.timeline = null;
@@ -431,7 +350,6 @@ export class WeaponSystem {
     this.timeline = new Timeline(buildTimeline('inspect', this.makeCtx()), this.rig.bones);
   }
 
-  /** The player died: abort everything and let the weapon fall from the hands. */
   startDeath() {
     if (this.deathT >= 0) return;
     this.deathT = 0;
@@ -463,7 +381,6 @@ export class WeaponSystem {
 
   get dead(): boolean { return this.deathT >= 0; }
 
-  /** Stow every firearm (used when the laser mining tool is selected). */
   setHolstered(v: boolean) {
     if (this.holstered === v) return;
     this.holstered = v;
@@ -482,22 +399,19 @@ export class WeaponSystem {
     }
   }
 
-  /** Replay the raise animation for the currently held weapon. */
   equipAnim() {
     if (this.state === 'switch') return;
     this.state = 'switch';
-    this.switchT = 0.16;   // start at the raise phase
+    this.switchT = 0.16;
     this.switchNext = this.currentId;
     this.equipKick.impulse(2);
   }
 
-  /** Force the next HUD push through even if nothing changed. */
   refreshHud() {
     this.hudW = '';
     this.pushHud();
   }
 
-  // ------------------------------------------------------------ firing
   private tryFire(): boolean {
     if (this.state === 'inspect') { this.state = 'idle'; this.timeline = null; }
     if (this.state !== 'idle') return false;
@@ -515,7 +429,6 @@ export class WeaponSystem {
     this.ammo[this.currentId]--;
     this.fireTimer = 60 / def.rpm;
 
-    // camera recoil + gun kick springs
     const k = def.kick;
     const adsMul = 1 - this.adsSpring.v * 0.35;
     const p = THREE.MathUtils.randFloat(k.camP[0], k.camP[1]) * adsMul;
@@ -526,7 +439,6 @@ export class WeaponSystem {
     if (def.id === 'handgun') { this.slideSpring.v = 0.035; this.slideSpring.vel = 0; }
     this.bloom = Math.min(1.6, this.bloom + 0.42 + (def.id === 'sniper' ? 0.9 : 0));
 
-    // muzzle + aim
     const muzzle = new THREE.Vector3();
     this.rig.muzzle.getWorldPosition(muzzle);
     const dir = new THREE.Vector3();
@@ -553,21 +465,14 @@ export class WeaponSystem {
     return true;
   }
 
-  // ------------------------------------------------------------ update
   update(dt: number, time: number, triggerDown: boolean, triggerHeld: boolean, adsHeld: boolean) {
     const rig = this.rig;
     const def = this.def;
 
-    // ---- holstered: the laser tool is out, firearms are stowed.
-    // Bail before touching any matrices: there is nothing on screen to pose.
     if (this.holstered) return;
 
-    // Refresh the viewmodel hierarchy first so muzzle/eject world positions
-    // computed during firing reflect this frame's camera transform rather
-    // than lagging a frame behind while moving.
     this.syncMatrices();
 
-    // ---- death: no input is accepted, the weapon just falls away
     if (this.deathT >= 0) {
       this.deathT += dt;
       this.adsSpring.update(dt);
@@ -577,7 +482,6 @@ export class WeaponSystem {
       return;
     }
 
-    // ---- state timers
     if (this.fireTimer > 0) this.fireTimer -= dt;
     if (this.boltTimer > 0) {
       this.boltTimer -= dt;
@@ -592,14 +496,12 @@ export class WeaponSystem {
       if (this.autoReloadTimer <= 0) this.startReload();
     }
 
-    // ---- ads
     const wantAds = adsHeld && this.state === 'idle' && this.player.sprintAmt < 0.5;
     if (this.state !== 'idle') this.adsSpring.target = 0;
     else this.adsSpring.target = wantAds ? 1 : 0;
     const ads = this.adsSpring.update(dt);
     if (adsHeld && this.state === 'inspect') { this.state = 'idle'; this.timeline = null; }
 
-    // ---- switch state
     let lowerAmt = 0;
     if (this.state === 'switch') {
       this.switchT += dt;
@@ -609,14 +511,9 @@ export class WeaponSystem {
       } else {
         if (this.currentId !== this.switchNext) {
           const prev = this.rigs.get(this.currentId)!;
-          // the outgoing rig may have been frozen mid-reload — reset it now so
-          // it is correct the next time it is raised
           this.restoreRigVisuals(prev, this.ammo[this.currentId] > 0);
           this.currentId = this.switchNext;
-          // mount() hides + parks `prev` and attaches the incoming rig, so the
-          // scene graph only ever carries the gun that is actually drawn
           this.mount(this.currentId);
-          // restore sane visual state in case a reload was cancelled mid-way
           this.restoreRigVisuals(this.rig, this.ammo[this.currentId] > 0);
         }
         lowerAmt = 1 - (this.switchT - LOWER) / RAISE;
@@ -628,7 +525,6 @@ export class WeaponSystem {
       }
     }
 
-    // ---- timeline playback
     if (this.timeline) {
       if (!this.timeline.update(dt)) {
         const wasReload = this.state === 'reload';
@@ -642,41 +538,28 @@ export class WeaponSystem {
       }
     }
 
-    // ---- bloom decay
     this.bloom = Math.max(0, this.bloom - dt * 2.6 - this.adsSpring.v * dt * 2);
 
-    // Apply the frame's pose (bob/sway/ads/switch/recoil springs) BEFORE we
-    // try to fire, so muzzle/eject world positions sampled inside tryFire
-    // reflect THIS frame's gun pose rather than the previous one. Without
-    // this, shots fired while running land the tracer a frame behind the
-    // visual barrel — especially visible at higher gait speeds.
     this.applyPose(dt, time, ads, lowerAmt);
     this.syncMatrices();
 
-    // ---- trigger (fires AFTER pose so the muzzle is where the barrel looks)
     const canAuto = def.fireMode === 'auto';
     if ((canAuto && triggerHeld) || (triggerDown && !canAuto)) {
-      // Do not applyPose again after firing. tryFire adds recoil impulses, but
-      // advancing the pose a second time would move the rendered barrel after
-      // its muzzle position was sampled, separating it from the new effect.
       this.tryFire();
     }
   }
 
-  // ------------------------------------------------------------ pose compositor
   private applyPose(dt: number, time: number, ads: number, lowerAmt: number) {
     const rig = this.rig;
     const def = this.def;
     const player = this.player;
 
-    // 1. reset all bones to rest
     for (const [name, bone] of rig.bones) {
       const rest = rig.rest.get(name)!;
       bone.position.copy(rest.p);
       bone.rotation.copy(rest.r);
     }
 
-    // handgun slide blowback (procedural, springs between shots)
     if (def.id === 'handgun' && !this.timeline) {
       const slide = rig.bones.get('slide');
       if (slide) {
@@ -685,17 +568,14 @@ export class WeaponSystem {
       }
     }
 
-    // 2. re-sample timeline AFTER rest reset (so it fully owns its bones)
     if (this.timeline) this.timeline.sample();
 
-    // 3. spring dynamics
     const rp = this.recoilPos.update(dt);
     const rr = this.recoilRot.update(dt);
     const sp = this.swayPos.update(dt);
     const sr = this.swayRot.update(dt);
     this.switchSpring.update(dt);
 
-    // 4. gait bob (figure-eight) — damped by ADS
     const speedN = Math.min(1, player.speedSmooth / 6.5);
     const grounded = player.onGround ? 1 : 0.25;
     const bobAmp = speedN * grounded * (1 - ads * 0.82);
@@ -704,15 +584,12 @@ export class WeaponSystem {
     const bobY = Math.sin(ph * 2) * 0.0055 * bobAmp - Math.abs(Math.sin(ph)) * 0.004 * bobAmp;
     const bobR = Math.cos(ph) * 0.012 * bobAmp;
 
-    // breathing
     const brY = Math.sin(time * 1.7) * 0.0012 * (1 - ads * 0.9);
     const brR = Math.sin(time * 1.1) * 0.0015 * (1 - ads * 0.9);
 
-    // 5. sprint pose
     const spn = player.sprintAmt * (1 - ads);
     const spnx = spn * spn;
 
-    // 6. ADS position: place sight line at screen center
     const sight = rig.sight.position;
     const adsPos = this.adsScratch.set(-sight.x, -sight.y - 0.008, def.basePos[2] + 0.03);
 
@@ -731,7 +608,6 @@ export class WeaponSystem {
       baseR[2] * (1 - ads) + sr.z + rr.z + bobR + spr[2] * spnx
     );
 
-    // equip / switch lowering (applied to gun, additive on top of rest/timeline)
     if (lowerAmt > 0.001) {
       const gun = rig.gun;
       const e = lowerAmt * lowerAmt;
@@ -741,11 +617,8 @@ export class WeaponSystem {
       gun.rotation.z += e * 0.35;
     }
 
-    // hide viewmodel while sniper-scoped
     root.visible = !this.scoped;
 
-    // ---- death drop: the gun rolls out of the hands and off the bottom of
-    // the screen, then hands off to a physical prop spawned in the world.
     if (this.deathT >= 0) {
       const d = this.deathT;
       const e = Math.min(1, d / 0.42);
@@ -759,12 +632,10 @@ export class WeaponSystem {
       if (d > 0.4) root.visible = false;
     }
 
-    // 7. update arm links (need fresh world matrices for the mounted rig only)
     rig.root.updateMatrixWorld(true);
     rig.armL.update();
     rig.armR.update();
 
-    // 8. mag drops
     for (let i = this.magDrops.length - 1; i >= 0; i--) {
       const d = this.magDrops[i];
       d.t -= dt;
@@ -782,14 +653,6 @@ export class WeaponSystem {
     this.pushHud();
   }
 
-  /**
-   * Publish to the HUD only when something the HUD can actually show changed.
-   *
-   * This runs once per rendered frame, so the old version built a template
-   * string *and* a full payload object 60 times a second just to throw both
-   * away. Compare the quantised fields directly and allocate nothing on the
-   * (overwhelmingly common) unchanged path.
-   */
   private pushHud() {
     const reloading = this.state === 'reload';
     const rawReloadT = this.timeline && reloading ? this.timeline.t / this.timeline.def.duration : 0;

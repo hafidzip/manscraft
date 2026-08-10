@@ -1,7 +1,3 @@
-/**
- * Voxel raycast (Amanatides & Woo DDA) — finds the first solid block hit
- * by a ray and the face normal of entry (used for mining / placing).
- */
 
 import { B, DEFS, isWaterId } from '../world/blocks';
 import type { World } from '../world/world';
@@ -18,13 +14,6 @@ export interface RayHit {
 }
 
 export interface RaycastOptions {
-  /**
-   * Skip non-colliding decoration blocks (flowers, tall grass…).
-   *
-   * Mining/placement wants them (you must be able to target a flower), but
-   * projectiles and line-of-sight have to fly straight through: a poppy is
-   * not cover.
-   */
   ignoreNonSolid?: boolean;
 }
 
@@ -67,9 +56,6 @@ export function raycastVoxel(
     }
     if (t > maxDist) return null;
 
-    // Resident-only read: a long line-of-sight or projectile ray must never
-    // generate terrain mid-frame (see World.peekBlock). Unloaded space stops
-    // the ray, which is also the correct occlusion answer for AI sensing.
     const id = world.peekBlock(x, y, z);
     if (id === -1) return null;
     if (id === B.AIR || isWaterId(id)) continue;

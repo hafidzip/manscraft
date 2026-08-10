@@ -6,18 +6,11 @@ import { Inventory } from './game/fps/Inventory';
 
 type Mode = 'craft' | 'space';
 
-/** Unique key for a planet used to persist cleared-camp state across visits. */
 function planetKey(home: PlanetHome | null): string {
   if (!home) return 'home';
   return `${home.star.seed.toString(16)}-${home.planet.seed.toString(16)}`;
 }
 
-/**
- * The transition bridge: the outgoing scene's last rendered frame is held
- * full-screen (with a live warp effect) while the incoming scene boots, then
- * cross-fades out the moment it reports ready. No black screen, no progress
- * bar, no title screen — the swap reads as one continuous shot.
- */
 interface Transition {
   img: string;
   label: string;
@@ -27,17 +20,13 @@ interface Transition {
 export default function App() {
   const [mode, setMode] = useState<Mode>('craft');
   const [home, setHome] = useState<PlanetHome | null>(null);
-  // Persistent inventory that survives planet hops
   const inventoryRef = useRef<Inventory | null>(null);
   if (!inventoryRef.current) {
     inventoryRef.current = new Inventory();
   }
 
-  // Persistent cleared-camp state keyed by planet.
-  // Survives planet hops within the same session.
   const clearedRef = useRef<Map<string, number[]>>(new Map());
 
-  // ---- transition overlay state ----
   const [transition, setTransition] = useState<Transition | null>(null);
   const [fading, setFading] = useState(false);
   const transRef = useRef<Transition | null>(null);
@@ -55,7 +44,6 @@ export default function App() {
     setFading(false);
   };
 
-  /** The incoming scene is live — cross-fade the held frame away. */
   const onChildReady = useCallback(() => {
     if (!transRef.current) return;
     setFading(true);
@@ -110,7 +98,6 @@ export default function App() {
         />
       )}
 
-      {/* ============ WARP BRIDGE — held frame + live effect ============ */}
       {transition && (
         <div
           className={`absolute inset-0 z-50 overflow-hidden bg-black ${fading ? 'warp-exit' : ''}`}
@@ -122,12 +109,9 @@ export default function App() {
             className="absolute inset-0 h-full w-full object-cover pixelated"
             draggable={false}
           />
-          {/* scanline shimmer + vignette over the frozen frame */}
           <div className="warp-grid absolute inset-0" />
-          {/* bright band sweeping down the screen */}
           <div className="warp-sweep absolute inset-0" />
 
-          {/* status strip */}
           <div className="absolute inset-x-0 bottom-9 flex flex-col items-center gap-3">
             <div
               className="px-font px-shadow text-[11px] tracking-[0.32em]"

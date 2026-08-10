@@ -1,15 +1,3 @@
-/**
- * GameEngine — the unified orchestrator.
- *
- * Merges the voxel-craft sandbox (toroidal world, mining laser, dynamic
- * water, day/night, spaceship) with the voxel-FPS combat systems (five
- * weapons, enemy AI with pathfinding, hit effects, health / waves).
- *
- * Hotbar (9 slots):
- *   1-5   handgun / smg / rifle / sniper / bazooka
- *   6     laser mining tool
- *   7-9   placeable blocks (mined blocks stack into these slots)
- */
 
 import * as THREE from 'three';
 import * as C from './core/constants';
@@ -28,29 +16,42 @@ import { raycastVoxel, type RayHit } from './player/raycast';
 import { Particles } from './vfx/particles';
 import { Sky } from './vfx/sky';
 import { LaserTool } from './vfx/laserTool';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { DepthFogPass } from './vfx/depthFog';
+import { LumenLitePass } from './vfx/lumenLite';
+import { VolumetricLightPass } from './vfx/volumetric';
+import { OutputStage } from './vfx/output';
+import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { EnemyManager, ENEMY_PRESETS } from './fps/Enemy';
+import { Enemy, EnemyManager, ENEMY_PRESETS } from './fps/Enemy';
 import { Effects } from './fps/effects';
+import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
+import { session, saveCoins } from './session';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
 import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
 import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
 import { TorchLights } from './world/torchLights';
-import { furnaceKey, type FurnaceState } from './crafting/smelting';
+import {
+  newFurnace, tickFurnace, furnaceIdle, furnaceKey, isFuel, smeltResult, SMELT_TIME,
+  type FurnaceState,
+} from './crafting/smelting';
 import { ItemDropManager } from './fps/ItemDrop';
 import { buildExtrudedItem, paintDrumstick, pixelTexture } from './fps/textures';
+import { Spring1 } from './fps/anim';
 import type { BodyRig } from './fps/models';
 
-import { PostProcessingPipeline } from './engine/PostProcessingPipeline';
-import { EnvironmentLighting } from './engine/EnvironmentLighting';
-import { ShopManager } from './engine/ShopManager';
-import { FurnaceManager } from './engine/FurnaceManager';
-import { TargetManager, type Target } from './engine/TargetManager';
-
-export type { Target };
+interface Target {
+  group: THREE.Group;
+  board: THREE.Mesh;
+  boardMat: THREE.MeshLambertMaterial;
+  wobbleX: Spring1;
+  wobbleZ: Spring1;
+  flash: number;
+}
 
 export interface HotbarItem {
   id: number | string;
@@ -90,9 +91,7 @@ export interface HudStats {
   reloadT: number;
   inventoryOpen: boolean;
   craftingOpen: boolean;
-  /** true while a furnace UI is open */
   furnaceOpen: boolean;
-  /** 0..1 flame gauge and smelt-arrow progress for the open furnace */
   furnaceBurn: number;
   furnaceCook: number;
   slot: number;
@@ -103,7 +102,6 @@ export interface HudStats {
   ads: number;
   hitSeq: number;
   damageSeq: number;
-  /** bearing of the last hit in view space: 0 = ahead, +π/2 = right, ±π = behind */
   dmgAngle: number;
   demolition: number;
   blocksMined: number;
@@ -111,19 +109,13 @@ export interface HudStats {
   session: number;
   switchAt: number;
   spread: number;
-  // ---- merchant economy ----
   coins: number;
-  /** increments on every coin gain/spend — HUD uses it to pulse the purse */
   coinSeq: number;
-  /** signed amount of the most recent purse change (+kill loot, −purchase) */
   lastCoinGain: number;
-  /** an idle merchant is close enough to trade */
   nearMerchant: boolean;
   shopOpen: boolean;
   shopMerchantName: string | null;
-  /** the items this merchant currently stocks (empty = use full catalogue) */
   shopStock: { itemId: string; quantity: number; maxQuantity: number }[];
-  /** true when the sell tab is active in the shop UI */
   shopSellOpen: boolean;
 }
 
@@ -133,11 +125,9 @@ export interface EngineEvents {
   onLock: (locked: boolean) => void;
   onSelect: (index: number) => void;
   onStats: (s: HudStats) => void;
-  /** the spaceship climbed past the atmosphere — hand off to the space scene */
   onEnterSpace?: (theme: PlanetTheme | null) => void;
 }
 
-/** altitude (blocks) where the ship breaks atmosphere and enters open space */
 const SPACE_ALTITUDE = 170;
 
 const LOAD_LABELS = [
@@ -148,24 +138,27 @@ const LOAD_LABELS = [
   'Placing torches of the sun',
 ];
 
+const UNDERWATER_FOG = new THREE.Color(0x0a2a5e);
+
+const NIGHT_MIST = new THREE.Color(0x39465e);
+
 const LASER_NAME = "MK-7 'PROSPECTOR'";
 const DEATH_DURATION = 4;
 
-/** map our world block ids to voxel-fps inventory ids (they diverge after SAND) */
+const CELESTIAL_SHADOW_SIZE = 2048;
+const CELESTIAL_SHADOW_HALF_EXTENT = 44;
+
+const GRASS_SHADOW_RADIUS = 0;
+
 const TO_FPS: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,
   [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
   [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
   [B.COBBLE]: 11,
-  // coal ore mines into a coal lump; torch places back as a torch
   [B.COAL_ORE]: 58, [B.TORCH]: 60,
-  // conveyor belt (all 4 directional variants → single inventory id)
   [B.CONVEYOR_N]: 61, [B.CONVEYOR_E]: 61, [B.CONVEYOR_S]: 61, [B.CONVEYOR_W]: 61,
-  // inserter (same treatment)
   [B.INSERTER_N]: 62, [B.INSERTER_E]: 62, [B.INSERTER_S]: 62, [B.INSERTER_W]: 62,
-  // laser miner (same treatment)
   [B.LASER_MINER_N]: 63, [B.LASER_MINER_E]: 63, [B.LASER_MINER_S]: 63, [B.LASER_MINER_W]: 63,
-  // gemstones map to unused high ids in the fps inventory
   [B.ORE_RUBY]: 50, [B.ORE_AMBER]: 51, [B.ORE_LUMINESCENCE]: 52,
   [B.ORE_DIAMOND]: 53, [B.ORE_GOLD]: 54, [B.ORE_SILVER]: 55,
   [B.ORE_JADE]: 56, [B.ORE_EMERALD]: 57,
@@ -180,11 +173,9 @@ FROM_FPS[61] = B.CONVEYOR_E;
 FROM_FPS[62] = B.INSERTER_E;
 FROM_FPS[63] = B.LASER_MINER_E;
 
-/** fps inventory ids for non-placeable crafting materials */
 const B_COAL = 58;
 const B_STICK = 59;
 
-/** weapon hotbar icon palette (index -> accent color) */
 const GUN_ICON_COLORS = ['#9aa4ae', '#565b3c', '#3f4650', '#6b5136', '#5d6142', '#ff8a3c'];
 
 export class GameEngine {
@@ -205,14 +196,6 @@ export class GameEngine {
   private ship!: Spaceship;
   private sound = new SoundEngine();
 
-  // ---- extracted subsystem managers ----
-  private postPipeline!: PostProcessingPipeline;
-  private lighting!: EnvironmentLighting;
-  public shop!: ShopManager;
-  private furnaceMgr!: FurnaceManager;
-  private targetMgr = new TargetManager();
-
-  // ---- unified fps systems ----
   private fpsAudio = new AudioSynth();
   private weapons!: WeaponSystem;
   private enemies!: EnemyManager;
@@ -221,7 +204,6 @@ export class GameEngine {
   private heldBlock!: HeldBlockTool;
   private torchLights!: TorchLights;
   private toolMode: 'weapon' | 'laser' | 'block' | 'food' = 'weapon';
-  /** unified inventory (voxel-fps): 6-slot hotbar + 3x9 storage */
   public inventory!: Inventory;
   private inserters!: InserterManager;
   private laserMiners!: LaserMinerManager;
@@ -230,9 +212,29 @@ export class GameEngine {
   private prevLeft = false;
   private placeCd = 0;
 
+  private mainRT: THREE.WebGLRenderTarget | null = null;
+  private lightingRT: THREE.WebGLRenderTarget | null = null;
+  private fogRT: THREE.WebGLRenderTarget | null = null;
+  private volumetricRT: THREE.WebGLRenderTarget | null = null;
+  private giRT: THREE.WebGLRenderTarget | null = null;
+  private blurRT: THREE.WebGLRenderTarget | null = null;
+  private lumenLite: LumenLitePass | null = null;
+  private depthFogPass: DepthFogPass | null = null;
+  private bloom: UnrealBloomPass | null = null;
+  private volumetricLight: VolumetricLightPass | null = null;
+  private outputStage: OutputStage | null = null;
+  private flashlight: THREE.SpotLight | null = null;
+  private flashlightTarget = new THREE.Object3D();
+  private lastShadowX = 1e9;
+  private lastShadowZ = 1e9;
+  private lastSunElev = 1e9;
+  private shadowCooldown = 0;
+  private grassShadowT = 0;
+  private moonIsKey = false;
   private inventoryOpen = false;
   private craftingOpen = false;
-
+  private furnaces = new Map<string, FurnaceState>();
+  private openFurnaceKey: string | null = null;
   private hitSeq = 0;
   private damageSeq = 0;
   private dmgAngle = 0;
@@ -246,9 +248,11 @@ export class GameEngine {
   private itemDrops!: ItemDropManager;
   private heldFood!: THREE.Group;
   private droppedGun: { mesh: THREE.Object3D; vel: THREE.Vector3; spin: THREE.Vector3; settled: boolean } | null = null;
+  private targets: Target[] = [];
   private raycaster = new THREE.Raycaster();
   private body!: BodyRig;
   private bodyGroup!: THREE.Group;
+  private targetsHit = 0;
   private eating = false;
   private eatT = 0;
   private biteAcc = 0;
@@ -258,7 +262,14 @@ export class GameEngine {
   private dead = false;
   private deadTimer = 0;
   private kills = 0;
-
+  private coins = 0;
+  private coinSeq = 0;
+  private lastCoinGain = 0;
+  private nearMerchant = false;
+  private nearMerchantEnemy: Enemy | null = null;
+  private shopEnemy: Enemy | null = null;
+  private shopStock: MerchantStock[] = [];
+  private shopSellOpen = false;
   private time = 0;
   private spaceExited = false;
 
@@ -296,8 +307,8 @@ export class GameEngine {
   private prevVelY = 0;
   private wasInWater = false;
   private disposed = false;
+  private fogScratch = new THREE.Color();
   private lumenSunDir = new THREE.Vector3();
-  /** rolling snapshot of the last rendered frame (seamless scene handoff) */
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
 
@@ -305,9 +316,7 @@ export class GameEngine {
     private canvas: HTMLCanvasElement,
     private events: EngineEvents,
     theme?: PlanetTheme | null,
-    /** Optional persistent inventory (survives planet hops when provided) */
     persistentInventory?: Inventory,
-    /** Camp IDs that were cleared on a previous visit (cross-planet persistence) */
     private initialClearedCamps?: number[],
   ) {
     this.theme = theme ?? null;
@@ -324,27 +333,10 @@ export class GameEngine {
 
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 900);
     this.camera.rotation.order = 'YXZ';
-
-    // Instantiating managers
-    this.postPipeline = new PostProcessingPipeline(this.scene, this.camera, this.renderer);
-    this.lighting = new EnvironmentLighting(this.camera);
-    this.shop = new ShopManager(
-      this.fpsAudio,
-      this.inventory,
-      this.canvas,
-      () => this.events.onStats(this.buildStats()),
-      () => this.requestLock(),
-    );
-    this.furnaceMgr = new FurnaceManager(
-      this.canvas,
-      this.inventory,
-      () => this.events.onStats(this.buildStats()),
-      () => this.requestLock(),
-    );
-
     this.resize();
     window.addEventListener('resize', this.resize);
   }
+
 
   get planetTheme(): PlanetTheme | null { return this.theme; }
 
@@ -372,11 +364,9 @@ export class GameEngine {
         side: THREE.DoubleSide,
       }),
     };
-
     mats.opaque.shadowSide = THREE.DoubleSide;
     mats.cutout.shadowSide = THREE.DoubleSide;
     mats.foliage.shadowSide = THREE.DoubleSide;
-
     mats.water.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = WATER_TIME;
       shader.vertexShader = shader.vertexShader
@@ -404,7 +394,6 @@ export class GameEngine {
            diffuseColor *= sampledDiffuseColor;`
         );
     };
-
     mats.cutout.onBeforeCompile = (shader) => {
       shader.uniforms.uGrassTime = GRASS_TIME;
       shader.uniforms.uGrassCam = GRASS_CAM;
@@ -425,27 +414,48 @@ export class GameEngine {
         .replace(
           '#include <beginnormal_vertex>',
           `#include <beginnormal_vertex>
+           // ALL cutout foliage (grass blades, leaves, flowers) is lit with a
+           // pure world-up normal, exactly like the grass_top terrain face.
+           // normalMatrix then produces the correct view-space up vector, so
+           // Lambert can never go black on sun-opposed or back-facing quads.
+           // Face-to-face shading variety is already baked into vertex colours
+           // by the mesher, and torches bypass lighting entirely in the
+           // fragment stage, so nothing is lost by unifying the normal here.
            objectNormal = vec3(0.0, 1.0, 0.0);`
         )
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
+           // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass/foliage sway
            vTorchUnlit = step(aSway.y, -0.5);
+           // Grass blades: normal.z > 10 (encoded as ang+100 by mesher)
            float gBlade = step(10.0, normal.z);
            float gPlant = step(0.001, aSway.y);
            vIsGrass = gBlade;
 
+           // ---- billboard rotation (grass blades only) ----
+           // The normal attribute stores (bladeCentreX, bladeCentreZ, bladeAngle+100)
+           // for grass verts. We rotate the vertex's XZ offset from the blade
+           // centre so the quad partially faces the camera.
            if (gBlade > 0.5) {
-             float bCx = normal.x;
-             float bCz = normal.y;
-             float bAng = normal.z - 100.0;
+             float bCx = normal.x;   // blade centre X (chunk-local)
+             float bCz = normal.y;   // blade centre Z (chunk-local)
+             float bAng = normal.z - 100.0;  // original blade angle
+
+             // World-space blade centre for camera direction
              vec3 bWorld = (modelMatrix * vec4(bCx, 0.0, bCz, 1.0)).xyz;
+             // Direction from blade to camera (XZ only)
              vec2 toCamera = normalize(uGrassCam.xz - bWorld.xz);
+             // Target angle: face the camera
              float camAng = atan(toCamera.y, toCamera.x);
+             // Blend 60% toward camera facing for a natural partial billboard
              float blendedAng = bAng + 0.6 * sin(camAng - bAng);
+
              float dAng = blendedAng - bAng;
              float cosD = cos(dAng);
              float sinD = sin(dAng);
+
+             // Rotate the vertex position offset from blade centre around Y
              float offX = position.x - bCx;
              float offZ = position.z - bCz;
              transformed.x = bCx + offX * cosD - offZ * sinD;
@@ -474,15 +484,25 @@ export class GameEngine {
         .replace(
           '#include <normal_fragment_begin>',
           `float faceDirection = gl_FrontFacing ? 1.0 : -1.0;
+           // vNormal is the view-space world-up for EVERY cutout vertex (the
+           // vertex stage overrides objectNormal to (0,1,0)). Use it as-is:
+           // NO faceDirection flip — flipping by gl_FrontFacing made lighting
+           // depend on which side of the double-sided quad the camera saw,
+           // which blackened backlit grass blades and tree leaves whenever
+           // the player looked toward/away from the sun.
            vec3 normal = normalize(vNormal);
            vec3 nonPerturbedNormal = normal;`
         )
         .replace(
           '#include <opaque_fragment>',
           `if (vTorchUnlit > 0.5) {
+             // pure atlas colour — no Lambert, no shadows, no point-light wash
              outgoingLight = diffuseColor.rgb;
            } else {
              #include <opaque_fragment>
+             // Foliage wrap-translucency: guarantees grass is never fully
+             // black even in cast shadows, which is the golden-hour look
+             // (backlit blades scatter warm sun through their surface).
              if (vIsGrass > 0.5) {
                outgoingLight = max(outgoingLight, diffuseColor.rgb * 0.22);
              }
@@ -494,6 +514,9 @@ export class GameEngine {
       shader.vertexShader = shader.vertexShader.replace(
         '#include <beginnormal_vertex>',
         `#include <beginnormal_vertex>
+         // Leaves are lit with a pure world-up normal, exactly like terrain
+         // and the grass shader — face-to-face variety is baked into vertex
+         // colours by the mesher, so nothing is lost.
          objectNormal = vec3(0.0, 1.0, 0.0);`
       );
     };
@@ -525,6 +548,7 @@ export class GameEngine {
            float gPlant = step(0.001, aSway.y);
            float gBlade = step(10.0, normal.z);
 
+           // Billboard rotation (grass blades only — must match main shader)
            if (gBlade > 0.5) {
              float bCx = normal.x;
              float bCz = normal.y;
@@ -589,8 +613,63 @@ export class GameEngine {
     if (this.sky) this.sky.applyTheme(this.theme?.skyHex ?? null);
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
 
-    // Configure sun/moon shadow maps via EnvironmentLighting static method
-    EnvironmentLighting.configureShadows(this.sky.sun, this.sky.moon);
+    for (const light of [this.sky.sun, this.sky.moon]) {
+      light.castShadow = true;
+      light.shadow.mapSize.set(CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_SIZE);
+      light.shadow.camera.left = -CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.right = CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.top = CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
+      light.shadow.camera.near = 0.5;
+      light.shadow.camera.far = 180;
+      light.shadow.bias = -0.0004;
+      light.shadow.normalBias = 0.16;
+      light.shadow.radius = 1.0;
+      light.shadow.camera.updateProjectionMatrix();
+    }
+
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+
+    this.mainRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+    this.mainRT.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    this.mainRT.depthTexture.type = THREE.UnsignedIntType;
+
+    this.lightingRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+    this.fogRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+    this.volumetricRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+    });
+
+    this.depthFogPass = new DepthFogPass(this.camera);
+    this.depthFogPass.material.uniforms.tDepth.value = this.mainRT.depthTexture;
+
+    const halfW = Math.max(1, Math.floor(size.x / 2));
+    const halfH = Math.max(1, Math.floor(size.y / 2));
+    this.giRT = new THREE.WebGLRenderTarget(halfW, halfH, { type: THREE.HalfFloatType });
+    this.blurRT = new THREE.WebGLRenderTarget(halfW, halfH, { type: THREE.HalfFloatType });
+
+    this.lumenLite = new LumenLitePass(this.camera, size.x, size.y);
+
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.3, 0.55, 0.82);
+
+    this.volumetricLight = new VolumetricLightPass(this.scene, this.camera, size.x, size.y);
+
+    this.outputStage = new OutputStage();
+
+    this.flashlight = new THREE.SpotLight(
+      0xfff0d8, 0, 58, THREE.MathUtils.degToRad(42), 0.62, 1.5,
+    );
+    this.flashlight.position.set(0.12, -0.16, 0.55);
+    this.flashlightTarget.position.set(0, -1.2, -30);
+    this.camera.add(this.flashlight);
+    this.camera.add(this.flashlightTarget);
+    this.flashlight.target = this.flashlightTarget;
 
     this.particles = new Particles(this.scene);
     this.laser = new LaserTool(this.scene, this.camera);
@@ -664,14 +743,14 @@ export class GameEngine {
       launchRocket: (m, d, anchor) => this.launchRocket(m, d, anchor),
       casing: (p, r, big) => this.fx.casing(p, r, big, this.player.vel),
     };
-    this.weapons = new WeaponSystem(this.camera, this.player, this.fpsAudio, bridge, () => {});
+    this.weapons = new WeaponSystem(this.camera, this.player, this.fpsAudio, bridge, () => { });
     this.enemies = new EnemyManager(this.player, {
       world: this.world,
       effects: this.fx,
       audio: this.fpsAudio,
       camera: this.camera,
       onPlayerHit: (dmg, from) => this.damagePlayer(dmg, from),
-      onEnemyKilled: (e) => { this.kills++; this.shop.rewardCoins(e); },
+      onEnemyKilled: (e) => { this.kills++; this.rewardCoins(e); },
     }, this.camps);
     if (this.initialClearedCamps?.length) {
       this.enemies.markCampsCleared(this.initialClearedCamps);
@@ -684,6 +763,11 @@ export class GameEngine {
       pixelTexture(cfg.pants, 14, 16, cfg.seed + 2);
     }
 
+    if (!Number.isFinite(session.coins)) {
+      session.coins = STARTING_COINS;
+      saveCoins(session.coins);
+    }
+    this.coins = session.coins;
     {
       const sp = this.player.pos;
       this.enemies.spawnWanderingMerchant(sp.x + 7, sp.z + 5, sp.y);
@@ -804,22 +888,28 @@ export class GameEngine {
     });
     for (const texture of textures) this.renderer.initTexture(texture);
     await this.renderer.compileAsync(this.scene, this.camera);
-    if (this.disposed || !this.postPipeline) return;
+    if (this.disposed || !this.mainRT) return;
 
     this.sky.update(0, this.camera.position);
     this.renderer.shadowMap.needsUpdate = true;
-    this.renderer.setRenderTarget(this.postPipeline.mainRT);
+    this.renderer.setRenderTarget(this.mainRT);
     this.renderer.render(this.scene, this.camera);
 
-    await this.postPipeline.warmup(
-      this.renderer,
+    this.lumenLite!.configure(
       this.sky.skyColor,
       this.sky.sunColor,
       this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
       this.sky.dayFactor,
       this.world.gen.sea,
-      this.sky.sunWorldPos,
     );
+    this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
+    this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture!);
+    this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, 1 / 60, false);
+    this.volumetricLight!.lightWorldPosition.copy(this.sky.sunWorldPos);
+    this.volumetricLight!.intensity = 0.01;
+    this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+    this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
+    this.renderer.setRenderTarget(null);
     await this.nextFrame();
   }
 
@@ -843,6 +933,7 @@ export class GameEngine {
   getSnapshot(): HTMLCanvasElement | null {
     return this.snapCanvas;
   }
+
 
   private blockGeometry(id: number): THREE.BufferGeometry {
     const cached = this.blockGeomCache.get(id);
@@ -961,6 +1052,7 @@ export class GameEngine {
     }
   }
 
+
   openCrafting(table: boolean): void {
     if (table) this.inventory.setCraftSize(3);
     else this.inventory.setCraftSize(2);
@@ -1033,18 +1125,240 @@ export class GameEngine {
     return possible;
   }
 
-  // ---- Furnace Delegations ----
-  get openFurnace(): FurnaceState | null { return this.furnaceMgr.openFurnace; }
-  openFurnaceAt(x: number, y: number, z: number): void { this.furnaceMgr.openFurnaceAt(x, y, z); }
-  closeFurnace(): void { this.furnaceMgr.closeFurnace(); }
-  furnaceTransfer(slot: 'input' | 'fuel' | 'output', all: boolean): void { this.furnaceMgr.furnaceTransfer(slot, all, this.sel); }
-  furnaceQuickMove(ref: { isHotbar: boolean; isCraft?: boolean; index: number }): boolean { return this.furnaceMgr.furnaceQuickMove(ref); }
 
-  // ---- Shop Delegations ----
-  buyShopItem(id: string): boolean { return this.shop.buyShopItem(id); }
-  toggleShopSell(open?: boolean): void { this.shop.toggleShopSell(open); }
-  sellShopItem(ref: { isHotbar: boolean; index: number }, amount: number): boolean { return this.shop.sellShopItem(ref, amount); }
-  closeShop(): void { this.shop.closeShop(); }
+  get openFurnace(): FurnaceState | null {
+    return this.openFurnaceKey ? this.furnaces.get(this.openFurnaceKey) ?? null : null;
+  }
+
+  private openFurnaceAt(x: number, y: number, z: number): void {
+    const k = furnaceKey(x, y, z);
+    if (!this.furnaces.has(k)) this.furnaces.set(k, newFurnace());
+    this.openFurnaceKey = k;
+    this.craftingOpen = false;
+    this.inventoryOpen = false;
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  closeFurnace(): void {
+    this.openFurnaceKey = null;
+    this.requestLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  private rewardCoins(e: Enemy): void {
+    const gain = COIN_REWARDS[e.cfg.id] ?? 12;
+    this.coins += gain;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = gain;
+    this.fpsAudio.coin();
+  }
+
+  private updateMerchantProximity(): void {
+    if (this.dead || this.piloting) {
+      this.nearMerchant = false;
+      this.nearMerchantEnemy = null;
+      return;
+    }
+    const p = this.player.pos;
+    let best: Enemy | null = null;
+    let bestD = TRADE_DISTANCE;
+    for (const e of this.enemies.enemies) {
+      if (!e.alive || e.cfg.id !== 'merchant' || e.state !== 'idle' || e.alerted) continue;
+      const dx = C.wrapDelta(e.pos.x - p.x, C.WORLD_SIZE);
+      const dz = C.wrapDelta(e.pos.z - p.z, C.WORLD_SIZE);
+      if (Math.abs(e.pos.y - p.y) > 3) continue;
+      const d = Math.hypot(dx, dz);
+      if (d < bestD) { best = e; bestD = d; }
+    }
+    this.nearMerchantEnemy = best;
+    this.nearMerchant = !!best;
+    if (best) best.tradeFaceT = 0.4;
+  }
+
+  private updateShop(): void {
+    const m = this.shopEnemy;
+    if (!m) return;
+    const p = this.player.pos;
+    const dx = C.wrapDelta(m.pos.x - p.x, C.WORLD_SIZE);
+    const dz = C.wrapDelta(m.pos.z - p.z, C.WORLD_SIZE);
+    const stale =
+      !m.alive || m.state !== 'idle' || m.alerted ||
+      this.dead || this.piloting ||
+      Math.hypot(dx, dz) > TRADE_DISTANCE * 1.6;
+    if (stale) this.closeShop();
+  }
+
+  private openShop(): void {
+    const m = this.nearMerchantEnemy;
+    if (!m || this.shopEnemy) return;
+    this.shopEnemy = m;
+    this.shopStock = generateMerchantStock(() => Math.random());
+    this.shopSellOpen = false;
+    m.tradeFaceT = 1e5;
+    this.inventoryOpen = false;
+    this.craftingOpen = false;
+    if (this.openFurnaceKey) this.openFurnaceKey = null;
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  closeShop(): void {
+    if (!this.shopEnemy) return;
+    this.shopEnemy.tradeFaceT = 0;
+    this.shopEnemy = null;
+    this.requestLock();
+    this.events.onStats(this.buildStats());
+  }
+
+  buyShopItem(id: string): boolean {
+    const item = SHOP_ITEMS.find((i) => i.id === id);
+    const m = this.shopEnemy;
+    if (!item || !m || !m.alive || m.state !== 'idle') return false;
+
+    const stock = this.shopStock.find((s) => s.itemId === id);
+    if (stock && stock.quantity <= 0) { this.fpsAudio.deny(); return false; }
+
+    if (this.coins < item.price) { this.fpsAudio.deny(); return false; }
+
+    const inv = this.inventory;
+    const goods = item.goods;
+    if (!inv.canAdd(goods)) { this.fpsAudio.deny(); return false; }
+    inv.addItem(goods);
+
+    if (stock) stock.quantity--;
+
+    this.coins -= item.price;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = -item.price;
+    this.fpsAudio.purchase();
+    this.events.onStats(this.buildStats());
+    return true;
+  }
+
+  toggleShopSell(open?: boolean): void {
+    if (!this.shopEnemy) return;
+    this.shopSellOpen = open !== undefined ? open : !this.shopSellOpen;
+    this.events.onStats(this.buildStats());
+  }
+
+  sellShopItem(ref: { isHotbar: boolean; index: number }, amount: number): boolean {
+    const m = this.shopEnemy;
+    if (!m || !m.alive || m.state !== 'idle') return false;
+
+    const inv = this.inventory;
+    const arr = ref.isHotbar ? inv.hotbar : inv.mainInv;
+    const item = arr[ref.index];
+    if (!item) return false;
+
+    if (item.kind === 'weapon') return false;
+
+    let pricePerUnit: number;
+    let sellCount: number;
+    if (item.kind === 'block') {
+      pricePerUnit = getBlockSellPrice(item.blockId);
+      sellCount = amount === 0 ? item.count : Math.min(amount, item.count);
+    } else {
+      pricePerUnit = getFoodSellPrice(item.foodId);
+      sellCount = amount === 0 ? item.count : Math.min(amount, item.count);
+    }
+    if (sellCount <= 0 || pricePerUnit <= 0) return false;
+
+    const totalGain = sellCount * pricePerUnit;
+
+    item.count -= sellCount;
+    if (item.count <= 0) arr[ref.index] = null;
+
+    this.coins += totalGain;
+    saveCoins(this.coins);
+    this.coinSeq++;
+    this.lastCoinGain = totalGain;
+    this.fpsAudio.coin();
+    this.events.onStats(this.buildStats());
+    return true;
+  }
+
+  furnaceTransfer(slot: 'input' | 'fuel' | 'output', all: boolean): void {
+    const st = this.openFurnace;
+    if (!st) return;
+    const inv = this.inventory;
+    const held = st[slot];
+
+    if (held) {
+      const take = all ? held : { ...held, count: held.kind === 'weapon' ? 1 : 1 } as SlotItem;
+      if (all) {
+        if (inv.canAdd(held)) { inv.addItem(held); st[slot] = null; }
+      } else if (held.kind !== 'weapon') {
+        if (inv.canAdd({ ...held, count: 1 })) {
+          inv.addItem({ ...held, count: 1 });
+          held.count -= 1;
+          if (held.count <= 0) st[slot] = null;
+        }
+      } else if (inv.canAdd(take)) { inv.addItem(take); st[slot] = null; }
+      this.events.onStats(this.buildStats());
+      return;
+    }
+
+    if (slot === 'output') return;
+
+    const sel = inv.hotbar[this.sel];
+    if (!sel || sel.kind !== 'block') return;
+    const ok = slot === 'fuel' ? isFuel(sel.blockId) : !!smeltResult(sel.blockId);
+    if (!ok) return;
+    const n = all ? sel.count : 1;
+    st[slot] = { kind: 'block', blockId: sel.blockId, count: n };
+    sel.count -= n;
+    if (sel.count <= 0) { inv.hotbar[this.sel] = null; this.selectSlot(this.sel, true); }
+    this.events.onStats(this.buildStats());
+  }
+
+  furnaceQuickMove(ref: { isHotbar: boolean; isCraft?: boolean; index: number }): boolean {
+    const st = this.openFurnace;
+    if (!st) return false;
+    const inv = this.inventory;
+    const item = inv.getItem(ref);
+    if (!item || item.kind !== 'block') return false;
+
+    const target: 'input' | 'fuel' | null =
+      smeltResult(item.blockId) ? 'input' :
+      isFuel(item.blockId) ? 'fuel' : null;
+    if (!target) return false;
+
+    const cur = st[target];
+    if (cur && (cur.kind !== 'block' || cur.blockId !== item.blockId || cur.count >= 64)) return false;
+
+    const space = cur && cur.kind === 'block' ? 64 - cur.count : 64;
+    const n = Math.min(space, item.count);
+    if (n <= 0) return false;
+
+    if (cur && cur.kind === 'block') cur.count += n;
+    else st[target] = { kind: 'block', blockId: item.blockId, count: n };
+    item.count -= n;
+    if (item.count <= 0) inv.setItem(ref, null);
+
+    this.syncHotbarMode();
+    this.events.onStats(this.buildStats());
+    return true;
+  }
+
+  private updateFurnaces(dt: number): void {
+    if (this.furnaces.size === 0) return;
+    for (const [k, st] of this.furnaces) {
+      const wasLit = st.burn > 0;
+      tickFurnace(st, dt);
+      const lit = st.burn > 0;
+      if (lit !== wasLit) {
+        const [x, y, z] = k.split(',').map(Number);
+        const cur = this.world.getBlockRaw(x, y, z);
+        if (cur === B.FURNACE || cur === B.FURNACE_LIT) {
+          this.world.setBlock(x, y, z, lit ? B.FURNACE_LIT : B.FURNACE);
+        }
+      }
+      if (furnaceIdle(st) && k !== this.openFurnaceKey) this.furnaces.delete(k);
+    }
+  }
 
   toggleInventory(open?: boolean): void {
     const want = open !== undefined ? open : !this.inventoryOpen;
@@ -1125,7 +1439,16 @@ export class GameEngine {
     this.statT = 0;
   }
 
-  // ------------------------------------------------------------------ input
+
+  private hitTarget(t: Target, dir: THREE.Vector3) {
+    t.wobbleX.impulse(THREE.MathUtils.clamp(-dir.y * 30, -8, 8) + THREE.MathUtils.randFloatSpread(4));
+    t.wobbleZ.impulse(THREE.MathUtils.randFloatSpread(9));
+    t.flash = 1;
+    this.fpsAudio.ding();
+    this.targetsHit++;
+    this.hitSeq++;
+  }
+
 
   requestLock(): void {
     this.sound.ensure();
@@ -1135,7 +1458,6 @@ export class GameEngine {
         const p = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
         if (p && typeof p.catch === 'function') p.catch(() => undefined);
       } catch {
-        /* browser rejected – user can click again */
       }
     }
   }
@@ -1184,17 +1506,17 @@ export class GameEngine {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'Tab') {
       e.preventDefault();
-      if (this.shop.shopEnemy) { this.closeShop(); return; }
-      if (this.furnaceMgr.openFurnaceKey) { this.closeFurnace(); return; }
+      if (this.shopEnemy) { this.closeShop(); return; }
+      if (this.openFurnaceKey) { this.closeFurnace(); return; }
       if (this.craftingOpen) { this.closeCraftingTable(); return; }
       this.toggleInventory();
       return;
     }
-    if (e.code === 'Escape' && this.shop.shopEnemy) {
+    if (e.code === 'Escape' && this.shopEnemy) {
       this.closeShop();
       return;
     }
-    if (e.code === 'Escape' && this.furnaceMgr.openFurnaceKey) {
+    if (e.code === 'Escape' && this.openFurnaceKey) {
       this.closeFurnace();
       return;
     }
@@ -1220,7 +1542,7 @@ export class GameEngine {
         break;
       case 'KeyE':
         if (this.piloting) this.exitShip();
-        else if (this.shop.nearMerchantEnemy) this.shop.openShop();
+        else if (this.nearMerchantEnemy) this.openShop();
         else if (this.ship && this.ship.distanceTo(this.player.eye()) < 6) this.boardShip();
         else {
           const eye = this.player.eye();
@@ -1313,13 +1635,19 @@ export class GameEngine {
     this.selectSlot((this.sel + step + 6) % 6, true);
   }
 
-  // -------------------------------------------------------------- main loop
 
   private resize = (): void => {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
-    if (this.postPipeline) this.postPipeline.resize(w, h);
+    this.mainRT?.setSize(w, h);
+    this.lightingRT?.setSize(w, h);
+    this.fogRT?.setSize(w, h);
+    this.volumetricRT?.setSize(w, h);
+    this.giRT?.setSize(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    this.blurRT?.setSize(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    this.lumenLite?.setSize(w, h);
+    this.volumetricLight?.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
@@ -1350,7 +1678,6 @@ export class GameEngine {
       animateConveyorTiles(this.textures, this.time);
     }
     if (this.locked) this.fluid.update(dt);
-
     if (this.locked) {
       let streamX = this.player.pos.x;
       let streamZ = this.player.pos.z;
@@ -1362,37 +1689,56 @@ export class GameEngine {
       this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
       if (this.ship && !this.piloting) this.ship.updateParked(dt);
     }
-
     if (this.locked && (!this.piloting || this.shipAltitude() < 26)) this.enemies.update(dt);
-
     if (this.locked) {
-      this.furnaceMgr.updateFurnaces(dt, this.world);
-      if (this.furnaceMgr.openFurnaceKey) this.events.onStats(this.buildStats());
-      this.shop.updateProximity(this.player.pos, this.dead, this.piloting, this.enemies);
-      this.shop.updateShop(this.player.pos, this.dead, this.piloting);
+      this.updateFurnaces(dt);
+      if (this.openFurnaceKey) this.events.onStats(this.buildStats());
+      this.updateMerchantProximity();
+      this.updateShop();
       this.particles.update(dt);
       this.sky.update(dt, this.camera.position);
-
-      // EnvironmentLighting update handles atmosphere, fog, flashlight, god rays, bloom, shadows
-      this.lighting.update(
-        dt,
-        this.camera,
-        this.renderer,
-        this.sky,
-        this.world,
-        this.scene,
-        this.player,
-        this.piloting,
-        this.dead,
-        this.postPipeline.volumetricLight,
-        this.postPipeline.bloom,
-        this.shipAltitude(),
-      );
     }
-
+    const moonAsKey = this.sky.dayFactor < 0.32;
+    if (moonAsKey !== this.moonIsKey) {
+      this.moonIsKey = moonAsKey;
+      this.shadowCooldown = 0;
+      if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+    }
     this.sound.update(dt, this.sky.isDay);
     if (this.locked) {
       this.enemies.setNight(this.sky.sunElev < 0.02);
+    }
+
+    if (this.locked) {
+      const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.sunElev, -0.05, 0.11);
+      const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
+      const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
+
+      const mistK = nightFog * 0.85;
+      const mist = this.fogScratch.copy(NIGHT_MIST).lerp(this.sky.skyColor, 0.25);
+      FOG_UNIFORMS.uSkyFogColor.value.copy(mist);
+      FOG_UNIFORMS.uSkyFog.value = mistK;
+      FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(mist, mistK);
+
+      FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
+      FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
+        .sub(this.camera.position).normalize();
+
+      FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.072;
+      FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
+      FOG_UNIFORMS.uFogFalloff.value = 46 - nightFog * 18;
+      FOG_UNIFORMS.uFogInscatter.value = 0.04 + (1 - nightFog) * 0.55;
+      FOG_UNIFORMS.uFogStart.value = THREE.MathUtils.lerp(8, 1.5, nightFog);
+
+      const maxRange = (C.VIEW_DISTANCE + 0.75) * C.CHUNK_SIZE;
+      const flyAmt = this.piloting
+        ? THREE.MathUtils.smoothstep(this.shipAltitude(), 10, 40)
+        : THREE.MathUtils.smoothstep(this.camera.position.y - this.world.gen.sea, 16, 46);
+      const blend = Math.max(nightFog, flyAmt);
+      FOG_UNIFORMS.uFarFogStart.value = THREE.MathUtils.lerp(maxRange * 0.48, maxRange * 0.32, blend);
+      FOG_UNIFORMS.uFarFogEnd.value = THREE.MathUtils.lerp(maxRange * 0.92, maxRange * 0.78, blend);
+
+      this.applyUnderwaterFx();
     }
 
     if (this.locked) {
@@ -1401,23 +1747,82 @@ export class GameEngine {
       GRASS_YAW.value = this.player.yaw;
     }
 
+    if (this.locked && this.volumetricLight) {
+      if (moonAsKey) {
+        this.volumetricLight.lightWorldPosition.copy(this.sky.moonWorldPos);
+        const moonUp = THREE.MathUtils.clamp(-this.sky.sunElev, 0, 1);
+        this.volumetricLight.intensity = 0.05 + moonUp * 0.09;
+        this.volumetricLight.discScale = 18;
+        this.volumetricLight.tint.copy(this.sky.moonColor);
+      } else {
+        this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
+        const elev = this.sky.sunElev;
+        const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
+        this.volumetricLight.intensity = angleFactor * 0.85;
+        this.volumetricLight.discScale = 85;
+        this.volumetricLight.tint.copy(this.sky.sunColor);
+      }
+    }
+
+    if (this.locked && this.bloom) {
+      this.bloom.strength = 0.30 * THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.0, 0.35);
+    }
+
+    if (this.locked && this.flashlight) {
+      const canUse = !this.dead && !this.piloting;
+      const nightAmt = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.05, 0.3);
+      this.flashlight.intensity = canUse ? nightAmt * 2.4 : 0;
+    }
+
+    if (this.locked) {
+      this.grassShadowT -= dt;
+      if (this.grassShadowT <= 0) {
+        this.grassShadowT = 0.25;
+        const radius = this.piloting ? 0 : GRASS_SHADOW_RADIUS;
+        if (this.world.updateGrassShadowCasters(this.camera.position.x, this.camera.position.z, radius)) {
+          this.shadowCooldown = 0;
+          if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+        }
+      }
+
+      const p = this.player.pos;
+      const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
+      const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
+      const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087;
+      this.shadowCooldown -= dt;
+      if (this.renderer.shadowMap && (moved || lightMoved) && this.shadowCooldown <= 0) {
+        this.lastShadowX = p.x;
+        this.lastShadowZ = p.z;
+        this.lastSunElev = activeElev;
+        this.shadowCooldown = this.piloting ? 0.75 : 0.2;
+        this.renderer.shadowMap.needsUpdate = true;
+      }
+    }
+
     if (this.locked) {
       this.reportStats(dt);
     }
 
-    if (this.postPipeline) {
-      this.renderer.setRenderTarget(this.postPipeline.mainRT);
+    if (this.mainRT) {
+      this.renderer.setRenderTarget(this.mainRT);
       this.renderer.render(this.scene, this.camera);
 
-      this.postPipeline.render(
-        this.renderer,
+      this.lumenLite!.configure(
         this.sky.skyColor,
         this.sky.sunColor,
         this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
         this.sky.dayFactor,
         this.world.gen.sea,
-        dt,
       );
+      this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
+
+      this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture);
+
+      this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, dt, false);
+
+      this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+
+      this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
     } else {
       this.renderer.render(this.scene, this.camera);
     }
@@ -1604,6 +2009,7 @@ export class GameEngine {
     this.laser.update(dt, { visible: false, firing: false, target: null, charge: 0, speed: 0 });
     this.heldBlock.update(dt, false, 0);
     this.heldFood.visible = false;
+
     this.fx.update(dt);
   }
 
@@ -1714,10 +2120,20 @@ export class GameEngine {
     this.itemDrops.update(dt, this.player.pos);
     this.inserters.update(dt, this.player.pos);
     this.laserMiners.update(dt, this.player.pos);
+
     this.torchLights.update(dt, this.camera.position);
 
-    // TargetManager updates shooting targets wobble / flash
-    this.targetMgr.update(dt);
+    for (const t of this.targets) {
+      t.wobbleX.update(dt);
+      t.wobbleZ.update(dt);
+      t.board.rotation.x = t.wobbleX.v * 0.06;
+      t.board.rotation.z = t.wobbleZ.v * 0.06;
+      t.board.rotation.y = t.wobbleZ.v * 0.02;
+      if (t.flash > 0) {
+        t.flash = Math.max(0, t.flash - dt * 4);
+        t.boardMat.emissive.setScalar(t.flash * 0.3);
+      }
+    }
 
     this.bodyGroup.position.set(p.pos.x, p.pos.y, p.pos.z);
     this.bodyGroup.rotation.y = p.yaw;
@@ -1756,6 +2172,7 @@ export class GameEngine {
       this.camera.updateProjectionMatrix();
     }
   }
+
 
   private updateTarget(): void {
     this.camera.getWorldDirection(this.aimDir);
@@ -1844,7 +2261,7 @@ export class GameEngine {
 
     if (id === B.FURNACE || id === B.FURNACE_LIT) {
       const k = furnaceKey(x, y, z);
-      const st = this.furnaceMgr.furnaces.get(k);
+      const st = this.furnaces.get(k);
       if (st) {
         const drop = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
         for (const it of [st.input, st.fuel, st.output]) {
@@ -1852,8 +2269,8 @@ export class GameEngine {
             for (let n = 0; n < it.count; n++) this.itemDrops.spawn(it.blockId, drop);
           }
         }
-        this.furnaceMgr.furnaces.delete(k);
-        if (this.furnaceMgr.openFurnaceKey === k) this.closeFurnace();
+        this.furnaces.delete(k);
+        if (this.openFurnaceKey === k) this.closeFurnace();
       }
     }
 
@@ -2058,6 +2475,20 @@ export class GameEngine {
     }
   }
 
+  private applyUnderwaterFx(): void {
+    if (this.player.headInWater) {
+      this.scene.background = UNDERWATER_FOG;
+      FOG_UNIFORMS.uFogColor.value.copy(UNDERWATER_FOG);
+      FOG_UNIFORMS.uSkyFogColor.value.copy(UNDERWATER_FOG);
+      FOG_UNIFORMS.uSkyFog.value = 0.92;
+      FOG_UNIFORMS.uFogDensity.value = Math.max(FOG_UNIFORMS.uFogDensity.value, 0.045);
+      FOG_UNIFORMS.uFogStart.value = 1.5;
+    } else {
+      this.scene.background = this.sky.skyColor;
+    }
+  }
+
+
   private updateDamageBearing(): void {
     if (!this.hasDamageFrom) return;
     const p = this.player.pos;
@@ -2203,7 +2634,7 @@ export class GameEngine {
     this.raycaster.set(origin, dir);
     this.raycaster.far = 130;
     let targetHit: { t: Target; point: THREE.Vector3; dist: number } | null = null;
-    for (const t of this.targetMgr.targets) {
+    for (const t of this.targets) {
       const hits = this.raycaster.intersectObject(t.board, false);
       if (hits.length > 0 && (!targetHit || hits[0].distance < targetHit.dist)) {
         targetHit = { t, point: hits[0].point.clone(), dist: hits[0].distance };
@@ -2231,8 +2662,9 @@ export class GameEngine {
       this.hitSeq++;
       if (eh.headshot) this.fpsAudio.headshot(); else this.fpsAudio.enemyHit();
     } else if (useTarget) {
-      this.targetMgr.hitTarget(targetHit!.t, dir, this.fpsAudio, () => this.hitSeq++);
+      this.hitTarget(targetHit!.t, dir);
       this.fx.puff(targetHit!.point, dir.clone().negate(), 0.25, 0.5, '#ffffff');
+      this.targetsHit++;
     } else if (worldHit) {
       this.fx.impact(worldHit.point, worldHit.normal, worldHit.block, worldHit);
       if ((worldHit.block === B.STONE || worldHit.block === B.GRAVEL) && Math.random() < 0.3) {
@@ -2274,6 +2706,7 @@ export class GameEngine {
     if (dist < 6.5) this.damagePlayer(Math.round((1 - dist / 6.5) * 42), pos);
   }
 
+
   private reportStats(dt: number): void {
     this.statT -= dt;
     if (this.statT > 0) return;
@@ -2299,8 +2732,6 @@ export class GameEngine {
       selItem && (selItem.kind === 'block' || selItem.kind === 'food') ? selItem.count :
       this.toolMode === 'weapon' ? this.weapons.ammoInfo.ammo : -1;
     const mag = this.toolMode === 'weapon' ? this.weapons.ammoInfo.mag : selItem && selItem.kind === 'block' ? 64 : 0;
-
-    const furnaceGauges = this.furnaceMgr.getFurnaceGauges();
 
     return {
       fps: Math.round(this.fps),
@@ -2333,9 +2764,15 @@ export class GameEngine {
       reloadT: this.weapons.reloadProgress,
       inventoryOpen: this.inventoryOpen,
       craftingOpen: this.craftingOpen,
-      furnaceOpen: !!this.furnaceMgr.openFurnaceKey,
-      furnaceBurn: furnaceGauges.furnaceBurn,
-      furnaceCook: furnaceGauges.furnaceCook,
+      furnaceOpen: !!this.openFurnaceKey,
+      furnaceBurn: (() => {
+        const f = this.openFurnace;
+        return f && f.burnMax > 0 ? Math.max(0, Math.min(1, f.burn / f.burnMax)) : 0;
+      })(),
+      furnaceCook: (() => {
+        const f = this.openFurnace;
+        return f ? Math.max(0, Math.min(1, f.cook / SMELT_TIME)) : 0;
+      })(),
       slot: this.sel,
       enemiesEnabled: this.enemiesEnabled,
       mineCharge: this.mineCharge,
@@ -2348,20 +2785,20 @@ export class GameEngine {
       dmgAngle: this.dmgAngle,
       demolition: this.demolition,
       blocksMined: this.blocksMined,
-      targetsHit: this.targetMgr.targetsHit,
+      targetsHit: this.targetsHit,
       session: 1 - (this.time % 300) / 300,
       switchAt: this.switchAt,
       spread:
         7 + this.weapons.bloomPx * 26 +
         Math.min(1, this.player.speedSmooth / 6) * 9 * (1 - this.weapons.adsT * 0.9),
-      coins: this.shop.coins,
-      coinSeq: this.shop.coinSeq,
-      lastCoinGain: this.shop.lastCoinGain,
-      nearMerchant: this.shop.nearMerchant,
-      shopOpen: !!this.shop.shopEnemy,
-      shopMerchantName: this.shop.shopEnemy ? this.shop.shopEnemy.cfg.name : null,
-      shopStock: this.shop.shopStock.map((s) => ({ ...s })),
-      shopSellOpen: this.shop.shopSellOpen,
+      coins: this.coins,
+      coinSeq: this.coinSeq,
+      lastCoinGain: this.lastCoinGain,
+      nearMerchant: this.nearMerchant,
+      shopOpen: !!this.shopEnemy,
+      shopMerchantName: this.shopEnemy ? this.shopEnemy.cfg.name : null,
+      shopStock: this.shopStock.map((s) => ({ ...s })),
+      shopSellOpen: this.shopSellOpen,
     };
   }
 
@@ -2397,7 +2834,17 @@ export class GameEngine {
     window.removeEventListener('resize', this.resize);
     this.world?.materials.cutoutDepth?.dispose();
     this.world?.materials.foliageDepth?.dispose();
-    if (this.postPipeline) this.postPipeline.dispose();
+    this.lumenLite?.dispose();
+    this.depthFogPass?.dispose();
+    this.bloom?.dispose();
+    this.volumetricLight?.dispose();
+    this.outputStage?.dispose();
+    this.mainRT?.dispose();
+    this.lightingRT?.dispose();
+    this.fogRT?.dispose();
+    this.volumetricRT?.dispose();
+    this.giRT?.dispose();
+    this.blurRT?.dispose();
     for (const g of this.blockGeomCache.values()) g.dispose();
     this.blockGeomCache.clear();
     this.weapons?.dispose();

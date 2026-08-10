@@ -28,16 +28,9 @@ export function sectorOf(p: Vec3d): SectorCoord {
   };
 }
 
-/**
- * Continuously streams star systems in a moving cube of sectors around the
- * ship. Sectors entering the radius are generated from the seed chain;
- * sectors leaving are discarded and their sprites disposed. There is no
- * boundary — fly forever and new systems keep materialising.
- */
 export class SectorStreamer {
   private loaded = new Map<string, StreamedStar>();
   private lastSector: SectorCoord = { x: NaN, y: NaN, z: NaN };
-  /** sectors of radius R in each direction (cube of (2R+1)^3) */
   radius = 2;
 
   constructor(private scene: THREE.Scene) {}
@@ -54,7 +47,6 @@ export class SectorStreamer {
     return this.lastSector;
   }
 
-  /** Cheap every frame; only does work when the ship crosses a sector line. */
   update(shipPos: Vec3d, force = false): boolean {
     const s = sectorOf(shipPos);
     if (
@@ -85,7 +77,6 @@ export class SectorStreamer {
       }
     }
 
-    // discard everything that fell out of range
     for (const [key, e] of this.loaded) {
       if (wanted.has(key)) continue;
       this.scene.remove(e.sprite);
@@ -95,7 +86,6 @@ export class SectorStreamer {
     return true;
   }
 
-  /** Nearest streamed star to a universe point. */
   nearest(p: Vec3d): { entry: StreamedStar; dist: number } | null {
     let best: StreamedStar | null = null;
     let bestD = Infinity;

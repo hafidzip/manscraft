@@ -1,8 +1,3 @@
-/**
- * SoundEngine — 100% procedural Web Audio.
- * Footsteps, digging, breaking, placement, UI clicks, ambient wind and
- * daytime birdsong are all synthesized from filtered noise + oscillators.
- */
 
 import type { SoundMat } from '../world/blocks';
 
@@ -25,14 +20,12 @@ export class SoundEngine {
   private noiseBuf: AudioBuffer | null = null;
   private birdTimer = 6;
 
-  // spaceship engine loop
   private shipOsc: OscillatorNode | null = null;
   private shipSub: OscillatorNode | null = null;
   private shipGain: GainNode | null = null;
   private shipWind: GainNode | null = null;
   private shipWindSrc: AudioBufferSourceNode | null = null;
 
-  /** must be called from a user gesture */
   ensure(): void {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') void this.ctx.resume();
@@ -64,7 +57,6 @@ export class SoundEngine {
     }
   }
 
-  // ------------------------------------------------------------- primitives
 
   private noise(dur: number, freq: number, q: number, gain: number, type: BiquadFilterType = 'bandpass', when = 0, sweepTo?: number): void {
     if (!this.ctx || !this.master || !this.noiseBuf) return;
@@ -103,7 +95,6 @@ export class SoundEngine {
     o.stop(t0 + dur + 0.05);
   }
 
-  // --------------------------------------------------------------- gameplay
 
   playStep(mat: SoundMat): void {
     const c = STEPS[mat];
@@ -177,18 +168,10 @@ export class SoundEngine {
     this.noise(0.1, 900, 1.2, 0.07, 'bandpass');
   }
 
-  // ---------------------------------------------------------------- spaceship
 
-  /**
-   * Ship engine loop: two detuned oscillators (main hum + sub octon) through
-   * a rising lowpass, plus filtered wind noise that screams as speed climbs.
-   * Load 0..1 drives pitch/gain; call every frame while piloting,
-   * setShip(0, 0) handles spindown automatically — or call stopShip().
-   */
   setShip(load: number, speed: number): void {
     if (!this.ctx || !this.master) return;
     if (!this.shipOsc && load > 0.01) {
-      // lazy-start the loop
       const o1 = this.ctx.createOscillator();
       o1.type = 'sawtooth';
       o1.frequency.value = 38;
@@ -213,7 +196,6 @@ export class SoundEngine {
       o2.start();
       lfo.start();
 
-      // speed wind
       const windSrc = this.ctx.createBufferSource();
       if (this.noiseBuf) {
         windSrc.buffer = this.noiseBuf;
@@ -258,7 +240,7 @@ export class SoundEngine {
         osc.stop();
         sub?.stop();
         wind?.stop();
-      } catch { /* already stopped */ }
+      } catch { }
     }, 600);
     this.shipOsc = null;
     this.shipSub = null;
@@ -267,7 +249,6 @@ export class SoundEngine {
     this.shipWindSrc = null;
   }
 
-  // ---------------------------------------------------------------- ambient
 
   private startWind(): void {
     if (!this.ctx || !this.master || !this.noiseBuf) return;
@@ -290,7 +271,6 @@ export class SoundEngine {
     lfo.start();
   }
 
-  /** called per-frame; schedules daytime birdsong */
   update(dt: number, isDay: boolean): void {
     if (!this.ctx) return;
     this.birdTimer -= dt;

@@ -1,20 +1,4 @@
-/**
- * Deterministic procedural noise toolkit for a toroidal voxel world.
- *
- *   mulberry32      seeded PRNG
- *   hash2 / hash3   stable integer hashes -> [0,1)   (decoration placement)
- *   Simplex2        seeded 2D simplex noise          (non-wrapping worlds)
- *   Simplex4        seeded 4D simplex noise          (torus embedding)
- *   Torus2          exactly periodic 2D field, any wavelength   (~3x cost)
- *   PeriodicPerlin2 exactly periodic 2D gradient noise, cheap    (wavelength must divide W)
- *   fbm / ridged / billow / warp2   fractal combinators over any periodic source
- *
- * INVARIANT: every field here satisfies  f(x, z) === f(x + W, z + D)  exactly.
- */
 
-// ---------------------------------------------------------------------------
-// PRNG + hashes
-// ---------------------------------------------------------------------------
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -26,13 +10,12 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
-/** Stable 2D integer hash -> [0,1). Feed it WRAPPED coords in a toroidal world. */
 export function hash2(seed: number, x: number, y: number): number {
   let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(seed | 0, 0x9e3779b1);
   h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
   h ^= h >>> 16;
-  return (h >>> 0) / 4294967296; // 2^32 keeps the range [0,1)
+  return (h >>> 0) / 4294967296;
 }
 
 export function hash3(seed: number, x: number, y: number, z: number): number {
@@ -47,13 +30,9 @@ export function hash3(seed: number, x: number, y: number, z: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-/** Uniform integer in [0, n) from a stable hash. */
 export const hash2i = (seed: number, x: number, y: number, n: number): number =>
   Math.min(n - 1, (hash2(seed, x, y) * n) | 0);
 
-// ---------------------------------------------------------------------------
-// 2D simplex (verified correct — kept for decoration/detail layers)
-// ---------------------------------------------------------------------------
 
 const GRAD2 = new Float32Array([
   1, 1, -1, 1, 1, -1, -1, -1,
@@ -88,11 +67,6 @@ export class Simplex2 {
     }
   }
 
-  /** Raw simplex noise, approximately [-1, 1] after the 33.7 normalisation
-   * below. The per-corner value is bounded by ~0.5 for a gradient on the unit
-   * circle; three corners sum to at most ~1.5, and the polynomial kernel
-   * decays the contribution away from each corner, so 33.7 gives a peak of
-   * ~1.0 and effective range close to [-1, 1] over the permutation table. */
   noise(xin: number, yin: number): number {
     let n0 = 0, n1 = 0, n2 = 0;
     const s = (xin + yin) * F2;
@@ -130,24 +104,10 @@ export class Simplex2 {
       t2 *= t2;
       n2 = t2 * t2 * (GRAD2[g] * x2 + GRAD2[g + 1] * y2);
     }
-    // Standard Ken Perlin improved-simplex normalization: the analytic
-    // maximum of the 3-corner sum with quintic fade is ~0.79, so 31.2 brings
-    // the peak to ~1.0 and effective quasi-Gaussian range to [-1, 1].
     return 31.2 * (n0 + n1 + n2);
   }
 }
 
-// ---------------------------------------------------------------------------
-// 4D simplex — FIXED.
-//
-// Bug 1 (fatal): the old GRAD4 held 146 numbers instead of 128 (36.5
-//   gradients). The whole `0,-1,*,*` group was missing and the tail was
-//   duplicated garbage, so every lookup read a misaligned vector -> mush.
-// Bug 2 (fatal): the corner loop applied c*G4 for c = 0..4 implicitly by
-//   loop index 0..3 — the five corners need 0, 1*G4, 2*G4, 3*G4, 4*G4.
-// Bug 3 (perf): rankCorners() allocated 5 arrays + a closure sort per
-//   sample. Replaced with six-comparison branch counting.
-// ---------------------------------------------------------------------------
 
 const GRAD4 = new Float32Array([
   0, 1, 1, 1, 0, 1, 1, -1, 0, 1, -1, 1, 0, 1, -1, -1,
@@ -184,7 +144,6 @@ export class Simplex4 {
     const z0 = z - (k - t);
     const w0 = w - (l - t);
 
-    // Rank the four coordinates with six comparisons (no allocation).
     let rx = 0, ry = 0, rz = 0, rw = 0;
     if (x0 > y0) rx++; else ry++;
     if (x0 > z0) rx++; else rz++;
@@ -199,10 +158,6 @@ export class Simplex4 {
 
     const ii = i & 255, jj = j & 255, kk = k & 255, ll = l & 255;
 
-    // 27 / r normalises the Clifford-torus sample to ~±1 regardless of the
-    // torus radius r. Without this the noise amplitude shrinks at coarse
-    // wavelengths (small r), making continent/warp fields depend on wavelength
-    // instead of just the declared octaves/gain.
     let n = 0;
     n += this.corner(x0, y0, z0, w0, ii, jj, kk, ll, r);
     n += this.corner(x0 - i1 + G4, y0 - j1 + G4, z0 - k1 + G4, w0 - l1 + G4,
@@ -219,7 +174,7 @@ export class Simplex4 {
   private corner(
     x: number, y: number, z: number, w: number,
     ii: number, jj: number, kk: number, ll: number,
-    _r: number, // Clifford-torus radius; used only to keep the signature stable
+    _r: number,
   ): number {
     let t = 0.6 - x * x - y * y - z * z - w * w;
     if (t <= 0) return 0;
@@ -230,27 +185,13 @@ export class Simplex4 {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Periodic 2D sources — INVARIANT: f(x, z) === f(x + W, z + D) exactly
-// ---------------------------------------------------------------------------
 
-/** A 2D field that is exactly periodic with period (W, D). */
 export interface Periodic2 {
   readonly W: number;
   readonly D: number;
-  /** Sample at world position (x, z) with the given feature wavelength in world units. */
   at(x: number, z: number, wavelength: number): number;
 }
 
-/**
- * Torus embedding: map x and z onto circles and sample 4D noise on the
- * resulting Clifford torus. Exactly periodic for ANY wavelength, isotropic,
- * no integer constraint. Costs ~3x a 2D sample.
- *
- * GOTCHA: the permutation table repeats every 256 lattice units, so keep the
- * circle radius under ~128 or the noise repeats along the circle. For
- * wavelengths finer than W/800 use PeriodicPerlin2.
- */
 export class Torus2 implements Periodic2 {
   private n4: Simplex4;
 
@@ -269,18 +210,10 @@ export class Torus2 implements Periodic2 {
   }
 }
 
-/**
- * Wrapped-lattice gradient (Perlin) noise. Gradients are hashed from lattice
- * coordinates taken mod the lattice period, so the field is exactly periodic
- * by construction. Cheap — use this for the many detail octaves.
- *
- * CONSTRAINT: W / wavelength must be an integer (pick wavelengths as W/2^k).
- */
 export class PeriodicPerlin2 implements Periodic2 {
   constructor(private seed: number, readonly W: number, readonly D: number) {}
 
   at(x: number, z: number, wavelength: number): number {
-    // Lattice counts must be integers for exact tiling.
     const px = Math.max(1, Math.round(this.W / wavelength));
     const pz = Math.max(1, Math.round(this.D / wavelength));
     const fx = (x * px) / this.W;
@@ -289,7 +222,6 @@ export class PeriodicPerlin2 implements Periodic2 {
     const i0 = Math.floor(fx), j0 = Math.floor(fz);
     const tx = fx - i0, tz = fz - j0;
 
-    // Quintic fade -> C2 continuous, no visible lattice creases.
     const u = tx * tx * tx * (tx * (tx * 6 - 15) + 10);
     const v = tz * tz * tz * (tz * (tz * 6 - 15) + 10);
 
@@ -300,11 +232,10 @@ export class PeriodicPerlin2 implements Periodic2 {
 
     const a = n00 + u * (n10 - n00);
     const b = n01 + u * (n11 - n01);
-    return (a + v * (b - a)) * 1.4142135; // 2D Perlin peaks at ~1/sqrt(2)
+    return (a + v * (b - a)) * 1.4142135;
   }
 
   private dotGrad(i: number, j: number, px: number, pz: number, dx: number, dz: number): number {
-    // The mod is what makes it tile: lattice cell px is the same cell as 0.
     const wi = ((i % px) + px) % px;
     const wj = ((j % pz) + pz) % pz;
     const a = hash2(this.seed, wi, wj) * Math.PI * 2;
@@ -312,18 +243,14 @@ export class PeriodicPerlin2 implements Periodic2 {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Fractal combinators — all preserve exact periodicity
-// ---------------------------------------------------------------------------
 
 export interface FbmOpts {
-  wavelength: number;  // wavelength of octave 0, in world units
+  wavelength: number;
   octaves: number;
-  gain?: number;       // amplitude falloff per octave (default 0.5)
-  lacunarity?: number; // frequency growth per octave (default 2)
+  gain?: number;
+  lacunarity?: number;
 }
 
-/** Signed fractal brownian motion, normalized to ~[-1, 1]. */
 export function fbm(src: Periodic2, x: number, z: number, o: FbmOpts): number {
   const gain = o.gain ?? 0.5;
   const lac = o.lacunarity ?? 2;
@@ -337,12 +264,6 @@ export function fbm(src: Periodic2, x: number, z: number, o: FbmOpts): number {
   return sum / norm;
 }
 
-/**
- * Ridged multifractal -> [0, 1], sharp crests. This is what makes MOUNTAIN
- * RANGES instead of lumps. The per-octave weighting is the important part:
- * each octave is attenuated by the previous one, so detail only appears on
- * slopes that are already high.
- */
 export function ridged(src: Periodic2, x: number, z: number, o: FbmOpts): number {
   const gain = o.gain ?? 0.5;
   const lac = o.lacunarity ?? 2;
@@ -351,7 +272,7 @@ export function ridged(src: Periodic2, x: number, z: number, o: FbmOpts): number
     let n = 1 - Math.abs(src.at(x, z, wl));
     n *= n;
     n *= weight;
-    weight = Math.min(1, Math.max(0, n * 2)); // feed forward
+    weight = Math.min(1, Math.max(0, n * 2));
     sum += amp * n;
     norm += amp;
     amp *= gain;
@@ -360,7 +281,6 @@ export function ridged(src: Periodic2, x: number, z: number, o: FbmOpts): number
   return sum / norm;
 }
 
-/** Billow -> [0, 1], puffy rounded hills. */
 export function billow(src: Periodic2, x: number, z: number, o: FbmOpts): number {
   const gain = o.gain ?? 0.5;
   const lac = o.lacunarity ?? 2;
@@ -374,13 +294,6 @@ export function billow(src: Periodic2, x: number, z: number, o: FbmOpts): number
   return sum / norm;
 }
 
-/**
- * Domain warp. Periodicity survives because the offset is itself periodic:
- * (x + W) + w(x + W) = (x + w(x)) + W.
- * This is the single highest-impact line for killing the "blobby noise" look.
- * NOTE: octaves intentionally small — high-frequency warp bends octaves of the
- * warped field onto themselves and re-creates artifacts.
- */
 export function warp2(
   src: Periodic2, x: number, z: number, wavelength: number, amplitude: number, octaves = 2,
 ): [number, number] {
@@ -389,9 +302,6 @@ export function warp2(
   return [x + dx * amplitude, z + dz * amplitude];
 }
 
-// ---------------------------------------------------------------------------
-// small math helpers
-// ---------------------------------------------------------------------------
 
 export const clamp = (v: number, a: number, b: number): number => (v < a ? a : v > b ? b : v);
 export const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
@@ -399,5 +309,4 @@ export const smoothstep = (e0: number, e1: number, v: number): number => {
   const t = clamp((v - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
 };
-/** Map signed [-1, 1] noise to [0, 1]. */
 export const to01 = (v: number): number => v * 0.5 + 0.5;

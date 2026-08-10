@@ -3,14 +3,11 @@ import { buildVoxels, hash3, lerpColor, type VoxelSpec } from './voxel';
 import { makeGlowTexture } from './billboard';
 import type { StarSpec } from './galaxy';
 
-/** Deterministically voxelizes a star sphere from its seed. */
 export function buildStarVoxels(radius: number, seed: bigint): THREE.InstancedMesh {
   const R = Math.round(radius);
   const o1 = Number(seed & 0xFFFFn);
   const o2 = Number((seed >> 16n) & 0xFFFFn);
   const voxels: VoxelSpec[] = [];
-  // Analytic band walk — the star crust is only 1.7 units thick, so scanning
-  // the full (2R+1)^3 cube wasted ~95% of the iterations.
   const innerR = R - 1.7;
   const lo2 = innerR * innerR;
   const hi2 = R * R;
@@ -54,11 +51,6 @@ export function buildStarVoxels(radius: number, seed: bigint): THREE.InstancedMe
   return buildVoxels(voxels, mat);
 }
 
-/**
- * A voxel star: emissive blocky sphere with animated surface "plasma"
- * flicker plus a corona glow sprite. The system light lives on the scene
- * (only one star is ever meshed — the one you are orbiting).
- */
 export class StarBody {
   readonly group = new THREE.Group();
   readonly spec: StarSpec;
@@ -101,8 +93,6 @@ export class StarBody {
     const pulse = 1 + Math.sin(this.t * 1.5) * 0.08;
     this.glow.scale.setScalar(this.spec.radius * 7 * pulse);
 
-    // Plasma flicker only ~15 Hz — uploading the whole instanceColor
-    // buffer every frame for every visible star was another big FPS cost.
     this.flickerAccum += dt;
     if (this.flickerAccum < 0.066) return;
     this.flickerAccum = 0;

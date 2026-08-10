@@ -1,27 +1,3 @@
-/**
- * Terrain generator — the landscape recipe.
- *
- * Every source is exactly periodic on the world torus (Torus2 / PeriodicPerlin2),
- * so F(x, z) === F(x ± W, z ± W) holds analytically for every field.
- *
- * Recipe (addresses the "cottage cheese" problem — raw fbm alone can never
- * produce geography):
- *   continentalness  low-freq fbm, smoothstep-remapped to a land-biased
- *                    distribution -> oceans with real basins, coastlines,
- *                    big walkable continents and flat inland plains
- *   mountains        ridged multifractal (weighted octaves) -> coherent
- *                    RANGES with crests and saddles, masked by smoothstep;
- *                    a peaks-and-valleys layer modulates crest jaggedness
- *   hills            billow octaves -> rounded, rolling detail scaled per-biome
- *   domain warp      2-octave warp bends every landform field -> breaks the
- *                    blobby radial symmetry of plain fbm
- *   climate          temp/humid sampled on SEPARATE lattices (decorrelated
- *                    biomes) -> plains / forest / desert / taiga / mountains
- *
- * Trees are evaluated in a 2-block margin around each chunk from canonical
- * coordinates, so trunks and canopies are stable across chunk borders and
- * across the torus seam.
- */
 
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, SEA_LEVEL, WORLD_SIZE, wrapBlock, chunkIndex } from '../core/constants';
 import {
@@ -32,31 +8,22 @@ import { B, DEFS } from './blocks';
 import { Biome, BIOME_DEFS, pickBiome } from './biomes';
 
 const TREE_SALT = 0x5eed;
-const W = WORLD_SIZE; // world edge length in blocks
+const W = WORLD_SIZE;
 
-/**
- * Densest tree roll any biome can pass. The tree pass visits 400 columns per
- * chunk; testing this constant first rejects ~95% of them with one hash and
- * zero terrain-field work.
- */
 const MAX_TREE_DENSITY = Object.values(BIOME_DEFS)
   .reduce((m, d) => Math.max(m, d.trees), 0);
 
-/** Structural subset of TASK 4's PlanetTheme that terrain cares about.
- *  Index signature keeps it assignable from the full space/palettes type. */
 export interface PlanetTheme {
   seed: bigint | string | number;
   name?: string;
-  /** force a single-biome world (null/undefined = normal climate biomes) */
   biome?: Biome | null;
-  hillAmp?: number;       // multiplier on rolling hill detail   (default 1)
-  mountainAmp?: number;   // multiplier on mountain massifs      (default 1)
-  seaLevel?: number;      // absolute override of SEA_LEVEL
-  oceanCoverage?: number; // 0 = dry world, 0.5 = default, 1 = drowned
+  hillAmp?: number;
+  mountainAmp?: number;
+  seaLevel?: number;
+  oceanCoverage?: number;
   [k: string]: unknown;
 }
 
-/** BigInt planet seed -> stable 31-bit noise seed (never Math.random) */
 export function planetSeedToWorldSeed(seed: bigint | string | number): number {
   const b = typeof seed === 'bigint' ? seed : BigInt(seed);
   const s = b < 0n ? -b : b;
@@ -65,53 +32,43 @@ export function planetSeedToWorldSeed(seed: bigint | string | number): number {
   return ((lo ^ Math.imul(hi, 0x9e3779b1)) >>> 0) % 0x7fffffff || 1;
 }
 
-/** ambient theme so World/TerrainGenerator construction sites need no signature change */
 let ACTIVE_THEME: PlanetTheme | null = null;
 export function setActivePlanetTheme(t: PlanetTheme | null | undefined): void { ACTIVE_THEME = t ?? null; }
 export function getActivePlanetTheme(): PlanetTheme | null { return ACTIVE_THEME; }
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
-/**
- * Coarse landform classification exposed by the terrain generator.
- * Values are stable (persisted into a per-column cache), so they are safe to
- * store, compare and serialize.
- */
 export enum TerrainArea {
-  WATER = 0,     // column surface lies below sea level
-  FLAT = 1,      // dry land with gentle local slope — buildable plains
-  HILLS = 2,     // dry land, rolling relief
-  MOUNTAIN = 3,  // inside a masked mountain range or high-altitude rock
+  WATER = 0,
+  FLAT = 1,
+  HILLS = 2,
+  MOUNTAIN = 3,
 }
 
-/** flat = every 2-block-step neighbour differs by at most this many blocks */
 const FLAT_MAX_STEP = 2;
-/** columns whose masked mountain signal exceeds this are mountain area */
-const MOUNTAIN_MASK_MIN = 115; // ≈ 0.45 in the 0..255 quantized mask
+const MOUNTAIN_MASK_MIN = 115;
 
 interface FieldSet {
-  cont: number;  // continentalness ~[-1, 1]  (land-biased)
-  mount: number; // ridged mountain signal [0, 1]
-  hills: number; // billow rolling detail ~[-1, 1]
-  pv: number;    // peaks/valleys crest jaggedness ~[-1, 1]
+  cont: number;
+  mount: number;
+  hills: number;
+  pv: number;
 }
 
 export class TerrainGenerator {
   readonly theme: PlanetTheme | null;
-  /** effective sea level and its delta vs. the default constant */
   readonly sea: number;
   private dSea: number;
-  private base: number;      // continent base height, sea-relative
+  private base: number;
   private hillAmp: number;
   private mountAmp: number;
-  private contLo: number;    // ocean-coverage-shifted remap window
+  private contLo: number;
   private contHi: number;
   private forced: Biome | null;
 
-  // independent lattices (xor-salted) -> decorrelated layers
   private srcCont: Periodic2;
   private srcMount: Periodic2;
-  private srcHill: Periodic2;   // cheap wrapped-Perlin for 3 billow octaves
+  private srcHill: Periodic2;
   private srcWarp: Periodic2;
   private srcTemp: Periodic2;
   private srcHumid: Periodic2;
@@ -125,7 +82,6 @@ export class TerrainGenerator {
     this.hillAmp = Math.max(0, theme?.hillAmp ?? 1);
     this.mountAmp = Math.max(0, theme?.mountainAmp ?? 1);
     this.forced = theme?.biome ?? null;
-    // coverage 0 -> land everywhere, 1 -> mostly ocean (0.5 reproduces the classic window)
     const shift = (clamp(theme?.oceanCoverage ?? 0.5, 0, 1) - 0.5) * 0.9;
     this.contLo = -0.62 + shift;
     this.contHi = 0.55 + shift;
@@ -143,7 +99,6 @@ export class TerrainGenerator {
     return hash2(this.seed ^ salt, px, pz);
   }
 
-  /** climate: separate unwarped lattice pair so biomes are decorrelated from relief */
   private climate(px: number, pz: number): { temp: number; humid: number } {
     return {
       temp: to01(fbm(this.srcTemp, px + 614.9, pz - 293.1, { wavelength: 300, octaves: 2 })),
@@ -151,11 +106,9 @@ export class TerrainGenerator {
     };
   }
 
-  /** landforms: every field sampled through the same domain warp */
   private fields(px: number, pz: number): FieldSet {
     const [wx, wz] = warp2(this.srcWarp, px, pz, 128, 10, 2);
     const contRaw = fbm(this.srcCont, wx, wz, { wavelength: 320, octaves: 4 });
-    // smoothstep re-map: mean-shifted -> ~70% land, deep basins below ~30%
     const cont = smoothstep(this.contLo, this.contHi, contRaw) * 2 - 1;
     return {
       cont,
@@ -165,23 +118,9 @@ export class TerrainGenerator {
     };
   }
 
-  // ---------------------------------------------------------- column memo
-  // `fields()` + `climate()` cost ~21 noise octaves per column, and both
-  // heightAt() and biomeAt() used to evaluate them independently — so one
-  // chunk paid for ~1,300 full field evaluations (256 terrain columns + 400
-  // tree-margin columns, each sampled twice). That single hotspot produced
-  // the multi-frame hitches when the streamer activated a new chunk.
-  //
-  // The world torus is only 512×512 columns, so we memoize the *entire*
-  // column field in two flat typed arrays (768 KB). Every later query —
-  // re-meshing, camps, AI ground snapping, spawn scans, revisiting a chunk
-  // after eviction — becomes a single array read.
   private colHeight: Int16Array | null = null;
   private colBiome: Uint8Array | null = null;
-  /** masked mountain signal per column, quantized to 0..255 (free byproduct
-   *  of computeColumn — lets area classification skip a full field re-eval) */
   private colMount: Uint8Array | null = null;
-  /** lazily-filled area classification, 0 = not yet computed, else area + 1 */
   private colArea: Uint8Array | null = null;
 
   private computeColumn(px: number, pz: number): number {
@@ -206,14 +145,10 @@ export class TerrainGenerator {
     }
     const bDef = BIOME_DEFS[biome];
 
-    let h = this.base + f.cont * 4;                // continent raise — reduced amplitude
-    if (f.cont < -0.18) h += (f.cont + 0.18) * 22; // descend into ocean basins
-    // rounded biome detail — reduced 0.4 damping for gentler rolling hills
+    let h = this.base + f.cont * 4;
+    if (f.cont < -0.18) h += (f.cont + 0.18) * 22;
     h += f.hills * bDef.hill * this.hillAmp * 0.4;
 
-    // mountain ranges: masked ridged signal, squared for sharp massifs,
-    // peaks/valleys modulate crest jaggedness. All sub-amplitudes reduced so
-    // ranges are rarer and lower — most of the world reads as walkable flatland.
     const m = smoothstep(0.64, 0.9, f.mount);
     if (m > 0) h += this.mountAmp * (m * m * 12 + m * f.hills * 2 + m * Math.abs(f.pv) * 5);
 
@@ -238,20 +173,6 @@ export class TerrainGenerator {
     return this.colHeight![k];
   }
 
-  // ------------------------------------------------------- area detection
-  /**
-   * Classify a column as WATER / FLAT / HILLS / MOUNTAIN.
-   *
-   * Performance: results are memoized in a flat Uint8Array (one byte per
-   * torus column, 256 KB total), so after the first query every call is a
-   * single array read. The first query per column reuses the height + masked
-   * mountain signal already cached by computeColumn — no noise fields are
-   * ever re-evaluated — and flatness costs only four cached height lookups.
-   *
-   * Reliability: derived from the exact same memoized data populateChunk
-   * builds terrain from, so the classification can never disagree with the
-   * blocks actually placed in the world (same seam-safe torus wrapping too).
-   */
   areaAt(x: number, z: number): TerrainArea {
     const px = wrapBlock(x), pz = wrapBlock(z);
     const k = pz * W + px;
@@ -269,7 +190,6 @@ export class TerrainGenerator {
     } else if (this.colMount![k] >= MOUNTAIN_MASK_MIN || h > 50 + this.dSea) {
       area = TerrainArea.MOUNTAIN;
     } else {
-      // local slope from the 4 axis neighbours at a 2-block step (memoized)
       const s = 2;
       const dxa = Math.abs(this.heightAt(px + s, pz) - h);
       const dxb = Math.abs(this.heightAt(px - s, pz) - h);
@@ -283,26 +203,18 @@ export class TerrainGenerator {
     return area;
   }
 
-  /** true if the column surface is below sea level */
   isWaterAt(x: number, z: number): boolean {
     return this.areaAt(x, z) === TerrainArea.WATER;
   }
 
-  /** true for dry, gently-sloped, buildable ground */
   isFlatAt(x: number, z: number): boolean {
     return this.areaAt(x, z) === TerrainArea.FLAT;
   }
 
-  /** true inside mountain ranges or high-altitude rock */
   isMountainAt(x: number, z: number): boolean {
     return this.areaAt(x, z) === TerrainArea.MOUNTAIN;
   }
 
-  /**
-   * Spiral-scan for the nearest FLAT column around (x, z) within maxR blocks.
-   * Returns null when none exists in range. Cheap thanks to the column memo —
-   * ideal for placing structures, spawns or vehicles on level ground.
-   */
   findNearestFlat(x: number, z: number, maxR = 48): [number, number] | null {
     const ox = wrapBlock(x), oz = wrapBlock(z);
     if (this.areaAt(ox, oz) === TerrainArea.FLAT) return [ox, oz];
@@ -318,28 +230,19 @@ export class TerrainGenerator {
     return null;
   }
 
-  /**
-   * Single-column evaluation — the ONE place populateChunk asks about a
-   * column, so biome + height consistently share the same field sample.
-   */
   columnAt(x: number, z: number): { h: number; biome: Biome; surface: number } {
     const h = this.heightAt(x, z);
     const biome = this.biomeAt(x, z);
     return { h, biome, surface: this.surfaceBlock(biome, h) };
   }
 
-  /** surface block for a column (biome + altitude + beach/snow-cap rules) */
   private surfaceBlock(biome: Biome, h: number): number {
-    if (h <= this.sea + 1) return B.SAND;      // beaches & seabeds
-    if (h > 56 + this.dSea) return B.SNOW;     // snow caps
-    if (h > 50 + this.dSea) return B.STONE;    // rocky ridgelines
+    if (h <= this.sea + 1) return B.SAND;
+    if (h > 56 + this.dSea) return B.SNOW;
+    if (h > 50 + this.dSea) return B.STONE;
     return BIOME_DEFS[biome].surface;
   }
 
-  /**
-   * Choose a pleasant spawn: spiral-scan outward from near the origin,
-   * scoring for dry land, moderate altitude and friendly biomes.
-   */
   findSpawn(): [number, number] {
     let best: [number, number] = [8, 8];
     let bestScore = Infinity;
@@ -366,7 +269,6 @@ export class TerrainGenerator {
       if (bestScore < Infinity && bestScore < 4 && r > 24) break;
     }
     if (bestScore === Infinity) {
-      // fully oceanic theme: stand on the highest seabed near origin
       let bh = -1;
       for (let r = 0; r <= 180; r += 6) {
         for (let i = 0; i < 12; i++) {
@@ -390,9 +292,6 @@ export class TerrainGenerator {
         const pz = wrapBlock(baseZ + lz);
         const { h, biome, surface } = this.columnAt(px, pz);
         const bDef = BIOME_DEFS[biome];
-        // Compare against this planet's own sea level. Using the global
-        // default desynchronizes themed coastlines and leaves floating water
-        // slabs beside grass on high-sea planets.
         const underwater = h < this.sea;
 
         for (let y = 0; y <= h; y++) {
@@ -407,65 +306,51 @@ export class TerrainGenerator {
           data[chunkIndex(lx, y, lz)] = id;
         }
 
-        // ocean column
         if (underwater) {
           for (let y = h + 1; y <= this.sea; y++) data[chunkIndex(lx, y, lz)] = B.WATER;
         }
 
-        // ---- gemstone ore generation: each gem has its own depth range ----
-        // deeper = rarer and more valuable. Uses deterministic per-column hash
-        // so ores are stable across chunk reloads.
         for (let y = 2; y < Math.min(h, H - 8); y++) {
           if (data[chunkIndex(lx, y, lz)] !== B.STONE) continue;
           const oreRoll = this.decoHash(0x07e0 + y, px, pz);
-          // Coal (common, wide range): Y 3-55 — fuel + torches
           const coalRoll = this.decoHash(0x0c0a + y, px, pz);
           if (y >= 3 && coalRoll < 0.045) {
             data[chunkIndex(lx, y, lz)] = B.COAL_ORE;
             continue;
           }
-          // Luminescence (rarest, deepest): Y 2-15
           if (y <= 15 && oreRoll < 0.008) {
             data[chunkIndex(lx, y, lz)] = B.ORE_LUMINESCENCE;
             continue;
           }
-          // Diamond: Y 5-20
           if (y <= 20 && y >= 5 && oreRoll < 0.012) {
             data[chunkIndex(lx, y, lz)] = B.ORE_DIAMOND;
             continue;
           }
-          // Emerald: Y 8-25
           if (y <= 25 && y >= 8 && oreRoll < 0.010) {
             data[chunkIndex(lx, y, lz)] = B.ORE_EMERALD;
             continue;
           }
-          // Ruby: Y 10-30
           if (y <= 30 && y >= 10 && oreRoll < 0.014) {
             data[chunkIndex(lx, y, lz)] = B.ORE_RUBY;
             continue;
           }
-          // Gold: Y 15-35
           if (y <= 35 && y >= 15 && oreRoll < 0.016) {
             data[chunkIndex(lx, y, lz)] = B.ORE_GOLD;
             continue;
           }
-          // Jade: Y 18-40
           if (y <= 40 && y >= 18 && oreRoll < 0.018) {
             data[chunkIndex(lx, y, lz)] = B.ORE_JADE;
             continue;
           }
-          // Silver: Y 20-45
           if (y <= 45 && y >= 20 && oreRoll < 0.020) {
             data[chunkIndex(lx, y, lz)] = B.ORE_SILVER;
             continue;
           }
-          // Amber (most common, shallowest): Y 25-50
           if (y <= 50 && y >= 25 && oreRoll < 0.022) {
             data[chunkIndex(lx, y, lz)] = B.ORE_AMBER;
           }
         }
 
-        // decorations on dry land
         if (!underwater) {
           const r = this.decoHash(0xdec0, px, pz);
           const onGrass = surface === B.GRASS && h > this.sea + 1;
@@ -482,11 +367,6 @@ export class TerrainGenerator {
       }
     }
 
-    // trees: canonical coords in a 2-block margin -> stable across chunks & the seam
-    // The cheap deterministic hash gate runs FIRST: >95% of the 400 margin
-    // columns are rejected before any terrain field is touched, and the
-    // setter closure is hoisted out of the loop instead of being rebuilt for
-    // every trunk.
     const set = this.makeSetter(data, baseX, baseZ);
     for (let tx = -2; tx < S + 2; tx++) {
       for (let tz = -2; tz < S + 2; tz++) {
@@ -501,7 +381,6 @@ export class TerrainGenerator {
         const h = this.heightAt(px, pz);
         if (h <= this.sea + 1) continue;
         const surface = this.surfaceBlock(biome, h);
-        // never place trees on snowy ground (snow block, snow cap, or taiga floor)
         if (surface !== B.GRASS) continue;
         if (bDef.tree === 'spruce') this.placeSpruce(set, px, h, pz);
         else this.placeOak(set, px, h, pz);
@@ -509,7 +388,6 @@ export class TerrainGenerator {
     }
   }
 
-  /** returns a writer that only mutates `data` inside this chunk's footprint (wrap-aware) */
   private makeSetter(data: Uint8Array, baseX: number, baseZ: number) {
     return (wx: number, y: number, wz: number, id: number, force: boolean) => {
       const lx = wrapBlock(wx) - baseX;
@@ -566,7 +444,6 @@ export class TerrainGenerator {
   }
 }
 
-/** quick scan used to find a safe spawn height */
 export function firstSolidBelow(get: (y: number) => number, fallback: number = SEA_LEVEL): number {
   for (let y = H - 1; y > 0; y--) {
     const id = get(y);

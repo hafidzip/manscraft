@@ -1,8 +1,3 @@
-// Enemy system: Minecraft-style humanoid combatants with arms that aim and
-// shoot, voxel-terrain physics, health bars, burst fire and death sequences.
-// Behaviour is data-driven through EnemyConfig presets so new enemy types or
-// AI tweaks can be added without touching the core loop. Subclass Enemy and
-// override think() for fully custom behaviour.
 import * as THREE from 'three';
 import type { WorldLike } from './World';
 import { WORLD_SIZE, WORLD_HEIGHT, wrapDelta } from '../core/constants';
@@ -24,66 +19,38 @@ const CAMP_CONFIG = {
   maxLeash: 70,
 };
 
-/**
- * Shared per-frame pathfinding budget. The manager refills it each frame so
- * only a couple of A* searches ever run in a single frame, no matter how
- * many enemies are alive.
- */
 const pathBudget = { tokens: 0 };
 
 export type EnemyState = 'spawn' | 'idle' | 'patrol' | 'chase' | 'attack' | 'dead';
 
-/** Passive stance a camp member holds until its squad is provoked. */
 export type EnemyBehavior = 'patrol' | 'idle';
 
 export interface EnemyConfig {
   id: string;
   name: string;
   hp: number;
-  speed: number;          // walk speed (blocks/s)
-  sightRange: number;     // max detection distance
-  attackRange: number;    // max firing distance
-  preferredRange: number; // tries to hold this distance
-  attackCooldown: number; // seconds between bursts
-  burst: number;          // shots per burst
-  burstDelay: number;     // seconds between shots in a burst
-  accuracy: number;       // 0..1 (1 = perfect)
-  damage: number;         // damage per hit
+  speed: number;
+  sightRange: number;
+  attackRange: number;
+  preferredRange: number;
+  attackCooldown: number;
+  burst: number;
+  burstDelay: number;
+  accuracy: number;
+  damage: number;
   skin: string;
   shirt: string;
   pants: string;
   seed: number;
-  /** 'patrol' = walks the camp waypoint loop, 'idle' = holds station at its post */
   behavior: EnemyBehavior;
-  /**
-   * Peaceful agents never fight back: getting shot does not alert them, they
-   * never draw their weapon and never enter combat states. Used by the
-   * MERCHANT trader, who just wants to run a stall in peace.
-   */
   peaceful?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// FIRE RANGE TUNING
-// ---------------------------------------------------------------------------
-// Enemies only open fire when the player is within `attackRange` blocks AND
-// line-of-sight is clear. Out of range they keep chasing/strafing but hold
-// their fire. Adjust per-class ranges in ENEMY_PRESETS below — or flip the
-// mode switch to 'distance' to use the single global constant for everyone.
-// ---------------------------------------------------------------------------
 
-/** 'config' = each class uses its own attackRange (see presets below). */
 export const ENEMY_FIRE_MODE: 'config' | 'distance' = 'config';
 
-/** Global fallback range used when ENEMY_FIRE_MODE === 'distance'. */
 export const ENEMY_FIRE_RANGE = 28;
 
-/**
- * Walk speeds are tuned against the player controller (walk 4.4, sprint 6.6).
- * Anything slower than a sprint means the AI can never close a gap, so the
- * squad reads as harmless — grunts keep pace with a walk and runners can
- * actually run a fleeing player down.
- */
 export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
   grunt: {
     id: 'grunt', name: 'GRUNT', hp: 40, speed: 4.6, sightRange: 9999, attackRange: 26,
@@ -103,11 +70,6 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
     accuracy: 0.8, damage: 10, skin: '#8b98bd', shirt: '#313a58', pants: '#232838', seed: 55,
     behavior: 'idle',
   },
-  /**
-   * The travelling trader. Holds station at a camp (idle behavior), never
-   * fights, and opens a shop for the player while idle. Distinctive straw hat
-   * + supply pack + floating coin marker make it readable from across camp.
-   */
   merchant: {
     id: 'merchant', name: 'MERCHANT', hp: 60, speed: 3.4, sightRange: 0, attackRange: 0,
     preferredRange: 0, attackCooldown: 99, burst: 0, burstDelay: 1,
@@ -116,30 +78,13 @@ export const ENEMY_PRESETS: Record<string, EnemyConfig> = {
   },
 };
 
-/** Per-caste eye / antenna glow — HDR-bright so the bloom pass makes them shine. */
 const EYE_COLORS: Record<string, number> = {
   grunt: 0x62ffa8, runner: 0xffb03a, heavy: 0x54d8ff, merchant: 0xffe08a,
 };
 
-/** Extra speed while sprinting after a player who is out of firing position. */
 const CHASE_SPRINT = 1.3;
 
-// ---------------------------------------------------------------------------
-// CONTEXT STEERING
-// ---------------------------------------------------------------------------
-// Rather than shoving the agent straight at its goal and hoping collision
-// resolves the rest (which reads as "walks into walls until it gives up"),
-// every frame we score a fan of candidate directions against the voxel world:
-//
-//   interest  how well the direction serves the goal (dot product)
-//   danger    walls taller than a step, lethal drops, corner clipping
-//
-// The best-scoring direction wins. This is the standard context-steering /
-// steering-behaviour approach and it gives smooth wall sliding, doorway
-// threading and ledge avoidance for free, with A* reserved for real routing.
-// ---------------------------------------------------------------------------
 
-/** candidate directions in the context map (45° apart) */
 const STEER_DIRS = 8;
 const STEER_COS = new Float32Array(STEER_DIRS);
 const STEER_SIN = new Float32Array(STEER_DIRS);
@@ -149,21 +94,14 @@ for (let i = 0; i < STEER_DIRS; i++) {
   STEER_SIN[i] = Math.sin(a);
 }
 
-/** how far ahead each probe looks (blocks) */
 const PROBE_DIST = 1.15;
-/** tallest ledge the agent walks up without jumping */
 const MAX_STEP = 1;
-/** tallest ledge the agent will jump onto */
 const MAX_JUMP_UP = 2;
-/** deepest drop the agent is willing to walk off */
 const MAX_SAFE_DROP = 4;
 
-/** line-of-sight sample heights: head, chest, feet (module-level: no per-frame array alloc) */
 const LOS_HEIGHTS = [1.6, 1.1, 0.2];
-/** out of firing range a single torso ray keeps awareness at 1/3 the cost */
 const LOS_HEIGHTS_FAR = [1.1];
 
-/** minimal player surface enemies need (the unified engine Player satisfies it) */
 export interface EnemyPlayer {
   pos: THREE.Vector3;
 }
@@ -180,9 +118,7 @@ export interface EnemyDeps {
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
 const tmpV3 = new THREE.Vector3();
-/** per-frame minimum-image copy of the player position (toroidal world) */
 const tmpPlayerImg = new THREE.Vector3();
-/** scratch result for the context-steering solver (single-threaded) */
 const steerOut = { x: 0, z: 0, jump: false };
 
 export class Enemy {
@@ -194,7 +130,6 @@ export class Enemy {
   private armL = new THREE.Group();
   private armR = new THREE.Group();
   private weapon = new THREE.Group();
-  /** >0 while the rifle is unslung; decays after the last clear shot */
   private weaponDrawT = 0;
   private bolt = new THREE.Group();
   private hpFill!: THREE.Mesh;
@@ -202,7 +137,6 @@ export class Enemy {
   private muzzle = new THREE.Object3D();
 
   pos = new THREE.Vector3();
-  /** Original camp/post spawn. Player death always returns this enemy here. */
   readonly respawnPoint = new THREE.Vector3();
   vel = new THREE.Vector3();
   yaw = 0;
@@ -223,45 +157,28 @@ export class Enemy {
   private stuckTimer = 0;
   private lastX = 0; private lastZ = 0;
 
-  // ---- navigation
   private path: THREE.Vector3[] = [];
   private pathIdx = 0;
   private repathT = Math.random() * 0.6;
   private pathGoal = new THREE.Vector3();
   private lastKnown = new THREE.Vector3();
   private hasTarget = false;
-  /**
-   * Squad aggro latch. An enemy is completely passive until this flips true —
-   * seeing the player is NOT enough. Only `alert()` (squad member shot, blast,
-   * or an explicit order) provokes a camp.
-   */
   alerted = false;
-  /** seconds of calm before an alerted squad member stands down again */
   private alertT = 0;
-  /** wander target while holding station in the 'idle' stance */
   private idleGoalPt: { x: number; z: number } | null = null;
   private searchT = 0;
   private grounded = false;
   private jumpCd = 0;
-  /** while > 0 a wall beat direct pursuit, so route around it with A* */
   private directBlockT = 0;
-  /** last context-steering direction index (commitment / anti-jitter) */
   private lastSteerIdx = -1;
-  /** consecutive frames the context map found no way forward */
   private boxedT = 0;
-  // ---- steering throttle: the context map is resolved a few times a second
-  // (staggered per agent), not every frame. Velocity integration keeps the
-  // motion smooth in between, and re-solving faster than the agent can cross
-  // a voxel is wasted work.
   private steerT = Math.random() * 0.1;
   private steerX = 0;
   private steerZ = 0;
   private steerJump = false;
   private steerBoxed = false;
-  /** cached corridor test (same cadence as steering) */
   private corridorT = Math.random() * 0.15;
   private corridorOk = false;
-  /** LOD: solve cadence, widened for agents far from the camera */
   private steerInterval = 0.08;
   private repathFails = 0;
   private wanderAngle = Math.random() * Math.PI * 2;
@@ -271,12 +188,10 @@ export class Enemy {
   private weaponKick = 0;
   private aimPitch = 0;
   private bodyMats: THREE.MeshLambertMaterial[] = [];
-  /** shared HDR glow material (eyes, antenna tips, sternum node) */
   private eyeMat: THREE.MeshBasicMaterial | null = null;
   private eyeBase = new THREE.Color();
   private eyeSeed = Math.random() * Math.PI * 2;
 
-  // ---- patrol / leash
   patrolPoints: { x: number; z: number }[] = [];
   patrolIdx = 0;
   home: { x: number; z: number } | null = null;
@@ -285,25 +200,12 @@ export class Enemy {
   private returning = false;
   private dwellT = 0;
 
-  /**
-   * Squad-wide cooldown. While > 0 this agent is forbidden from shooting OR
-   * chasing the player — it just stands down at its post. Set by the manager
-   * when the player dies (everyone stops fighting, returns to camp).
-   * The timer is in seconds, ticks down every update.
-   */
   cooldownUntil = 0;
 
-  // ---- calm-heading model (kills the idle rotation spam) -------------------
-  // While dwelling with no goal, passive agents hold a settled heading
-  // instead of snapping toward the player every frame. Idle guards re-pick
-  // that heading on a slow timer ("looking around"), patrol guards keep the
-  // direction they were last walking.
   private idleFaceYaw = 0;
   private idleScanT = 1.2 + Math.random() * 2.5;
   private lastMoveYaw = 0;
-  /** >0 while a player is close enough to trade: the merchant faces them */
   tradeFaceT = 0;
-  /** spinning coin marker above merchants' heads */
   private coinBadge: THREE.Group | null = null;
 
   private deps: EnemyDeps;
@@ -322,20 +224,13 @@ export class Enemy {
     this.deps.effects.puff(tmpV.set(pos.x, pos.y + 0.3, pos.z), tmpV2.set(0, 1, 0), 0.5, 0.7, '#b8b0a2');
   }
 
-  // ------------------------------------------------------------ model
   private build() {
     const c = this.cfg;
-    // Alien combatant: chitinous carapace, oversized cranium, digitigrade
-    // legs and a shared HDR glow for eyes / antenna tips / sternum node.
-    // The material layout (skin / shirt / pants) is unchanged, so the
-    // hit-flash and death code keeps working untouched.
     const skinMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.skin, 14, 16, c.seed) });
     const shirtMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.shirt, 16, 16, c.seed + 1) });
     const pantsMat = new THREE.MeshLambertMaterial({ map: pixelTexture(c.pants, 14, 16, c.seed + 2) });
     this.bodyMats = [skinMat, shirtMat, pantsMat];
 
-    // toneMapped:false lets the colour run past 1.0 in the HDR target, which
-    // is exactly what the bloom pass needs to turn the eyes into real light.
     this.eyeBase.set(EYE_COLORS[c.id] ?? 0x7dffb8);
     this.eyeMat = new THREE.MeshBasicMaterial({
       color: this.eyeBase.clone().multiplyScalar(1.8),
@@ -344,32 +239,28 @@ export class Enemy {
 
     this.group.add(this.bodyRoot);
 
-    // ---- digitigrade legs (model faces +Z)
     this.legL.position.set(-0.12, 0.8, 0);
     this.legR.position.set(0.12, 0.8, 0);
     box(this.legL, 0.16, 0.8, 0.18, 0, -0.4, 0, pantsMat);
     box(this.legR, 0.16, 0.8, 0.18, 0, -0.4, 0, pantsMat);
-    box(this.legL, 0.18, 0.09, 0.36, 0, -0.76, 0.07, MATS.boot);   // three-toed claw
+    box(this.legL, 0.18, 0.09, 0.36, 0, -0.76, 0.07, MATS.boot);
     box(this.legR, 0.18, 0.09, 0.36, 0, -0.76, 0.07, MATS.boot);
     this.bodyRoot.add(this.legL, this.legR);
 
-    // ---- narrow ribcage torso with a glowing sternum node
     box(this.bodyRoot, 0.4, 0.52, 0.22, 0, 1.08, 0, shirtMat);
-    box(this.bodyRoot, 0.3, 0.18, 0.2, 0, 0.86, 0, skinMat);        // abdomen
-    box(this.bodyRoot, 0.34, 0.1, 0.16, 0, 1.32, -0.02, shirtMat);  // shoulder ridge
-    box(this.bodyRoot, 0.1, 0.44, 0.08, 0, 1.08, -0.14, pantsMat);  // spine ridge
-    box(this.bodyRoot, 0.08, 0.08, 0.02, 0, 1.12, 0.12, this.eyeMat); // sternum node
+    box(this.bodyRoot, 0.3, 0.18, 0.2, 0, 0.86, 0, skinMat);
+    box(this.bodyRoot, 0.34, 0.1, 0.16, 0, 1.32, -0.02, shirtMat);
+    box(this.bodyRoot, 0.1, 0.44, 0.08, 0, 1.08, -0.14, pantsMat);
+    box(this.bodyRoot, 0.08, 0.08, 0.02, 0, 1.12, 0.12, this.eyeMat);
 
-    // ---- oversized cranium on a thin neck (face on +Z)
     box(this.bodyRoot, 0.12, 0.1, 0.12, 0, 1.39, 0, skinMat);
     const head = new THREE.Group();
     head.position.set(0, 1.34, 0);
     this.bodyRoot.add(head);
-    box(head, 0.28, 0.18, 0.3, 0, 0.11, 0.01, skinMat);             // jaw / lower face
-    box(head, 0.46, 0.26, 0.44, 0, 0.34, 0, skinMat);               // cranium
-    box(head, 0.36, 0.14, 0.34, 0, 0.52, -0.02, skinMat);           // cranium crown
+    box(head, 0.28, 0.18, 0.3, 0, 0.11, 0.01, skinMat);
+    box(head, 0.46, 0.26, 0.44, 0, 0.34, 0, skinMat);
+    box(head, 0.36, 0.14, 0.34, 0, 0.52, -0.02, skinMat);
 
-    // Slanted glowing eyes — the alien signature, readable across the map.
     const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.055, 0.03), this.eyeMat);
     eyeL.position.set(-0.1, 0.3, 0.225);
     eyeL.rotation.z = 0.42;
@@ -378,7 +269,6 @@ export class Enemy {
     eyeR.rotation.z = -0.42;
     head.add(eyeL, eyeR);
 
-    // Antennae whose tips share the eye glow (they pulse together).
     const antL = new THREE.Group();
     antL.position.set(-0.09, 0.58, 0);
     antL.rotation.z = 0.28;
@@ -391,7 +281,6 @@ export class Enemy {
     antR.rotation.z = -0.28;
     head.add(antL, antR);
 
-    // ---- long slender arms ending in claws
     this.armL.position.set(-0.26, 1.28, -0.015);
     box(this.armL, 0.13, 0.66, 0.13, 0, -0.3, 0, shirtMat);
     box(this.armL, 0.11, 0.18, 0.1, 0, -0.68, 0.02, skinMat);
@@ -402,31 +291,27 @@ export class Enemy {
     box(this.armR, 0.11, 0.18, 0.1, 0, -0.68, 0.02, skinMat);
     this.bodyRoot.add(this.armR);
 
-    // Dedicated SMG rig. It is parented to the torso rather than a wrist so
-    // both arms can visibly support it and recoil as a single firing pose.
     this.weapon.position.set(0, 1.16, 0.32);
-    // stowed until the guard is provoked (see the draw/stow block in update)
     this.weapon.visible = false;
     this.bodyRoot.add(this.weapon);
-    box(this.weapon, 0.14, 0.115, 0.42, 0, 0, 0.12, MATS.gun);        // receiver
-    box(this.weapon, 0.15, 0.028, 0.39, 0, 0.07, 0.12, MATS.black);    // top rail
+    box(this.weapon, 0.14, 0.115, 0.42, 0, 0, 0.12, MATS.gun);
+    box(this.weapon, 0.15, 0.028, 0.39, 0, 0.07, 0.12, MATS.black);
     for (let i = 0; i < 5; i++) box(this.weapon, 0.16, 0.014, 0.022, 0, 0.09, -0.02 + i * 0.075, MATS.gun2);
-    box(this.weapon, 0.125, 0.1, 0.28, 0, -0.005, 0.43, MATS.poly);    // handguard
-    box(this.weapon, 0.065, 0.055, 0.25, 0, 0, 0.67, MATS.black);      // barrel
-    box(this.weapon, 0.1, 0.09, 0.075, 0, 0, 0.81, MATS.black);        // muzzle brake
-    box(this.weapon, 0.15, 0.13, 0.27, 0, -0.005, -0.28, MATS.poly);   // stock
-    box(this.weapon, 0.16, 0.16, 0.04, 0, -0.005, -0.43, MATS.black);  // butt pad
-    box(this.weapon, 0.1, 0.26, 0.11, 0, -0.16, 0.08, MATS.gun2, THREE.MathUtils.degToRad(-8)); // magazine
-    box(this.weapon, 0.11, 0.19, 0.09, 0, -0.14, -0.09, MATS.poly, THREE.MathUtils.degToRad(-13)); // pistol grip
-    box(this.weapon, 0.1, 0.15, 0.08, 0, -0.14, 0.4, MATS.gun2, THREE.MathUtils.degToRad(6)); // foregrip
+    box(this.weapon, 0.125, 0.1, 0.28, 0, -0.005, 0.43, MATS.poly);
+    box(this.weapon, 0.065, 0.055, 0.25, 0, 0, 0.67, MATS.black);
+    box(this.weapon, 0.1, 0.09, 0.075, 0, 0, 0.81, MATS.black);
+    box(this.weapon, 0.15, 0.13, 0.27, 0, -0.005, -0.28, MATS.poly);
+    box(this.weapon, 0.16, 0.16, 0.04, 0, -0.005, -0.43, MATS.black);
+    box(this.weapon, 0.1, 0.26, 0.11, 0, -0.16, 0.08, MATS.gun2, THREE.MathUtils.degToRad(-8));
+    box(this.weapon, 0.11, 0.19, 0.09, 0, -0.14, -0.09, MATS.poly, THREE.MathUtils.degToRad(-13));
+    box(this.weapon, 0.1, 0.15, 0.08, 0, -0.14, 0.4, MATS.gun2, THREE.MathUtils.degToRad(6));
 
-    // Reflex sight and ejection port make the weapon readable at range.
     box(this.weapon, 0.1, 0.026, 0.11, 0, 0.115, 0.06, MATS.black);
     box(this.weapon, 0.014, 0.095, 0.022, -0.04, 0.16, 0.06, MATS.black);
     box(this.weapon, 0.014, 0.095, 0.022, 0.04, 0.16, 0.06, MATS.black);
     box(this.weapon, 0.1, 0.014, 0.022, 0, 0.205, 0.06, MATS.black);
     box(this.weapon, 0.018, 0.018, 0.008, 0, 0.16, 0.047, MATS.redGlow);
-    box(this.weapon, 0.075, 0.055, 0.13, 0.078, 0.01, 0.02, MATS.black); // ejection port frame
+    box(this.weapon, 0.075, 0.055, 0.13, 0.078, 0.01, 0.02, MATS.black);
     this.bolt.position.set(0.079, 0.01, 0.02);
     box(this.bolt, 0.02, 0.035, 0.1, 0, 0, 0, MATS.gun2);
     this.weapon.add(this.bolt);
@@ -434,10 +319,8 @@ export class Enemy {
     this.muzzle.position.set(0, 0.01, 0.86);
     this.weapon.add(this.muzzle);
 
-    // Heavies are a full head taller than the other castes.
     if (c.id === 'heavy') this.bodyRoot.scale.setScalar(1.12);
 
-    // health bar billboard
     this.hpBar = new THREE.Group();
     this.hpBar.position.set(0, 2.38, 0);
     const bg = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 0.1), new THREE.MeshBasicMaterial({ color: '#14060f', transparent: true, opacity: 0.85, depthWrite: false }));
@@ -446,22 +329,18 @@ export class Enemy {
     this.hpBar.add(bg, this.hpFill);
     this.group.add(this.hpBar);
 
-    // ------------------------------------------------------------ merchant
-    // Straw hat + supply pack + a spinning coin marker instead of the threat
-    // bar — a trader should read as "shop" from fifty blocks away.
     if (c.peaceful) {
       this.hpBar.visible = false;
       const strawMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#d8b345', 12, 12, c.seed + 3) });
       const bandMat = new THREE.MeshLambertMaterial({ color: '#a33b2e' });
       const packMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#7a5a34', 10, 10, c.seed + 4) });
       const crateMat = new THREE.MeshLambertMaterial({ map: pixelTexture('#8a6a3f', 8, 8, c.seed + 5) });
-      box(this.bodyRoot, 0.62, 0.05, 0.62, 0, 1.98, 0, strawMat);        // hat brim
-      box(this.bodyRoot, 0.34, 0.16, 0.34, 0, 2.08, 0, strawMat);        // hat crown
-      box(this.bodyRoot, 0.36, 0.045, 0.36, 0, 2.02, 0, bandMat);        // hat band
-      box(this.bodyRoot, 0.4, 0.5, 0.22, 0, 1.08, -0.24, packMat);       // supply pack
-      box(this.bodyRoot, 0.3, 0.22, 0.24, 0, 1.42, -0.25, crateMat);     // crate on top
-      box(this.bodyRoot, 0.42, 0.05, 0.06, 0, 1.22, -0.1, MATS.black);   // pack strap
-      // the rifle rig stays, but a peaceful trader never draws it
+      box(this.bodyRoot, 0.62, 0.05, 0.62, 0, 1.98, 0, strawMat);
+      box(this.bodyRoot, 0.34, 0.16, 0.34, 0, 2.08, 0, strawMat);
+      box(this.bodyRoot, 0.36, 0.045, 0.36, 0, 2.02, 0, bandMat);
+      box(this.bodyRoot, 0.4, 0.5, 0.22, 0, 1.08, -0.24, packMat);
+      box(this.bodyRoot, 0.3, 0.22, 0.24, 0, 1.42, -0.25, crateMat);
+      box(this.bodyRoot, 0.42, 0.05, 0.06, 0, 1.22, -0.1, MATS.black);
 
       const badge = new THREE.Group();
       badge.position.set(0, 2.5, 0);
@@ -486,21 +365,15 @@ export class Enemy {
   get alive(): boolean { return this.state !== 'dead'; }
   get center(): THREE.Vector3 { return tmpV3.copy(this.pos).add(tmpV.set(0, 1.0, 0)); }
 
-  // ------------------------------------------------------------ damage
   takeDamage(amount: number, point: THREE.Vector3, headshot: boolean) {
     if (!this.alive) return;
-    // Getting shot is the provocation. Even if the manager somehow misses the
-    // squad broadcast, the victim itself always fights back — unless it is a
-    // peaceful trader, who simply has no fight in them.
     if (!this.cfg.peaceful) this.alert(point);
     this.hp -= headshot ? amount * 2 : amount;
     this.flashT = 0.09;
-    // knockback away from the hit
     tmpV.copy(this.pos).sub(point).setY(0);
     if (tmpV.lengthSq() < 0.001) tmpV.set(Math.random() - 0.5, 0, Math.random() - 0.5);
     tmpV.normalize().multiplyScalar(headshot ? 2.2 : 1.2);
     this.vel.x += tmpV.x; this.vel.z += tmpV.z;
-    // hit sparks — green ichor for aliens, red for the (human) merchant
     const ichor = this.cfg.peaceful ? 0xd0342c : 0x56e08a;
     for (let i = 0; i < 4; i++) {
       tmpV2.set((Math.random() - 0.5) * 3, Math.random() * 3, (Math.random() - 0.5) * 3);
@@ -509,12 +382,6 @@ export class Enemy {
     if (this.hp <= 0) this.die(point);
   }
 
-  /**
-   * Sunrise: the alien evaporates. Unlike `die()` this grants no kill credit
-   * and no loot — the body simply boils away into motes of light. The agent
-   * is flagged dead immediately so it stops shooting the same frame, and the
-   * corpse timer is pre-advanced so the manager prunes it within a second.
-   */
   dissolve() {
     if (!this.alive) return;
     this.state = 'dead';
@@ -562,26 +429,18 @@ export class Enemy {
     this.deps.onEnemyKilled(this);
   }
 
-  // ------------------------------------------------------------ AI hooks
-  /** Force the agent to recompute its route on the next update. */
   invalidatePath() {
     this.path.length = 0;
     this.pathIdx = 0;
     this.repathT = 0;
   }
 
-  /**
-   * Provoke this agent: the squad has been attacked. This is the ONLY way an
-   * enemy leaves its passive stance — proximity and line of sight alone never
-   * trigger combat.
-   */
   alert(pos: THREE.Vector3) {
     this.alerted = true;
     this.alertT = 0;
     this.investigate(pos);
   }
 
-  /** Give the agent a destination it hasn't directly seen (sound, orders…). */
   investigate(pos: THREE.Vector3) {
     this.lastKnown.copy(pos);
     this.hasTarget = true;
@@ -589,11 +448,10 @@ export class Enemy {
     this.invalidatePath();
   }
 
-  /** Squad calmed down: drop back to the passive patrol/idle stance. */
   standDown() {
     this.alerted = false;
     this.alertT = 0;
-    this.weaponDrawT = 0;   // sling the rifle again
+    this.weaponDrawT = 0;
     this.hasTarget = false;
     this.lastKnown.set(0, 0, 0);
     this.searchT = 0;
@@ -602,16 +460,6 @@ export class Enemy {
     this.invalidatePath();
   }
 
-  /**
-   * Squad-wide stand-down used when the player dies. Beyond clearing aggro
-   * (the regular `standDown()` does that too), this:
-   *   1. flips on a per-enemy `cooldownUntil` so the squad never re-engages
-   *      while the death sequence is playing, even if the player respawns
-   *      right next to them on the way out.
-   *   2. snaps the agent back to its own camp post (its `home`) so nobody is
-   *      left standing where the firefight happened.
-   *   3. forces state to the configured passive stance ('patrol' / 'idle').
-   */
   standDownToCamp(cooldownSec = 0, teleport?: THREE.Vector3) {
     this.cooldownUntil = Math.max(this.cooldownUntil, cooldownSec);
     this.alerted = false;
@@ -640,10 +488,8 @@ export class Enemy {
     }
   }
 
-  /** Debug/AI helper: is this agent currently following a route? */
   get navigating(): boolean { return this.pathIdx < this.path.length; }
 
-  // ------------------------------------------------------------ patrol / camp
   assignCamp(build: CampBuild): void {
     this.patrolPoints = (build.patrolPoints.length ? build.patrolPoints : build.posts).slice();
     this.home = { x: build.site.cx, z: build.site.cz };
@@ -656,24 +502,20 @@ export class Enemy {
     this.patrolIdx = best;
     this.returning = false;
     this.leashT = 0;
-    // an idle guard treats its nearest post as the station it holds
     if (this.cfg.behavior === 'idle' && this.patrolPoints.length) {
       this.home = { ...this.patrolPoints[best] };
     }
     if (this.state === 'spawn') this.state = this.cfg.behavior;
   }
 
-  /** ground distance from this enemy to a point */
   private planarDist(x: number, z: number): number {
     return Math.hypot(x - this.pos.x, z - this.pos.z);
   }
 
-  /** public variant (manager uses it to keep wandering merchants apart) */
   distToXZ(x: number, z: number): number {
     return this.planarDist(x, z);
   }
 
-  /** waypoint loop; returns the point to steer toward, or null = stand and idle */
   private patrolGoal(dt: number): { x: number; z: number } | null {
     if (this.returning && this.home) {
       if (this.planarDist(this.home.x, this.home.z) > Math.max(6, this.maxLeash * 0.3)) return this.home;
@@ -690,16 +532,10 @@ export class Enemy {
     return wp;
   }
 
-  /**
-   * 'idle' stance: hold station at the assigned post. The guard mostly stands
-   * still, shuffling a couple of blocks now and then so the camp still looks
-   * alive without anybody actually going on a round.
-   */
   private idleGoal(dt: number): { x: number; z: number } | null {
     const post = this.home;
     if (!post) return null;
     const away = this.planarDist(post.x, post.z);
-    // drifted off station (knockback, crowd shoving): walk back
     if (away > 4.5) { this.idleGoalPt = post; return post; }
     if (this.idleGoalPt) {
       if (this.planarDist(this.idleGoalPt.x, this.idleGoalPt.z) < 0.9) {
@@ -709,29 +545,24 @@ export class Enemy {
       return this.idleGoalPt;
     }
     if (this.dwellT > 0) { this.dwellT -= dt; return null; }
-    // pick a new loitering spot inside a tight radius around the post
     const a = Math.random() * Math.PI * 2;
     const r = 0.8 + Math.random() * 2.2;
     this.idleGoalPt = { x: post.x + Math.cos(a) * r, z: post.z + Math.sin(a) * r };
     return this.idleGoalPt;
   }
 
-  // ------------------------------------------------------------ update
   update(dt: number, player: EnemyPlayer) {
     const c = this.cfg;
     this.stateT += dt;
 
     if (this.state === 'dead') {
-      // the glow dies with the alien — eyes go dark before the body sinks
       if (this.eyeMat) this.eyeMat.color.setRGB(0.04, 0.07, 0.05);
-      // topple, then sink and flag removal
       this.bodyRoot.rotation.x = THREE.MathUtils.lerp(this.bodyRoot.rotation.x, -Math.PI / 2, Math.min(1, dt * 7));
       if (this.stateT > 1.1) this.group.position.y -= dt * 0.9;
       return this.stateT < 2.2;
     }
 
     if (this.state === 'spawn') {
-      // keep the rise-from-the-ground intro on the camera's render image
       const camS = this.deps.camera.position;
       this.group.position.x = this.pos.x + Math.round((camS.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE;
       this.group.position.z = this.pos.z + Math.round((camS.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE;
@@ -740,14 +571,11 @@ export class Enemy {
       return true;
     }
 
-    // ---- timers
     this.cooldown -= dt;
     this.losTimer -= dt;
     this.strafeTimer -= dt;
     this.recoilT = Math.max(0, this.recoilT - dt);
     this.weaponKick = Math.max(0, this.weaponKick - dt * 15);
-    // Living glow: eyes, antenna tips and the sternum node breathe while the
-    // alien is active — and burn noticeably brighter once it starts hunting.
     if (this.eyeMat) {
       const pulse = 1.5 + Math.sin(this.stateT * 4.5 + this.eyeSeed) * 0.45 + (this.alerted ? 0.6 : 0);
       this.eyeMat.color.copy(this.eyeBase).multiplyScalar(pulse);
@@ -757,30 +585,19 @@ export class Enemy {
       this.strafeDir = Math.random() > 0.5 ? 1 : -1;
     }
 
-    // ---- toroidal minimum-image: the player rides unbounded trip space
-    // while enemies live in wrapped torus space. Every perception/aim
-    // computation below uses the player IMAGE nearest to this agent, so
-    // aggro, LOS and shooting keep working after the ship crosses the world
-    // seam (the "camps look deserted after landing from space" bug).
     const pp = tmpPlayerImg.set(
       this.pos.x + wrapDelta(player.pos.x - this.pos.x, WORLD_SIZE),
       player.pos.y,
       this.pos.z + wrapDelta(player.pos.z - this.pos.z, WORLD_SIZE),
     );
 
-    // ---- perception (multi-point LOS: check eyes-to-head, eyes-to-torso,
-    // eyes-to-feet so the AI can spot a partially exposed player)
     const toPlayer = tmpV.copy(pp).sub(this.pos);
     const dist = Math.hypot(toPlayer.x, toPlayer.z);
-    void toPlayer.length(); // used implicitly via dist
+    void toPlayer.length();
     if (this.losTimer <= 0) {
-      // distant agents re-check line of sight far less often; each check is
-      // up to three voxel raycasts
       this.losTimer = dist < 30 ? 0.2 : dist < 70 ? 0.5 : 1.0;
       const eye = tmpV2.copy(this.pos).add(tmpV3.set(0, 1.6, 0));
       this.hasLos = false;
-      // check three heights: head (1.6), chest (1.1), feet (0.2). Beyond
-      // firing range a single torso ray is enough to maintain awareness.
       const rays = dist <= c.attackRange ? LOS_HEIGHTS : LOS_HEIGHTS_FAR;
       for (const tgtY of rays) {
         const dir = tmpV3.copy(pp).add(tmpV.set(0, tgtY, 0)).sub(eye);
@@ -791,15 +608,8 @@ export class Enemy {
       }
     }
 
-    // ---- target memory
-    //
-    // PASSIVE UNTIL PROVOKED. Line of sight no longer creates a target on its
-    // own: walking past a camp, or standing right next to one, is not a
-    // hostile act. Sight only REFRESHES the target of an already-alerted
-    // agent, so a squad that has been shot can actually track the shooter.
-    let hasLos = this.hasLos;  // let so leash/aggro can suppress it
+    let hasLos = this.hasLos;
     if (!this.alerted) {
-      // not provoked — no target, no memory, no combat
       hasLos = false;
       this.hasTarget = false;
       this.searchT = 0;
@@ -811,11 +621,9 @@ export class Enemy {
     } else {
       this.searchT += dt;
       this.alertT += dt;
-      // lost them for long enough: the whole thing was a false alarm
       if (this.alertT > 12) { this.standDown(); hasLos = false; }
     }
 
-    // ── leash: player dragged us too far from camp ──
     if (this.home) {
       const pd = Math.hypot(pp.x - this.home.x, pp.z - this.home.z);
       if (this.hasTarget && pd > this.maxLeash) {
@@ -830,18 +638,12 @@ export class Enemy {
       }
     }
 
-    // ── passive stance vs combat arbitration ──
-    // `cooldownUntil` is the squad-wide truce set when the player dies: while
-    // it is positive the agent is forbidden from chasing/attacking even if it
-    // is technically still "alerted". It still walks its patrol / holds its
-    // post as if nothing had happened.
     this.cooldownUntil = Math.max(0, this.cooldownUntil - dt);
     const inCooldown = this.cooldownUntil > 0;
     let patrolSteerGoal: { x: number; z: number } | null = null;
     const passive = inCooldown || !this.alerted || (!hasLos && (!this.hasTarget || this.searchT > 6));
     if (passive) {
       if (this.searchT > 6) { this.hasTarget = false; this.lastKnown.set(0, 0, 0); }
-      // back to whatever this guard does for a living: walk the loop, or stand post
       this.state = this.cfg.behavior;
       patrolSteerGoal = this.cfg.behavior === 'idle' ? this.idleGoal(dt) : this.patrolGoal(dt);
     } else if (hasLos && (this.state === 'patrol' || this.state === 'idle')) {
@@ -850,20 +652,12 @@ export class Enemy {
       this.idleGoalPt = null;
     }
 
-    // ---- facing -------------------------------------------------------------
-    // Combat agents track their target. Passive agents face whatever they are
-    // walking toward — and while standing still they HOLD a calm heading:
-    // idle guards slowly look around on a timer, patrol guards keep the
-    // direction they were last marching. The old code re-aimed every passive
-    // guard at the player each frame, which is what made idle enemies spin
-    // and twitch in place.
     const hSpeed = Math.hypot(this.vel.x, this.vel.z);
     if (hSpeed > 0.55) this.lastMoveYaw = Math.atan2(this.vel.x, this.vel.z);
     const passiveStance = this.state === 'patrol' || this.state === 'idle';
 
     let faceX = 0, faceZ = 0, haveFace = false;
     if (passiveStance && this.tradeFaceT > 0) {
-      // a customer is at the stall: the merchant turns to greet them
       this.tradeFaceT -= dt;
       faceX = toPlayer.x; faceZ = toPlayer.z; haveFace = true;
     } else if (passiveStance && patrolSteerGoal) {
@@ -878,30 +672,23 @@ export class Enemy {
       }
     }
     if (!haveFace && hSpeed > 0.8) {
-      // moving without a goal (shoved, sliding): face the actual motion so the
-      // model never moon-walks
       faceX = this.vel.x; faceZ = this.vel.z; haveFace = true;
     }
     if (!haveFace) {
-      // standing still: hold a settled heading
       if (this.state === 'idle') {
         this.idleScanT -= dt;
         if (this.idleScanT <= 0) {
           this.idleScanT = 2.6 + Math.random() * 3.6;
-          // mostly small glances around the current facing, occasionally a
-          // full look over the shoulder — like a real guard scanning a post
           this.idleFaceYaw += Math.random() < 0.22
             ? Math.PI * (0.6 + Math.random() * 0.9) * (Math.random() < 0.5 ? -1 : 1)
             : (Math.random() - 0.5) * 1.7;
         }
       } else {
-        // patrol dwell between waypoints: keep staring down the route
         this.idleFaceYaw = this.lastMoveYaw;
       }
       faceX = Math.sin(this.idleFaceYaw);
       faceZ = Math.cos(this.idleFaceYaw);
     } else if (passiveStance) {
-      // remember where we were heading so stopping doesn't jerk the body
       this.idleFaceYaw = Math.atan2(faceX, faceZ);
     }
 
@@ -909,19 +696,12 @@ export class Enemy {
     let dy = targetYaw - this.yaw;
     while (dy > Math.PI) dy -= Math.PI * 2;
     while (dy < -Math.PI) dy += Math.PI * 2;
-    // clamped turn rate + dead zone instead of an exponential snap: idle
-    // guards turn slowly and deliberately, combat tracking stays sharp, and
-    // nobody ever whips 180° in a single frame
     const turnRate = this.state === 'chase' || this.state === 'attack' ? 10
       : this.state === 'patrol' ? 5.5 : 2.3;
     if (Math.abs(dy) > 0.012) {
       this.yaw += Math.sign(dy) * Math.min(Math.abs(dy), turnRate * dt);
     }
 
-    // ---- steering (world space)
-    // LOD: agents the player can't scrutinise re-solve their context map far
-    // less often. Combat-range agents stay responsive; a distant camp costs
-    // almost nothing.
     this.steerInterval = dist < 24 ? 0.08 : dist < 60 ? 0.2 : 0.45;
     this.steerT -= dt;
     this.corridorT -= dt;
@@ -933,8 +713,6 @@ export class Enemy {
     const inCombatRange = hasLos && dist < c.preferredRange * 1.15;
 
     if (this.state === 'patrol' || this.state === 'idle') {
-      // ---- passive steering: stroll to the waypoint / loiter spot. Idle
-      // guards move slower still — they are standing a post, not marching.
       if (patrolSteerGoal) {
         const pdx = patrolSteerGoal.x - this.pos.x;
         const pdz = patrolSteerGoal.z - this.pos.z;
@@ -945,21 +723,14 @@ export class Enemy {
         wx = steerOut.x * paceF;
         wz = steerOut.z * paceF;
         if (steerOut.jump) wantJump = true;
-        // fully boxed in: give up on this goal and pick the next one
         if (steerOut.x === 0 && steerOut.z === 0) {
           if (this.state === 'idle') { this.idleGoalPt = null; this.dwellT = 2; }
           else this.patrolIdx = (this.patrolIdx + 1) % Math.max(1, this.patrolPoints.length);
         }
       } else {
-        // dwelling: damp velocity, idle arm sway
         wx = 0; wz = 0;
       }
     } else if (hasLos && this.directBlockT <= 0 && this.corridorCached(pp.x, pp.z)) {
-      // ---- direct pursuit: the player is visible, so run them down at ANY
-      // distance. Previously this branch only ran inside preferredRange and
-      // everything further away fell through to A*, where a starved path
-      // budget left the agent standing still — the "enemies never catch you"
-      // bug. Pathfinding is now reserved for broken line of sight.
       this.path.length = 0;
       this.pathIdx = 0;
       const inv = 1 / (dist || 1);
@@ -967,8 +738,6 @@ export class Enemy {
       const rx = fz, rz = -fx;
       const want = c.preferredRange;
 
-      // build the DESIRED heading (tactics), then let the context map find a
-      // walkable direction closest to it (navigation)
       let dX = 0, dZ = 0;
       if (dist > want) {
         const urgency = Math.min(1, (dist - want) / 7);
@@ -988,8 +757,6 @@ export class Enemy {
 
       this.steerContext(dX, dZ, steerOut);
       if (steerOut.x === 0 && steerOut.z === 0) {
-        // nowhere to go locally — hand this over to A* immediately instead of
-        // grinding into the wall until the stuck timer notices
         this.boxedT += dt;
         this.directBlockT = 0.9;
         this.lastKnown.copy(pp);
@@ -999,15 +766,12 @@ export class Enemy {
         this.boxedT = 0;
         wx = steerOut.x; wz = steerOut.z;
         if (steerOut.jump) wantJump = true;
-        // flip the orbit direction when the chosen path fights the desired
-        // one badly (we are sliding along a wall) so we round corners
         if (steerOut.x * dX + steerOut.z * dZ < 0.25 && this.strafeTimer > 0.6) {
           this.strafeDir = -this.strafeDir;
           this.strafeTimer = 0.5;
         }
       }
     } else if (this.hasTarget) {
-      // ---- navigate to the last known position with A*
       const goalMoved = this.pathGoal.distanceToSquared(this.lastKnown) > 4;
       const needPath = this.path.length === 0 || this.pathIdx >= this.path.length;
       const nearGoal = this.pos.distanceToSquared(this.lastKnown) < 2.5;
@@ -1031,13 +795,7 @@ export class Enemy {
         }
       }
 
-      // ---- follow the path
       if (this.pathIdx < this.path.length) {
-        // string-pulling: skip ahead to the furthest waypoint we can still
-        // walk to in a straight line. Raw A* output is a blocky staircase;
-        // this turns it into natural diagonal movement.
-        // only re-evaluate on a steer tick: the smoothing result is stable
-        // between solves and this used to run up to 4 corridor scans a frame
         if (this.steerT <= 0) {
           let look = this.pathIdx;
           const maxLook = Math.min(this.path.length - 1, this.pathIdx + 3);
@@ -1055,15 +813,11 @@ export class Enemy {
         const dyw = wp.y - this.pos.y;
         const hd = Math.hypot(dxw, dzw);
 
-        // advance when the waypoint is reached (generous vertical tolerance
-        // so falling into a tunnel doesn't stall the agent)
         if (hd < 0.42 && dyw < 0.6 && dyw > -1.6) {
           this.pathIdx++;
         } else {
-          // steer through the voxels toward the waypoint rather than at it
           this.steerContext(dxw, dzw, steerOut);
           if (steerOut.x === 0 && steerOut.z === 0) {
-            // the route is stale (world changed / bad node) — force a rebuild
             this.repathT = 0;
             this.path.length = 0;
             this.pathIdx = 0;
@@ -1071,17 +825,11 @@ export class Enemy {
             wx = steerOut.x; wz = steerOut.z;
             if (steerOut.jump) wantJump = true;
           }
-          // jump up a step, or hop a gap when the next node is across a drop
           if (this.grounded && this.jumpCd <= 0 && dyw > 0.55 && hd < 1.6) wantJump = true;
         }
 
-        // way off the path (knocked back / fell) -> repath sooner
         if (hd > 4.5) this.repathT = Math.min(this.repathT, 0.1);
       } else {
-        // No usable route this frame (budget spent, search failed, or the
-        // goal is unreachable). Standing still here is what made the squad
-        // look asleep — instead walk the straight line to the memory and let
-        // collision step-up / stuck recovery deal with the geometry.
         const dxw = this.lastKnown.x - this.pos.x;
         const dzw = this.lastKnown.z - this.pos.z;
         const hd = Math.hypot(dxw, dzw);
@@ -1090,11 +838,9 @@ export class Enemy {
           wx = steerOut.x; wz = steerOut.z;
           if (steerOut.jump) wantJump = true;
         } else if (this.searchT > 3) {
-          // arrived at the memory and found nothing: sweep the area
           this.wanderAngle += (Math.random() - 0.5) * dt * 2;
           this.steerContext(Math.sin(this.wanderAngle), Math.cos(this.wanderAngle), steerOut);
           if (steerOut.x === 0 && steerOut.z === 0) {
-            // cornered while searching — spin to a fresh heading
             this.wanderAngle += Math.PI * (0.5 + Math.random());
           } else {
             wx = steerOut.x * 0.5; wz = steerOut.z * 0.5;
@@ -1103,9 +849,6 @@ export class Enemy {
       }
     }
 
-    // Plant the feet to shoot only once actually at the preferred range —
-    // damping while still closing the gap is what let players walk away from
-    // a firing squad.
     if (this.state === 'attack' && inCombatRange && dist < c.preferredRange * 0.95) {
       wx *= 0.35; wz *= 0.35;
     }
@@ -1119,13 +862,10 @@ export class Enemy {
     const damp = Math.max(0, 1 - 8 * dt);
     this.vel.x *= damp; this.vel.z *= damp;
     const hs = Math.hypot(this.vel.x, this.vel.z);
-    // sprint while running a fleeing player down; walk while holding a firing
-    // position or patrolling
     const sprinting = this.state !== 'patrol' && dist > c.preferredRange * 1.1;
     const maxS = c.speed * (sprinting ? CHASE_SPRINT : 1);
     if (hs > maxS) { this.vel.x *= maxS / hs; this.vel.z *= maxS / hs; }
 
-    // ---- gravity, deliberate jumps and stuck recovery
     this.vel.y -= 26 * dt;
     this.vel.y = Math.max(this.vel.y, -40);
 
@@ -1140,10 +880,6 @@ export class Enemy {
     if (this.stateT > 0.6 && wantsToMove && moveDelta < 0.02 && this.grounded) {
       this.stuckTimer += dt;
       if (this.stuckTimer > 0.3) {
-        // Context steering should have prevented this, so a stall here means
-        // something unusual: a closing door, another agent, or a freshly
-        // placed block. Escape along the widest opening rather than blindly
-        // strafing, then rebuild the route.
         let escX = 0, escZ = 0, bestCost = Infinity;
         for (let i = 0; i < STEER_DIRS; i++) {
           const cost = this.probeStep(STEER_COS[i], STEER_SIN[i]);
@@ -1152,7 +888,6 @@ export class Enemy {
           }
         }
         if (bestCost === Infinity) {
-          // truly entombed: jump straight up, it is the only axis left
           if (this.jumpCd <= 0) { this.vel.y = 8.6; this.jumpCd = 0.35; }
         } else {
           this.vel.x += escX * 3.6;
@@ -1172,7 +907,6 @@ export class Enemy {
     this.directBlockT = Math.max(0, this.directBlockT - dt);
     this.lastX = this.pos.x; this.lastZ = this.pos.z;
 
-    // ---- physics (axis-separated AABB)
     this.moveAxis(0, this.vel.x * dt);
     this.moveAxis(2, this.vel.z * dt);
     const grounded = { v: false };
@@ -1180,17 +914,8 @@ export class Enemy {
     if (grounded.v) this.vel.y = 0;
     this.grounded = grounded.v;
 
-    // ---- firing (no distance limit: fires whenever line of sight to player is clear)
-    // ---- firing: only when the player is in line of sight AND within the
-    // configured attack range. Out of range the enemy keeps chasing/strafing
-    // but holds its fire, so it can't snipe you across the map.
     const fireRange = ENEMY_FIRE_MODE === 'distance' ? ENEMY_FIRE_RANGE : c.attackRange;
     const inFireRange = dist <= fireRange;
-    // Camps keep shooting at a piloting player too — the ship is invulnerable
-    // (damagePlayer ignores hits in flight) but the firefight reads correctly.
-    // Tracers can't pile up because the FX pool advances in tickPilot as well.
-    // `alerted` is the hard gate: an unprovoked guard never pulls the trigger,
-    // no matter how close the player walks or how clear the shot is.
     if (this.alerted && this.state !== 'patrol' && this.state !== 'idle' && hasLos && inFireRange && this.cooldownUntil <= 0) {
       this.state = 'attack';
       if (this.burstLeft > 0) {
@@ -1207,7 +932,6 @@ export class Enemy {
       }
     } else if (this.state === 'attack') this.state = (this.alerted && this.cooldownUntil <= 0) ? 'chase' : this.cfg.behavior;
 
-    // ---- animate
     const moving = hs > 0.4;
     this.speedN += ((moving ? Math.min(1, hs / 4) : 0) - this.speedN) * Math.min(1, dt * 8);
     if (grounded.v && moving) this.walkPhase += dt * (5 + hs * 1.1);
@@ -1215,18 +939,12 @@ export class Enemy {
     this.legL.rotation.x = -sw;
     this.legR.rotation.x = sw;
 
-    // Aim the two arms and weapon as one combat pose whenever there is line of sight.
     const shoulder = tmpV.set(this.pos.x + Math.sin(this.yaw) * 0.31, this.pos.y + 1.28, this.pos.z + Math.cos(this.yaw) * 0.31);
     const aim = tmpV2.copy(pp).add(tmpV3.set(0, 1.1, 0)).sub(shoulder);
     const horiz = Math.hypot(aim.x, aim.z);
     const pitch = Math.atan2(aim.y, horiz || 1);
     this.aimPitch = THREE.MathUtils.clamp(pitch, -0.38, 0.38);
 
-    // ---- weapon stow / draw
-    // A guard on his round has nothing in his hands: the rifle is only
-    // unslung for an actual fight. `weaponDrawT` holds the gun out for a
-    // beat after the last clear shot so a brief LOS break (a tree, a corner)
-    // doesn't pop the model in and out every few frames.
     const combatPose = this.alerted && hasLos;
     if (combatPose) this.weaponDrawT = 1.2;
     else this.weaponDrawT = Math.max(0, this.weaponDrawT - dt);
@@ -1234,23 +952,14 @@ export class Enemy {
     this.weapon.visible = armed;
 
     if (armed) {
-      // Arms pivot at the shoulder and hang along -Y at rest. The weapon rig
-      // is built along +Z (muzzle at +0.86), and the body's forward is +Z
-      // (yaw = atan2(faceX, faceZ)), so the hands must swing to +Z. Rotating
-      // -Y about +X by θ lands on (0, -cosθ, -sinθ): reaching +Z needs
-      // θ = -π/2, NOT +π/2 (which throws both arms out behind the back).
-      // Positive aimPitch = aiming up, which needs a more-negative arm pitch.
-      // Recoil pushes the arms back toward the body, i.e. rotation.x toward 0.
       const armPitch = -Math.PI / 2 - this.aimPitch * 0.8;
       this.armL.rotation.set(armPitch - 0.05 + this.weaponKick * 0.12, 0, 0.13);
       this.armR.rotation.set(armPitch + 0.06 + this.weaponKick * 0.18, 0, -0.13);
     } else {
-      // slung: normal walking arm swing, opposite the legs
       this.armL.rotation.set(sw * 0.8, 0, 0);
       this.armR.rotation.set(-sw * 0.8, 0, 0);
     }
 
-    // Weapon recoil includes a short rearward push, muzzle rise and bolt cycle.
     if (armed) {
       this.weapon.position.set(0, 1.16 - this.weaponKick * 0.014, 0.32 - this.weaponKick * 0.085);
       this.weapon.rotation.set(-this.aimPitch - this.weaponKick * 0.13, 0, Math.sin(this.walkPhase) * 0.015 * this.speedN);
@@ -1259,24 +968,18 @@ export class Enemy {
 
     this.bodyRoot.position.y = Math.abs(Math.sin(this.walkPhase)) * 0.03 * this.speedN;
 
-    // hit flash
     if (this.flashT > 0) {
       this.flashT -= dt;
       const e = Math.max(0, this.flashT / 0.09) * 0.9;
       for (const m of this.bodyMats) m.emissive.setRGB(e, e, e);
     }
 
-    // ---- sync transform: render at the nearest-image copy toward the
-    // camera, exactly like World.syncChunkOffsets does for terrain. Without
-    // this the camp mesh and its defenders drift a full world length apart
-    // once the player crosses the torus seam.
     const camPos = this.deps.camera.position;
     this.group.position.set(
       this.pos.x + Math.round((camPos.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE,
       this.pos.y,
       this.pos.z + Math.round((camPos.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE,
     );
-    // merchant coin marker: slow spin + lazy bob, readable from across camp
     if (this.coinBadge) {
       this.coinBadge.rotation.y += dt * 2.6;
       this.coinBadge.position.y = 2.24 + Math.sin(this.stateT * 2.1) * 0.055;
@@ -1284,8 +987,6 @@ export class Enemy {
 
     this.group.rotation.y = this.yaw;
     const f = Math.max(0, this.hp / c.hp);
-    // health bar only exists once damaged — skip the billboard matrix work
-    // (getWorldPosition forces a matrix update) for untouched agents
     this.hpBar.visible = f < 1;
     if (f < 1) {
       this.hpBar.lookAt(this.deps.camera.position.x, this.hpBar.getWorldPosition(tmpV).y, this.deps.camera.position.z);
@@ -1296,13 +997,10 @@ export class Enemy {
     return true;
   }
 
-  /** `playerPos` must already be the minimum-image copy near this agent. */
   private fireOneShot(playerPos: THREE.Vector3, dist: number) {
     this.recoilT = 0.06;
     this.weaponKick = 1;
     const muzzle = this.muzzle.getWorldPosition(new THREE.Vector3());
-    // the muzzle world position carries the render image offset; shots must
-    // be computed in the agent's own (wrapped) space
     muzzle.x = this.pos.x + wrapDelta(muzzle.x - this.pos.x, WORLD_SIZE);
     muzzle.z = this.pos.z + wrapDelta(muzzle.z - this.pos.z, WORLD_SIZE);
     const target = playerPos.clone().add(tmpV.set(0, 1.0, 0));
@@ -1313,8 +1011,6 @@ export class Enemy {
     dir.z += (Math.random() - 0.5) * spread;
     dir.normalize();
 
-    // visuals render in camera space: shift by the camera's image offset so
-    // tracers/flashes stay visible on whichever side of the seam we render
     const cam = this.deps.camera.position;
     const vX = Math.round((cam.x - this.pos.x) / WORLD_SIZE) * WORLD_SIZE;
     const vZ = Math.round((cam.z - this.pos.z) / WORLD_SIZE) * WORLD_SIZE;
@@ -1323,7 +1019,6 @@ export class Enemy {
     this.deps.effects.muzzleFlash(vis(muzzle), 0.45);
     this.deps.audio.shot({ freq: 1700, dur: 0.07, gain: 0.26 * THREE.MathUtils.clamp(1 - dist / 150, 0.15, 1), sub: 260 });
 
-    // did the shot reach the player before terrain?
     const toP = playerPos.clone().add(tmpV.set(0, 0.95, 0)).sub(muzzle);
     const t = toP.dot(dir);
     let hitPlayer = false;
@@ -1342,33 +1037,20 @@ export class Enemy {
       const worldHit = this.deps.world.raycast(muzzle, dir, 200);
       const endPoint = worldHit ? worldHit.point : end;
       this.deps.effects.tracer(vis(muzzle), vis(endPoint));
-      // `vis()` shifts the point into wrap-around render space, but the decal
-      // must still track the real voxel — pass the hit's world coords too.
       if (worldHit) this.deps.effects.impact(vis(worldHit.point), worldHit.normal, worldHit.block, worldHit);
     }
   }
 
-  // ------------------------------------------------------------ physics
 
-  /** collision-safe lateral shove (used by squad separation) */
   nudge(dx: number, dz: number): void {
     this.moveAxis(0, dx);
     this.moveAxis(2, dz);
   }
 
-  // ---------------------------------------------------- navigation sensing
 
-  /**
-   * Ground level the agent would stand on near (x, z), searching from
-   * `fromY + MAX_JUMP_UP` downward. Returns the feet Y, or -1 when there is
-   * no footing within MAX_SAFE_DROP (a cliff, water pit or the void).
-   */
   private groundNear(x: number, z: number, fromY: number): number {
     const w = this.deps.world;
     const hw = this.halfW;
-    // Footprint columns: the 0.6-wide body spans at most 2 cells per axis, so
-    // resolve them once instead of re-deriving them for every Y (the old code
-    // called fits() per level = up to 8 voxel reads each).
     const x0 = Math.floor(x - hw), x1 = Math.floor(x + hw);
     const z0 = Math.floor(z - hw), z1 = Math.floor(z + hw);
     const twoX = x1 !== x0, twoZ = z1 !== z0;
@@ -1376,8 +1058,6 @@ export class Enemy {
     const top = Math.floor(fromY) + MAX_JUMP_UP;
     const bottom = Math.floor(fromY) - MAX_SAFE_DROP;
 
-    // Walk down one level at a time reusing the "body clear" test from the
-    // level above: clear(y) needs y and y+1 free, so cache the upper row.
     let upperFree = this.rowFree(w, x0, x1, z0, z1, twoX, twoZ, top + 1);
     for (let y = top; y >= bottom; y--) {
       if (y < 1) break;
@@ -1388,7 +1068,6 @@ export class Enemy {
     return -1;
   }
 
-  /** every footprint cell on this level is non-solid */
   private rowFree(
     w: WorldLike, x0: number, x1: number, z0: number, z1: number,
     twoX: boolean, twoZ: boolean, y: number,
@@ -1400,7 +1079,6 @@ export class Enemy {
     return true;
   }
 
-  /** at least one footprint cell on this level is solid (a floor exists) */
   private rowSolidAny(
     w: WorldLike, x0: number, x1: number, z0: number, z1: number,
     twoX: boolean, twoZ: boolean, y: number,
@@ -1412,42 +1090,28 @@ export class Enemy {
     return false;
   }
 
-  /**
-   * Cost of stepping one probe-length along (dx, dz).
-   *   -1  impassable: wall above jump height, cliff, or a clipped corner
-   *    0  flat and clear
-   *   >0  climbing / dropping penalty
-   */
   private probeStep(dx: number, dz: number): number {
     const px = this.pos.x + dx * PROBE_DIST;
     const pz = this.pos.z + dz * PROBE_DIST;
 
     const gy = this.groundNear(px, pz, this.pos.y);
-    if (gy < 0) return -1;                        // cliff or blocked column
+    if (gy < 0) return -1;
 
     const rise = gy - Math.floor(this.pos.y);
-    if (rise > MAX_JUMP_UP) return -1;            // wall we cannot mount
+    if (rise > MAX_JUMP_UP) return -1;
 
-    // corner guard: the halfway cell must also admit the body, otherwise the
-    // agent scrapes a block edge and stalls
     const mx = this.pos.x + dx * PROBE_DIST * 0.5;
     const mz = this.pos.z + dz * PROBE_DIST * 0.5;
     if (this.groundNear(mx, mz, this.pos.y) < 0) return -1;
 
     let cost = 0;
-    if (rise > MAX_STEP) cost += 1.6;             // needs a jump
-    else if (rise > 0) cost += 0.25;              // step up
+    if (rise > MAX_STEP) cost += 1.6;
+    else if (rise > 0) cost += 0.25;
     const drop = Math.floor(this.pos.y) - gy;
-    if (drop > 1) cost += drop * 0.4;             // discourage tumbling down
+    if (drop > 1) cost += drop * 0.4;
     return cost;
   }
 
-  /**
-   * Throttled front-end for the context map. Re-solves at `steerHz` and
-   * replays the cached direction in between, which is what keeps a full
-   * squad off the frame budget. `steerT` is seeded randomly per agent so
-   * the solves spread across frames instead of spiking together.
-   */
   private steerContext(desX: number, desZ: number, out: { x: number; z: number; jump: boolean }): void {
     if (this.steerT > 0) {
       out.x = this.steerX; out.z = this.steerZ; out.jump = this.steerJump;
@@ -1460,11 +1124,6 @@ export class Enemy {
     this.steerBoxed = out.x === 0 && out.z === 0;
   }
 
-  /**
-   * Context steering: score every candidate direction against the desired
-   * heading and the surrounding voxels, then return the best one in
-   * (outX, outZ). Falls back to zero when fully boxed in.
-   */
   private solveContext(desX: number, desZ: number, out: { x: number; z: number; jump: boolean }): void {
     out.x = 0; out.z = 0; out.jump = false;
     const dl = Math.hypot(desX, desZ);
@@ -1477,28 +1136,21 @@ export class Enemy {
     for (let i = 0; i < STEER_DIRS; i++) {
       const cx = STEER_COS[i], cz = STEER_SIN[i];
       const align = cx * desX + cz * desZ;
-      if (align < -0.2) continue;                 // never reverse into the goal
+      if (align < -0.2) continue;
       const cost = this.probeStep(cx, cz);
-      if (cost < 0) continue;                     // impassable
-      // interest minus danger, with a nudge toward last frame's pick so the
-      // agent commits to a detour instead of oscillating at a corner
+      if (cost < 0) continue;
       let s = align - cost * 0.55;
       if (i === this.lastSteerIdx) s += 0.18;
       if (s > bestScore) { bestScore = s; bestIdx = i; bestCost = cost; }
     }
 
-    if (bestIdx < 0) return;                      // boxed in — caller repaths
+    if (bestIdx < 0) return;
     this.lastSteerIdx = bestIdx;
     out.x = STEER_COS[bestIdx];
     out.z = STEER_SIN[bestIdx];
-    out.jump = bestCost >= 1.6;                   // chosen route needs a hop
+    out.jump = bestCost >= 1.6;
   }
 
-  /**
-   * Is there a straight, walkable corridor from here to (tx, tz)? Used to
-   * decide whether direct pursuit is honest or whether we owe the agent a
-   * real A* route around the geometry.
-   */
   private corridorCached(tx: number, tz: number): boolean {
     if (this.corridorT > 0) return this.corridorOk;
     this.corridorT = this.steerInterval * 1.5;
@@ -1512,8 +1164,6 @@ export class Enemy {
     if (len < 0.001) return true;
     if (len > maxLen) return false;
     const nx = dx / len, nz = dz / len;
-    // 1.6-block stride: fine enough to catch a 1-block pillar, half the
-    // samples of the original 0.9 stride
     const steps = Math.ceil(len / 1.6);
     let y = this.pos.y;
     for (let i = 1; i <= steps; i++) {
@@ -1528,7 +1178,6 @@ export class Enemy {
     return true;
   }
 
-  /** true when the agent's full-height AABB is clear at this position */
   private fits(x: number, y: number, z: number): boolean {
     const w = this.deps.world;
     const hw = this.halfW, h = this.height;
@@ -1545,8 +1194,6 @@ export class Enemy {
   private moveAxis(axis: 0 | 2, delta: number) {
     if (delta === 0) return;
 
-    // Auto step-up: single-block ledges, stairs, camp thresholds and rough
-    // terrain are walked over instead of body-blocking the chase.
     const tx = axis === 0 ? this.pos.x + delta : this.pos.x;
     const tz = axis === 2 ? this.pos.z + delta : this.pos.z;
     if (this.fits(tx, this.pos.y, tz)) {
@@ -1594,28 +1241,19 @@ export class Enemy {
   }
 }
 
-// ================================================================ camps
-/** Seconds before a single dead squad member is replaced. */
 export const CAMP_MEMBER_RESPAWN = CAMP_CONFIG.respawnDelay;
-/**
- * Seconds before a fully-wiped camp repopulates its whole squad.
- * Rule (b): camps are NOT permanently cleared — `cleared` stays true for this
- * whole window (HUD readout), then the camp comes back for grindability.
- * Set to Infinity for rule (a) (clear-once) without touching anything else.
- */
 export const CAMP_REPOPULATE_DELAY = CAMP_CONFIG.repopulateDelay;
-/** Never pop a body in the player's face. */
 const RESPAWN_SAFE_DIST = 12;
 
 export interface CampState {
   site: CampSite;
   build: CampBuild;
-  squad: Enemy[];        // living members only (pruned every tick)
-  squadSize: number;     // 3–5, by biome / footprint
-  roster: string[];      // deterministic preset per slot
+  squad: Enemy[];
+  squadSize: number;
+  roster: string[];
   respawnTimer: number;
-  cleared: boolean;      // full squad wiped, waiting on CAMP_REPOPULATE_DELAY
-  spawnedEver: boolean;  // guards "cleared" before the first spawn lands
+  cleared: boolean;
+  spawnedEver: boolean;
 }
 
 function campSquadSize(s: CampSite): number {
@@ -1636,20 +1274,8 @@ function campRoster(s: CampSite, size: number): string[] {
 
 export interface EnemyHit { enemy: Enemy; point: THREE.Vector3; headshot: boolean; dist: number }
 
-/**
- * Horizontal radius (blocks) inside which agents are simulated. Matches the
- * evicted-terrain ring, so a dormant agent is by definition standing in
- * chunks that are not resident.
- */
 const SIM_RADIUS = 112;
 
-// ---------------------------------------------------------------------------
-// WILD SPAWNS — camps are gone; aliens drop in at random around the player.
-// A soft population cap plus a per-tick cooldown keeps the pressure constant
-// without ever materializing more than one rig every couple of seconds, and
-// the spawn ring sits well inside the streamed terrain so ground probes never
-// force chunk generation.
-// ---------------------------------------------------------------------------
 const WILD_CAP = 12;
 const WILD_RING_MIN = 30;
 const WILD_RING_MAX = 68;
@@ -1658,21 +1284,12 @@ export class EnemyManager {
   enemies: Enemy[] = [];
   kills = 0;
   enabled = true;
-  /** reused per-frame list of simulated agents (separation pass) */
   private activeScratch: Enemy[] = [];
-  /** Stable read-out for Tasks 5/6: per-camp `cleared` + `site.cx/cz`. */
   camps: CampState[] = [];
   campsTotal = 0;
   campsCleared = 0;
-  /** true once the manager has ticked at least once */
   private primed = false;
-  /** countdown to the next wild alien drop-in */
   private wildTimer = 2.5;
-  /**
-   * Aliens are nocturnal. While this is false no hostile will ever spawn, and
-   * the moment it flips false every living hostile dissolves. The engine
-   * drives it from the sky clock.
-   */
   private night = true;
   private scene: THREE.Object3D | null = null;
   private deps: EnemyDeps;
@@ -1694,14 +1311,13 @@ export class EnemyManager {
       return {
         site, build, squad: [], squadSize,
         roster: campRoster(site, squadSize),
-        // 0 = materialize the whole squad the first tick the player is in range
         respawnTimer: 0,
         cleared: false, spawnedEver: false,
       };
     });
     this.campsTotal = this.camps.length;
     this.campsCleared = 0;
-    this.primed = false;   // squads spawn on the first update tick
+    this.primed = false;
   }
 
   get aliveCount(): number {
@@ -1712,23 +1328,10 @@ export class EnemyManager {
 
   update(dt: number) {
     if (!this.enabled) return;
-    // Squads are no longer all materialized at once on the first tick: that
-    // built dozens of rigs (geometry + textures) and probed terrain across the
-    // whole planet in a single frame. respawnTick() now populates each camp
-    // the first time the player comes within simulation range.
     if (!this.primed) this.primed = true;
 
-    // A* is only used when line of sight is broken now, so a bigger budget
-    // costs little and keeps blind pursuers moving on fresh routes.
     pathBudget.tokens = 5;
 
-    // ---- simulation culling ------------------------------------------------
-    // Every camp on the planet used to tick at full rate: three voxel LOS
-    // raycasts, swept-AABB physics and A* repaths per agent, for squads the
-    // player cannot even see. Worse, those queries reach into terrain that is
-    // not streamed in, which is what used to force mid-frame chunk builds.
-    // Agents outside the streamed ring go dormant (and stop rendering) until
-    // the player comes back.
     const ppx = this.player.pos.x;
     const ppz = this.player.pos.z;
     const active = this.activeScratch;
@@ -1752,15 +1355,10 @@ export class EnemyManager {
         active.push(e);
       }
     }
-    // separation — squadmates push apart so they never merge into one body,
-    // but the shove is routed through collision so it can't force anyone
-    // inside a wall (the old direct pos writes did exactly that)
     for (let i = 0; i < active.length; i++) {
       for (let j = i + 1; j < active.length; j++) {
         const a = active[i], b = active[j];
-        if (Math.abs(a.pos.y - b.pos.y) > 2) continue;   // different floors
-        // cheap reject before the wrap math: squadmates that are nowhere
-        // near each other dominate this O(n^2) pass
+        if (Math.abs(a.pos.y - b.pos.y) > 2) continue;
         const rx = a.pos.x - b.pos.x, rz = a.pos.z - b.pos.z;
         if (rx * rx + rz * rz > 4 && Math.abs(rx) < WORLD_SIZE * 0.5) continue;
         const dx = wrapDelta(rx, WORLD_SIZE);
@@ -1777,7 +1375,6 @@ export class EnemyManager {
     this.respawnTick(dt);
     this.wildTick(dt);
 
-    // ---- camp proximity aggro: player entering a camp radius triggers squad
     for (const camp of this.camps) {
       if (camp.cleared || camp.squad.length === 0) continue;
       const cdx = wrapDelta(ppx - camp.site.cx, WORLD_SIZE);
@@ -1801,7 +1398,6 @@ export class EnemyManager {
     this.campsTotal = this.camps.length;
   }
 
-  // ---------------------------------------------------------- camp spawning
   private attach(e: Enemy) {
     const parent = this.scene ?? this.deps.world.group.parent;
     if (parent && !e.group.parent) parent.add(e.group);
@@ -1809,28 +1405,21 @@ export class EnemyManager {
 
   private isValidGroundPos(w: WorldLike, fx: number, y: number, fz: number, hintY: number): boolean {
     if (y < 1 || y >= WORLD_HEIGHT - 2) return false;
-    // Must be on/near camp ground elevation (never on tree canopy or deep underground)
     if (Math.abs(y - hintY) > 3) return false;
-    // Feet space (y) and head space (y+1) must be non-solid
     if (w.solid(fx, y, fz) || w.solid(fx, y + 1, fz)) return false;
-    // Floor below feet (y-1) must be solid
     if (!w.solid(fx, y - 1, fz)) return false;
 
-    // Floor block must be real ground — NOT leaves, NOT water, NOT air
     const floorId = w.get(fx, y - 1, fz);
     if (floorId === B.LEAVES || isWaterId(floorId) || floorId === B.AIR) return false;
-    // Reject tree logs or watchpost pillars elevated above ground
     if (floorId === B.LOG && y > hintY + 1) return false;
     return true;
   }
 
-  /** nearest standable block column on actual ground near camp level */
   private standablePos(x: number, z: number, hintY: number): THREE.Vector3 | null {
     const w = this.deps.world;
     const fx = ((Math.floor(x) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
     const fz = ((Math.floor(z) % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
 
-    // Search around camp ground height (hintY + 3 down to hintY - 3)
     const minY = Math.max(1, Math.floor(hintY) - 3);
     const maxY = Math.min(WORLD_HEIGHT - 2, Math.floor(hintY) + 3);
 
@@ -1842,7 +1431,6 @@ export class EnemyManager {
     return null;
   }
 
-  /** watchposts first, then the patrol ring, then a fallback inner circle */
   private campSpawnPos(camp: CampState, slot: number): THREE.Vector3 | null {
     const { build: b, site: s } = camp;
     const ring = b.posts.length ? b.posts : b.patrolPoints;
@@ -1862,8 +1450,6 @@ export class EnemyManager {
       if (p) return p;
     }
 
-    // Structures can occupy every post on steep or snow-heavy worlds. Scan
-    // inward in a deterministic spiral before giving up on the camp.
     for (let rad = 0; rad <= s.radius; rad += 2) {
       const steps = rad === 0 ? 1 : Math.max(8, Math.ceil(rad * 2.2));
       for (let i = 0; i < steps; i++) {
@@ -1878,10 +1464,6 @@ export class EnemyManager {
   private spawnMember(camp: CampState, slot: number, guardPlayer: boolean): boolean {
     let p = this.campSpawnPos(camp, slot);
 
-    // Last resort: the site center was verified dry at generation time, so
-    // drop the member on top of whatever the column holds and let physics
-    // settle them. Without this, exotic planets could leave a fully built
-    // camp with zero defenders because every probe happened to fail.
     if (!p) {
       const s = camp.site;
       const w = this.deps.world;
@@ -1892,45 +1474,32 @@ export class EnemyManager {
       p = new THREE.Vector3(cx + 0.5, y, cz + 0.5);
     }
     if (guardPlayer) {
-      // minimum-image distance: the player may be many world-lengths away
-      // in trip space while standing right on top of the camp
       const gdx = wrapDelta(this.player.pos.x - p.x, WORLD_SIZE);
       const gdz = wrapDelta(this.player.pos.z - p.z, WORLD_SIZE);
       const gdy = this.player.pos.y - p.y;
       if (gdx * gdx + gdy * gdy + gdz * gdz < RESPAWN_SAFE_DIST * RESPAWN_SAFE_DIST) return false;
     }
-    // Split the garrison between walkers and sentries so a camp reads as a
-    // camp: roughly half the squad walks the perimeter, the rest hold posts.
-    // Deterministic per camp+slot so a given outpost always looks the same.
     const presetId = camp.roster[slot % camp.roster.length];
     const bRng = mulberry32(
       ((camp.site.id * 0x27d4eb2d) ^ (slot * 0x9e3779b1) ^ 0x5bf03635) >>> 0
     );
-    // heavies are weapon platforms — they hold station far more often
     const idleChance = presetId === 'heavy' ? 0.75 : slot === 0 ? 0.15 : 0.45;
     const behavior: EnemyBehavior = bRng() < idleChance ? 'idle' : 'patrol';
     const e = new Enemy(presetId, p, this.deps, { behavior });
-    e.assignCamp(camp.build);          // patrol route + leash (Task 3)
+    e.assignCamp(camp.build);
     this.enemies.push(e);
     this.attach(e);
     camp.squad.push(e);
     return true;
   }
 
-  /** fill a camp to squadSize at its posts */
   spawnCamp(camp: CampState): void {
     for (let i = camp.squad.length; i < camp.squadSize; i++) this.spawnMember(camp, i, false);
     if (camp.squad.length) { camp.spawnedEver = true; camp.respawnTimer = CAMP_MEMBER_RESPAWN; }
-    else camp.respawnTimer = 2;         // hostile terrain: retry fast, don't flag cleared
+    else camp.respawnTimer = 2;
     this.spawnMerchantAt(camp);
   }
 
-  /**
-   * Every camp gets one MERCHANT trader, standing at a post (idle behavior).
-   * The merchant is deliberately NOT part of `camp.squad`: killing it never
-   * counts toward clearing the camp, and the camp's aggro broadcasts never
-   * drag it into combat. Like squad members, a dead trader stays dead.
-   */
   private spawnMerchantAt(camp: CampState): void {
     const p = this.campSpawnPos(camp, Math.floor(camp.squadSize * 0.5));
     if (!p) return;
@@ -1940,71 +1509,46 @@ export class EnemyManager {
     this.attach(e);
   }
 
-  /**
-   * Drop a travelling merchant on standable ground near a point (used by the
-   * engine to seed one close to the player spawn so trading is discoverable).
-   */
   spawnWanderingMerchant(x: number, z: number, hintY: number): void {
-    // never stack two traders on the same column
     for (const e of this.enemies) {
       if (e.alive && e.cfg.id === 'merchant' && e.distToXZ(x, z) < 14) return;
     }
     const p = this.standablePos(x, z, hintY);
     if (!p) return;
     const e = new Enemy('merchant', p, this.deps, { behavior: 'idle' });
-    e.home = { x: p.x, z: p.z };   // the stall IS the post
+    e.home = { x: p.x, z: p.z };
     this.enemies.push(e);
     this.attach(e);
   }
 
-  /**
-   * Per-camp tick. Dead enemies are NEVER respawned — once a squad member
-   * dies they stay dead for the rest of the session. Cleared camps remain
-   * permanently cleared and are persisted across planet visits.
-   * Only the initial spawn (first time player approaches) still runs.
-   */
   respawnTick(dt: number): void {
     const ppx = this.player.pos.x;
     const ppz = this.player.pos.z;
     for (const camp of this.camps) {
-      // Dormant camp: probing for standable ground calls highestY(), which
-      // *generates* terrain. Skipping out-of-range camps keeps the whole
-      // planet's garrison off the frame budget until the player closes in.
       const cdx = wrapDelta(camp.site.cx - ppx, WORLD_SIZE);
       const cdz = wrapDelta(camp.site.cz - ppz, WORLD_SIZE);
       if (cdx * cdx + cdz * cdz > SIM_RADIUS * SIM_RADIUS) continue;
 
-      // Prune dead members from the squad roster (they are still in this.enemies
-      // until their death animation finishes, so rendering/physics still runs).
       for (let i = camp.squad.length - 1; i >= 0; i--) if (!camp.squad[i].alive) camp.squad.splice(i, 1);
 
-      // First approach: bring the whole squad up at once (initial spawn only).
       if (!camp.spawnedEver && !camp.cleared && camp.squad.length === 0) {
         camp.respawnTimer -= dt;
         if (camp.respawnTimer <= 0) this.spawnCamp(camp);
         continue;
       }
 
-      // Mark camp as permanently cleared when the full squad is wiped.
       if (!camp.cleared && camp.spawnedEver && camp.squad.length === 0) {
         camp.cleared = true;
       }
-      // No respawning of individual members or repopulation of cleared camps.
     }
   }
 
-  /**
-   * Random wild spawns: aliens materialize on standable ground inside a ring
-   * around the player, already hunting. The rise-from-ground 'spawn' intro
-   * plays first, so a drop-in reads as a teleport-in rather than a pop.
-   */
   private wildTick(dt: number) {
     if (!this.night) return;
     this.wildTimer -= dt;
     if (this.wildTimer > 0) return;
     this.wildTimer = 1.4 + Math.random() * 1.4;
 
-    // soft cap counts hostiles only — the merchant never blocks a drop-in
     let hostiles = 0;
     for (const e of this.enemies) if (e.alive && !e.cfg.peaceful) hostiles++;
     if (hostiles >= WILD_CAP) return;
@@ -2031,24 +1575,19 @@ export class EnemyManager {
       e.home = { x: p.x, z: p.z };
       this.enemies.push(e);
       this.attach(e);
-      // wild aliens are hunters: provoked from the moment they materialize
       e.alert(new THREE.Vector3(pp.x, pp.y, pp.z));
       return;
     }
   }
 
-  /** Hitscan test from the player's weapon against all living enemies. */
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): EnemyHit | null {
     let best: EnemyHit | null = null;
     for (const e of this.enemies) {
       if (!e.alive) continue;
-      // hit-test against the enemy image nearest the shooter (torus seam)
       const iox = Math.round((origin.x - e.pos.x) / WORLD_SIZE) * WORLD_SIZE;
       const ioz = Math.round((origin.z - e.pos.z) / WORLD_SIZE) * WORLD_SIZE;
-      // body sphere
       const bc = e.pos.clone().add(tmpV.set(iox, 1.0, ioz));
       const tb = this.raySphere(origin, dir, bc, 0.52);
-      // head sphere
       const hc = e.pos.clone().add(tmpV.set(iox, 1.77, ioz));
       const th = this.raySphere(origin, dir, hc, 0.26);
       let t = -1, head = false;
@@ -2070,15 +1609,6 @@ export class EnemyManager {
     return tca - Math.sqrt(r * r - d2);
   }
 
-  /**
-   * A noise was made nearby (gunshot, explosion…).
-   *
-   * This deliberately does NOT provoke anybody. Firing your rifle in the woods
-   * is not an attack on a camp, and routing it through `alert()` was what made
-   * every garrison in earshot open up the moment the player squeezed a trigger
-   * anywhere near them. Sound only sharpens squads that are ALREADY fighting,
-   * giving them a fresh position to converge on.
-   */
   alertNearby(soundPos: THREE.Vector3, hearRange = 45) {
     const r2 = hearRange * hearRange;
     for (const e of this.enemies) {
@@ -2087,17 +1617,11 @@ export class EnemyManager {
       const dz = wrapDelta(soundPos.z - e.pos.z, WORLD_SIZE);
       const dy = soundPos.y - e.pos.y;
       if (dx * dx + dy * dy + dz * dz < r2) {
-        // hand the agent the sound's image in its own wrapped neighborhood
         e.investigate(new THREE.Vector3(e.pos.x + dx, soundPos.y, e.pos.z + dz));
       }
     }
   }
 
-  /**
-   * Provoke every member of the camp that contains `hitEnemy` — and ONLY that
-   * camp. Squads are independent: shooting up one outpost leaves the next one
-   * over completely unaware.
-   */
   alertSquadOf(hitEnemy: Enemy) {
     const pp = this.player.pos;
     for (const camp of this.camps) {
@@ -2111,17 +1635,12 @@ export class EnemyManager {
       }
       return;
     }
-    // Not a camp member (lone spawn): it still defends itself.
     hitEnemy.alert(hitEnemy.pos.clone().add(new THREE.Vector3(
       wrapDelta(pp.x - hitEnemy.pos.x, WORLD_SIZE), 0,
       wrapDelta(pp.z - hitEnemy.pos.z, WORLD_SIZE),
     )));
   }
 
-  /**
-   * After an area-damage event (explosion), alert every camp whose squad had
-   * at least one member damaged inside the radius.
-   */
   alertCampsInRadius(pos: THREE.Vector3, radius: number) {
     const r2 = (radius + 0.6) * (radius + 0.6);
     for (const camp of this.camps) {
@@ -2173,36 +1692,22 @@ export class EnemyManager {
     for (const e of this.enemies) if (!e.group.parent) scene.add(e.group);
   }
 
-  /**
-   * Remove all enemy meshes. Cleared camp state is PRESERVED — once a camp
-   * is cleared it stays cleared permanently, even across player deaths.
-   */
   clearAll() {
     for (const e of this.enemies) if (e.group.parent) e.group.parent.remove(e.group);
     this.enemies = [];
     for (const c of this.camps) {
       c.squad.length = 0;
-      // Preserve cleared state — cleared camps stay cleared.
-      // Only non-cleared, never-spawned camps get re-armed for first approach.
       if (!c.cleared) {
         c.spawnedEver = false;
         c.respawnTimer = CAMP_MEMBER_RESPAWN;
       }
     }
-    // recalculate cleared count from preserved state
     let cleared = 0;
     for (const c of this.camps) if (c.cleared) cleared++;
     this.campsCleared = cleared;
     this.primed = false;
   }
 
-  /**
-   * Day/night gate for the whole hostile population.
-   *
-   * Dawn: every living alien dissolves on the spot and nothing respawns.
-   * Dusk: the drop-in clock restarts and the night's hunt begins.
-   * Peaceful traders are unaffected — they keep their stall around the clock.
-   */
   setNight(night: boolean) {
     if (night === this.night) return;
     this.night = night;
@@ -2213,10 +1718,8 @@ export class EnemyManager {
     }
   }
 
-  /** true while the nocturnal population is allowed to exist */
   get isNight(): boolean { return this.night; }
 
-  /** Enable/disable spawning. */
   setEnabled(enabled: boolean) {
     this.enabled = enabled;
     if (!enabled) this.clearAll();
@@ -2231,21 +1734,18 @@ export class EnemyManager {
     e.assignCamp(build);
   }
 
-  // ---- persistence: survive planet hops -----------------------------------
 
-  /** Return the IDs of camps that have been cleared (for cross-visit persistence). */
   getClearedCampIds(): number[] {
     return this.camps.filter((c) => c.cleared).map((c) => c.site.id);
   }
 
-  /** Mark specific camps as already cleared (restored from a previous visit). */
   markCampsCleared(ids: number[]): void {
     if (!ids.length) return;
     const set = new Set(ids);
     for (const c of this.camps) {
       if (set.has(c.site.id)) {
         c.cleared = true;
-        c.spawnedEver = true; // prevent initial spawn
+        c.spawnedEver = true;
       }
     }
     let cleared = 0;
@@ -2253,23 +1753,7 @@ export class EnemyManager {
     this.campsCleared = cleared;
   }
 
-  // ---- player death: every squad stands down -----------------------------
-  /**
-   * Called by the engine when the player dies. Behaviour contract:
-   *   - Every living enemy (camps AND wandering merchants) drops combat.
-   *   - They stop chasing, stop shooting, and stop holding the player as a
-   *     target. State snaps back to their configured passive stance.
-   *   - Each enemy teleports to a standable position INSIDE ITS OWN CAMP /
-   *     own post, so the firefight is left empty and the squads regroup.
-   *   - A squad-wide cooldown prevents anyone from re-engaging the moment
-   *     the player respawns at the spawn point (which is often next to a
-   *     camp). The cooldown is measured in seconds.
-   *
-   * Dead enemies are ignored — they have no state to reset and are about to
-   * be pruned from the squad roster by `respawnTick`.
-   */
   onPlayerDeath(cooldownSec = 6): void {
-    // Build a camp lookup so each squad member can use only its own camp.
     const siteBySquad: Map<Enemy, CampState> = new Map();
     for (const camp of this.camps) {
       for (const m of camp.squad) {
@@ -2280,8 +1764,6 @@ export class EnemyManager {
       if (!e.alive) continue;
       const camp = siteBySquad.get(e) ?? null;
 
-      // Prefer the enemy's exact original post. If that column was modified,
-      // use another valid post in its own camp. Never use the player spawn.
       let target = this.standablePos(
         e.respawnPoint.x,
         e.respawnPoint.z,

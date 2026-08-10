@@ -7,21 +7,21 @@ import type { World } from './world';
 
 export interface CampSite {
   id: number;
-  cx: number; cz: number;   // center block coords (wrapped)
-  radius: number;           // footprint radius in blocks (12–18)
-  y: number;                // ground height at center
+  cx: number; cz: number;
+  radius: number;
+  y: number;
   biome: Biome;
-  flatness: number;         // max height delta across footprint
+  flatness: number;
 }
 
 const CAMP_SALT     = 0x9e3779b9;
 const CANDIDATES    = 3072;
 const MIN_RADIUS    = 12;
 const MAX_RADIUS    = 18;
-const BASE_FLATNESS = 2;   // strict pass
-const MAX_FLATNESS  = 5;   // last relaxed pass, then clamp to whatever was found
-const DRY_MARGIN    = 4;   // every sample must be > the planet's sea + 4
-const MOUNTAIN_ODDS = 0.15; // strict pass policy; final fallback admits unusual biomes
+const BASE_FLATNESS = 2;
+const MAX_FLATNESS  = 5;
+const DRY_MARGIN    = 4;
+const MOUNTAIN_ODDS = 0.15;
 
 interface Cand {
   cx: number; cz: number; radius: number; mtnRoll: number;
@@ -34,11 +34,10 @@ function torusDist(ax: number, az: number, bx: number, bz: number): number {
   return Math.hypot(dx, dz);
 }
 
-/** center + 4 cardinal + 4 diagonal on the rim, + 4 mid-ring for safety */
 function evaluate(gen: TerrainGenerator, c: Cand) {
   if (c.ev) return c.ev;
   const r = c.radius;
-  const d = Math.max(1, Math.round(r * 0.70710678)); // diagonals stay inside the disc
+  const d = Math.max(1, Math.round(r * 0.70710678));
   const m = Math.max(1, Math.round(r * 0.5));
   const offs: ReadonlyArray<readonly [number, number]> = [
     [0, 0],
@@ -66,8 +65,6 @@ export function generateCamps(
   const rng = mulberry32((seed ^ CAMP_SALT) >>> 0);
   const [sx, sz] = gen.findSpawn();
 
-  // Deterministic candidate cloud, built once so relaxation passes never shift the RNG stream.
-  // Sunflower spiral outward from spawn (area-uniform via sqrt), jittered.
   const maxR = WORLD_SIZE * 0.5 - 8;
   const golden = Math.PI * (3 - Math.sqrt(5));
   const cands: Cand[] = [];
@@ -93,7 +90,7 @@ export function generateCamps(
       const ev = evaluate(gen, c);
       if (ev.biome === Biome.SNOW) continue;
       if (ev.biome === Biome.MOUNTAINS && c.mtnRoll >= MOUNTAIN_ODDS) continue;
-      if (ev.min <= gen.sea + DRY_MARGIN) continue; // whole footprint is dry land
+      if (ev.min <= gen.sea + DRY_MARGIN) continue;
       if (ev.flatness > limit) continue;
 
       let clash = false;
@@ -109,17 +106,10 @@ export function generateCamps(
     }
   }
 
-  // The strict pass intentionally prefers broad, flat plains, but unusual
-  // planet seeds can have no five-way set that satisfies every biome rule.
-  // Do not return an empty or half-empty world: relax only the cosmetic
-  // constraints while keeping a genuinely dry footprint and spacing camps.
   if (picked.length < count) {
     for (const c of cands) {
       if (picked.length >= count) break;
       const ev = evaluate(gen, c);
-      // At this last-resort tier, dry land is the only hard requirement. A
-      // steep or snowy planet can still host a camp; rejecting it here was
-      // the reason some deterministic worlds returned zero sites.
       if (ev.min <= gen.sea + 1) continue;
       let clash = false;
       for (const p of picked) {
@@ -140,7 +130,6 @@ export function generateCamps(
   return picked;
 }
 
-/* ── Task 2: voxel camp construction ───────────────────────────── */
 
 export interface CampBuild {
   site: CampSite;
@@ -155,14 +144,12 @@ function groundY(world: World, x: number, z: number): number {
   return world.gen.heightAt(wrapBlock(x), wrapBlock(z));
 }
 
-/** never build on/над water */
 function dry(world: World, x: number, z: number): boolean {
   const h = groundY(world, x, z);
   if (h <= world.gen.sea) return false;
   return world.getBlockRaw(wrapBlock(x), h, wrapBlock(z)) !== B.WATER;
 }
 
-/** wrapped, guarded write. skips existing solids unless `force`; BEDROCK/WATER are untouchable */
 function place(world: World, x: number, y: number, z: number, id: number, force = false): boolean {
   if (y < 1 || y >= WORLD_HEIGHT) return false;
   const wx = wrapBlock(x), wz = wrapBlock(z);
@@ -173,22 +160,21 @@ function place(world: World, x: number, y: number, z: number, id: number, force 
   return true;
 }
 
-/** 3×3×2 A-frame; axis 0 = runs along X, 1 = along Z. Front (l = +1) left open as a door. */
 function buildTent(world: World, ox: number, oz: number, axis: 0 | 1, wallId: number): void {
   if (!dry(world, ox, oz)) return;
   const h = groundY(world, ox, oz);
   for (let l = -1; l <= 1; l++) {
     const lx = axis === 0 ? l : 0, lz = axis === 0 ? 0 : l;
-    place(world, ox + lx, h + 2, oz + lz, B.LOG, true);            // ridge beam
+    place(world, ox + lx, h + 2, oz + lz, B.LOG, true);
     for (const s of [-1, 1]) {
       const sx = axis === 0 ? 0 : s, sz = axis === 0 ? s : 0;
-      place(world, ox + lx + sx, h + 1, oz + lz + sz, wallId, true); // sloped walls
+      place(world, ox + lx + sx, h + 1, oz + lz + sz, wallId, true);
     }
-    place(world, ox + lx, h + 1, oz + lz, B.AIR, true);             // hollow interior
+    place(world, ox + lx, h + 1, oz + lz, B.AIR, true);
   }
   const bx = axis === 0 ? -1 : 0, bz = axis === 0 ? 0 : -1;
-  place(world, ox + bx, h + 1, oz + bz, wallId, true);              // back flap
-  for (const s of [-1, 1]) {                                        // corner pegs
+  place(world, ox + bx, h + 1, oz + bz, wallId, true);
+  for (const s of [-1, 1]) {
     const sx = axis === 0 ? 0 : s, sz = axis === 0 ? s : 0;
     place(world, ox + bx + sx, h + 1, oz + bz + sz, B.LOG, true);
   }
@@ -204,29 +190,19 @@ function buildWatchpost(world: World, ox: number, oz: number): void {
   for (const [dx, dz] of corners) place(world, ox + dx, h + 5, oz + dz, B.LOG, true);
 }
 
-/** returns the flame position (one block above the top of the pile) */
 function buildFire(world: World, ox: number, oz: number): { x: number; y: number; z: number } {
   const h = groundY(world, ox, oz);
   for (let dx = -1; dx <= 1; dx++)
     for (let dz = -1; dz <= 1; dz++) place(world, ox + dx, h, oz + dz, B.GRAVEL, true);
   for (const [dx, dz] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const)
-    place(world, ox + dx, h + 1, oz + dz, B.STONE, true);           // stone ring
-  place(world, ox, h + 1, oz, B.LOG, true);                          // fuel
+    place(world, ox + dx, h + 1, oz + dz, B.STONE, true);
+  place(world, ox, h + 1, oz, B.LOG, true);
   return { x: wrapBlock(ox), y: h + 2, z: wrapBlock(oz) };
 }
 
 export function buildCamp(world: World, site: CampSite, seed: number): CampBuild {
   const rng = mulberry32(((seed ^ BUILD_SALT) + site.id * 0x9e3779b1 + site.cx * 73856093 + site.cz * 19349663) >>> 0);
 
-  // A single camp scatters a fence ring, tents, campfires, crates and
-  // watchposts — each is many individual place() calls, and place() ends up
-  // in World.setBlock(). Without batching, every single block edit
-  // triggered a full chunk remesh (voxel scan + greedy meshing over
-  // 16 x 80 x 16), so one camp could remesh the same handful of chunks
-  // dozens of times, and 5 camps at world-gen froze the main thread for
-  // seconds. Batch the whole build: edits only flip voxel data + mark
-  // chunks dirty, and the streaming loop remeshes each touched chunk once
-  // while spreading the cost across the loading-screen frame budget.
   world.beginBatch();
   try {
     return buildCampUnbatched(world, site, rng);
@@ -241,7 +217,6 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
   const posts: CampBuild['posts'] = [];
   const patrolPoints: CampBuild['patrolPoints'] = [];
 
-  // ── fence: LOG posts every ~3 blocks + PLANKS rails, with one 2-post gate gap
   const nPosts = Math.max(8, Math.round((2 * Math.PI * r) / 3));
   const gate = Math.floor(rng() * nPosts);
   const ringPt = (a: number, rad: number) => ({
@@ -256,22 +231,20 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
     const h = groundY(world, p.x, p.z);
     place(world, p.x, h + 1, p.z, B.LOG);
     place(world, p.x, h + 2, p.z, B.LOG);
-    if (i + 1 === gate || (i + 1) % nPosts === gate) continue;      // no rail into the gate
-    for (let t = 1; t <= 2; t++) {                                   // rails toward next post
+    if (i + 1 === gate || (i + 1) % nPosts === gate) continue;
+    for (let t = 1; t <= 2; t++) {
       const q = ringPt(a + (t / 3) * ((Math.PI * 2) / nPosts), r);
       if (!dry(world, q.x, q.z)) continue;
       place(world, q.x, groundY(world, q.x, q.z) + 2, q.z, B.PLANKS);
     }
   }
 
-  // ── central campfire (+ a second one in bigger camps)
   if (dry(world, cx, cz)) fires.push(buildFire(world, cx, cz));
   if (r >= 15) {
     const a = rng() * Math.PI * 2, p = ringPt(a, Math.round(r * 0.5));
     if (dry(world, p.x, p.z)) fires.push(buildFire(world, p.x, p.z));
   }
 
-  // ── braziers flanking the gate (light + landmark)
   for (const off of [-1, 2]) {
     const a = ((gate + off) / nPosts) * Math.PI * 2;
     const p = ringPt(a, r - 2);
@@ -283,7 +256,6 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
     fires.push({ x: wrapBlock(p.x), y: h + 4, z: wrapBlock(p.z) });
   }
 
-  // ── 2–3 tents on an inner ring
   const nTents = 2 + (rng() < 0.6 ? 1 : 0);
   const tentBase = rng() * Math.PI * 2;
   for (let i = 0; i < nTents; i++) {
@@ -292,7 +264,6 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
     buildTent(world, p.x, p.z, rng() < 0.5 ? 0 : 1, rng() < 0.3 ? B.LEAVES : B.PLANKS);
   }
 
-  // ── 3–6 scattered crates (PLANKS box, LOG-capped stacks)
   const nCrates = 3 + Math.floor(rng() * 4);
   for (let i = 0; i < nCrates; i++) {
     const a = rng() * Math.PI * 2, rad = Math.round((0.25 + rng() * 0.5) * r);
@@ -303,7 +274,6 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
     if (rng() < 0.35) place(world, p.x, h + 2, p.z, B.LOG);
   }
 
-  // ── 2–3 watchposts near the perimeter; defenders stand on clear ground just inside
   const nGuard = 2 + (rng() < 0.5 ? 1 : 0);
   const guardBase = rng() * Math.PI * 2;
   for (let i = 0; i < nGuard; i++) {
@@ -315,7 +285,6 @@ function buildCampUnbatched(world: World, site: CampSite, rng: () => number): Ca
     if (dry(world, s.x, s.z)) posts.push({ x: wrapBlock(s.x), z: wrapBlock(s.z) });
   }
 
-  // ── patrol ring, sampled AFTER building so it never lands inside a structure
   const N_PATROL = 8;
   const rot = rng() * Math.PI * 2;
   for (let i = 0; i < N_PATROL; i++) {

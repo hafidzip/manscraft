@@ -1,18 +1,3 @@
-/**
- * Spaceship — a fully working, driveable voxel vehicle.
- *
- * Lives in TRIP SPACE (unbounded continuous coordinates), like the camera:
- * terrain collision queries wrap internally, so it flies over the torus
- * seam with zero special cases.
- *
- * Model: instanced voxel boxes (steel hull, canopy, nacelles, hazard stripe)
- * with emissive engine cells, a point light, a trailing flame sprite and
- * blue exhaust particles fed from the shared particle pool.
- *
- * Flight model: look-steered thrust with inertia + damping, vertical
- * lift/descent, visual banking, soft hover bob when parked, and
- * axis-separated AABB collision against the voxel world.
- */
 
 import * as THREE from 'three';
 import { buildInstanced, type Part } from '../vfx/laserTool';
@@ -30,9 +15,6 @@ export interface FlightInput {
   down: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// voxel model (local units = blocks; nose faces -z)
-// ---------------------------------------------------------------------------
 
 const STEEL = 0x9aa4ae;
 const STEEL_HI = 0xc9d1d9;
@@ -44,28 +26,22 @@ const GLOW = 0xffffff;
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 
 const HULL_PARTS: Part[] = [
-  // fuselage spine
   { x: 0, y: 1.0, z: -0.2, w: 1.6, h: 0.9, d: 5.2, c: STEEL },
-  { x: 0, y: 1.05, z: -3.1, w: 1.4, h: 0.7, d: 1.1, c: STEEL_HI }, // nose step
-  { x: 0, y: 1.0, z: -3.9, w: 0.85, h: 0.55, d: 0.8, c: STEEL_HI }, // cone tip
-  { x: 0, y: 0.55, z: 0.1, w: 1.1, h: 0.5, d: 3.6, c: HULL_DARK }, // keel
-  // cockpit
-  { x: 0, y: 1.56, z: -1.35, w: 1.5, h: 0.45, d: 1.5, c: HULL_DARK }, // canopy frame
-  // wings (sweep via staggered plates)
+  { x: 0, y: 1.05, z: -3.1, w: 1.4, h: 0.7, d: 1.1, c: STEEL_HI },
+  { x: 0, y: 1.0, z: -3.9, w: 0.85, h: 0.55, d: 0.8, c: STEEL_HI },
+  { x: 0, y: 0.55, z: 0.1, w: 1.1, h: 0.5, d: 3.6, c: HULL_DARK },
+  { x: 0, y: 1.56, z: -1.35, w: 1.5, h: 0.45, d: 1.5, c: HULL_DARK },
   { x: -1.95, y: 0.92, z: 0.3, w: 2.4, h: 0.26, d: 1.7, c: STEEL },
   { x: -3.15, y: 0.92, z: 1.05, w: 1.5, h: 0.24, d: 1.0, c: STEEL_HI },
   { x: 1.95, y: 0.92, z: 0.3, w: 2.4, h: 0.26, d: 1.7, c: STEEL },
   { x: 3.15, y: 0.92, z: 1.05, w: 1.5, h: 0.24, d: 1.0, c: STEEL_HI },
-  { x: -2.9, y: 1.08, z: 0.15, w: 0.9, h: 0.12, d: 0.9, c: HAZARD }, // hazard stripes
+  { x: -2.9, y: 1.08, z: 0.15, w: 0.9, h: 0.12, d: 0.9, c: HAZARD },
   { x: 2.9, y: 1.08, z: 0.15, w: 0.9, h: 0.12, d: 0.9, c: HAZARD },
-  // tail fin
   { x: 0, y: 1.85, z: 1.95, w: 0.24, h: 1.5, d: 1.1, c: STEEL },
   { x: 0, y: 2.4, z: 2.15, w: 0.24, h: 0.5, d: 0.6, c: HAZARD },
-  // engine nacelles
   { x: -1.15, y: 0.95, z: 2.35, w: 0.95, h: 0.85, d: 1.7, c: HULL_DARK },
   { x: 1.15, y: 0.95, z: 2.35, w: 0.95, h: 0.85, d: 1.7, c: HULL_DARK },
-  { x: 0, y: 0.9, z: 2.85, w: 1.2, h: 0.95, d: 1.0, c: HULL_DARK }, // center block
-  // landing skids
+  { x: 0, y: 0.9, z: 2.85, w: 1.2, h: 0.95, d: 1.0, c: HULL_DARK },
   { x: -1.35, y: 0.25, z: -0.9, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
   { x: 1.35, y: 0.25, z: -0.9, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
   { x: -1.35, y: 0.25, z: 1.3, w: 0.18, h: 0.5, d: 0.18, c: HULL_DARK },
@@ -77,18 +53,18 @@ const HULL_PARTS: Part[] = [
 ];
 
 const GLOW_PARTS: Part[] = [
-  { x: 0, y: 1.62, z: -1.45, w: 1.1, h: 0.34, d: 1.0, c: CANOPY }, // canopy glass
-  { x: -1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW }, // L nozzle
-  { x: 1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW }, // R nozzle
-  { x: 0, y: 0.9, z: 3.42, w: 0.85, h: 0.6, d: 0.2, c: GLOW }, // center nozzle
-  { x: 0, y: 0.5, z: -2.2, w: 0.9, h: 0.12, d: 0.9, c: 0x6f8fd0 }, // belly lamp
+  { x: 0, y: 1.62, z: -1.45, w: 1.1, h: 0.34, d: 1.0, c: CANOPY },
+  { x: -1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW },
+  { x: 1.15, y: 0.95, z: 3.25, w: 0.62, h: 0.5, d: 0.18, c: GLOW },
+  { x: 0, y: 0.9, z: 3.42, w: 0.85, h: 0.6, d: 0.2, c: GLOW },
+  { x: 0, y: 0.5, z: -2.2, w: 0.9, h: 0.12, d: 0.9, c: 0x6f8fd0 },
 ];
 
 const MAX_SPEED = 28;
 const MAX_VSPEED = 13;
-const ACCEL = 26; // throttle response rate
+const ACCEL = 26;
 const VACCEL = 18;
-const HX = 3.2, HY = 1.15, HZ = 3.5; // collision half extents (forgiving)
+const HX = 3.2, HY = 1.15, HZ = 3.5;
 
 function makeFlameTexture(): THREE.CanvasTexture {
   const S = 64;
@@ -114,12 +90,12 @@ export class Spaceship {
   readonly vel = new THREE.Vector3();
   yaw = 0;
   private bank = 0;
-  private pitchVis = 0; // smoothed visual nose pitch
-  private flyPitch = 0; // smoothed thrust pitch (chases orbit pitch)
+  private pitchVis = 0;
+  private flyPitch = 0;
   private bobT = Math.random() * 10;
-  private baseY = 0; // parked hover altitude (set by placeNear)
+  private baseY = 0;
   private exhaustCd = 0;
-  private load = 0; // smoothed engine load 0..1
+  private load = 0;
 
   private glowMat = new THREE.MeshBasicMaterial();
   private flame: THREE.Sprite;
@@ -154,7 +130,6 @@ export class Spaceship {
     scene.add(this.group);
   }
 
-  /** finds a flat, dry pad near a point and parks the ship there */
   placeNear(gen: TerrainGenerator, cx: number, cz: number): void {
     let bx = cx + 7;
     let bz = cz + 3;
@@ -165,16 +140,14 @@ export class Spaceship {
         const x = cx + Math.cos(a) * r;
         const z = cz + Math.sin(a) * r;
         const { minH, maxH } = this.footprintHeights(gen, x, z);
-        if (minH <= 31) continue; // water or beach
+        if (minH <= 31) continue;
         const cost = (maxH - minH) * 4 + Math.abs(r - 10);
         if (cost < best) {
           best = cost;
           bx = x;
           bz = z;
-          // collision-box floor is pos.y - 0.1; park ABOVE the tallest block
-          // so the hull never starts embedded in terrain
           this.pos.set(bx, maxH + 1.35, bz);
-          if (maxH - minH === 0) r = 99; // flat spot found
+          if (maxH - minH === 0) r = 99;
         }
       }
     }
@@ -185,8 +158,6 @@ export class Spaceship {
     }
     this.baseY = this.pos.y;
     this.yaw = Math.random() * Math.PI * 2;
-    // `placeNear` also acts as the emergency recall used by player respawn.
-    // Clear any stale flight momentum/orientation before the player is seated.
     this.vel.set(0, 0, 0);
     this.pitchVis = 0;
     this.flyPitch = 0;
@@ -195,7 +166,6 @@ export class Spaceship {
     this.sync();
   }
 
-  /** start a planet approach already airborne and seated in the ship */
   enterAtmosphere(gen: TerrainGenerator, cx: number, cz: number, yaw: number): void {
     const h = this.footprintHeights(gen, cx, cz).maxH;
     this.pos.set(cx, Math.min(155, Math.max(118, h + 86)), cz);
@@ -215,7 +185,7 @@ export class Spaceship {
   seatWorld(out: THREE.Vector3, lookPitch: number): THREE.Vector3 {
     out.set(0, 1.78, -0.8).applyAxisAngle(UP_AXIS, this.yaw);
     out.add(this.pos);
-    out.y += Math.sin(-lookPitch) * 0.1; // tiny cockpit feel
+    out.y += Math.sin(-lookPitch) * 0.1;
     return out;
   }
 
@@ -242,7 +212,6 @@ export class Spaceship {
     return gy;
   }
 
-  /** lift the full collision hull above terrain before boarding/parking */
   ensureClearance(margin = 0.25): void {
     const safeY = this.footprintGroundY() + 1.1 + margin;
     if (this.pos.y < safeY) this.pos.y = safeY;
@@ -253,18 +222,10 @@ export class Spaceship {
   private sync(): void {
     this.group.position.copy(this.pos);
     this.group.rotation.set(this.pitchVis, this.yaw, this.bank, 'YXZ');
-    // nudge flame along ship frame
     this.flame.scale.setScalar(0.6 + this.load * 2.6 + Math.sin(this.bobT * 31) * 0.12 * this.load);
   }
 
-  /**
-   * Settle the ship into a stable parked hover at its current column, dropping
-   * it onto the ground if it was left airborne. Called on disembark so the
-   * hull doesn't hang over the freshly restored first-person camera.
-   */
   settleHere(): void {
-    // Rest above the highest terrain under the full hull footprint. Center-only
-    // probing let wings/belly dip into slopes when boarding or disembarking.
     const gy = this.footprintGroundY();
     this.pos.y = Math.max(gy + 1.35, Math.min(this.pos.y, gy + HY + 1.4));
     this.baseY = this.pos.y;
@@ -275,11 +236,10 @@ export class Spaceship {
     this.group.rotation.set(0, this.yaw, 0);
   }
 
-  /** parked: gentle hover bob + idle glow */
   updateParked(dt: number): void {
     this.bobT += dt;
     this.vel.set(0, 0, 0);
-    this.pos.y = this.baseY + Math.sin(this.bobT * 1.05) * 0.09; // anchored hover
+    this.pos.y = this.baseY + Math.sin(this.bobT * 1.05) * 0.09;
     this.load += (0.12 - this.load) * Math.min(1, dt * 2);
     const pulse = 0.5 + 0.12 * Math.sin(this.bobT * 3);
     this.glowMat.color.setRGB(0.4 * pulse + 0.2, 0.55 * pulse + 0.2, 0.7 * pulse + 0.25);
@@ -290,7 +250,6 @@ export class Spaceship {
     this.group.rotation.set(0, this.yaw, 0);
   }
 
-  /** piloted flight step: heading chases the orbit view (chase-cam friendly) */
   updatePilot(
     dt: number,
     orbitYaw: number,
@@ -300,10 +259,6 @@ export class Spaceship {
   ): void {
     this.bobT += dt;
 
-    // ship heading chases camera orbit with lag -> weighty turns, visible banking
-    // Response rates: the old lag values (5/6/6) read as input latency —
-    // the hull kept drifting after the mouse stopped, which feels like a
-    // framerate problem even at a locked 60fps.
     let dyaw = orbitYaw - this.yaw;
     dyaw = ((dyaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
     this.yaw += dyaw * Math.min(1, 10 * dt);
@@ -311,7 +266,6 @@ export class Spaceship {
     const targetPitchVis = this.flyPitch * 0.35;
     this.pitchVis += (targetPitchVis - this.pitchVis) * Math.min(1, 9 * dt);
 
-    // thrust follows the SHIP heading (motion matches the hull)
     const cy = this.yaw;
     const cp = this.flyPitch;
     const fy = Math.sin(cp);
@@ -331,24 +285,20 @@ export class Spaceship {
     const hLen = Math.hypot(ax, az);
     if (hLen > 1) { ax /= hLen; az /= hLen; }
 
-    // inertia: exponential approach, with damping when no input
     this.vel.x += (ax * MAX_SPEED - this.vel.x) * Math.min(1, (ax === 0 ? 2.2 : ACCEL / MAX_SPEED * 4) * dt);
     this.vel.z += (az * MAX_SPEED - this.vel.z) * Math.min(1, (az === 0 ? 2.2 : ACCEL / MAX_SPEED * 4) * dt);
     this.vel.y += (ay * MAX_VSPEED - this.vel.y) * Math.min(1, (ay === 0 ? 3.2 : VACCEL / MAX_VSPEED * 5) * dt);
 
-    // banking from lateral speed
     const lat = this.vel.x * rx + this.vel.z * rz;
     const targetBank = THREE.MathUtils.clamp(-lat * 0.02, -0.45, 0.45);
     this.bank += (targetBank - this.bank) * Math.min(1, 5 * dt);
 
-    // axis-separated collision (never clip terrain)
     this.moveAxis(0, this.vel.x * dt);
     this.moveAxis(1, this.vel.y * dt);
     this.moveAxis(2, this.vel.z * dt);
     if (this.pos.y < 2) { this.pos.y = 2; this.vel.y = Math.max(0, this.vel.y); }
-    if (this.pos.y > 420) { this.pos.y = 420; this.vel.y = Math.min(0, this.vel.y); } // climb into orbit
+    if (this.pos.y > 420) { this.pos.y = 420; this.vel.y = Math.min(0, this.vel.y); }
 
-    // engine load + FX
     const spd = this.speed();
     const loadTarget = Math.min(1, spd / MAX_SPEED + (ay !== 0 ? 0.15 : 0));
     this.load += (loadTarget - this.load) * Math.min(1, 4 * dt);
@@ -361,12 +311,11 @@ export class Spaceship {
     const fScale = 0.5 + this.load * 2.4 + Math.sin(this.bobT * 33) * 0.15 * this.load;
     this.flame.scale.setScalar(Math.max(0.01, fScale));
 
-    // exhaust particles out the nozzle
     this.exhaustCd -= dt;
     if (this.load > 0.15 && this.exhaustCd <= 0) {
       this.exhaustCd = 0.06;
       this.nozzle.getWorldPosition(this.tmpA);
-      this.tmpB.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)); // rearward drift
+      this.tmpB.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
       this.particles.burst(
         this.tmpA.x + this.tmpB.x * 0.4, this.tmpA.y, this.tmpA.z + this.tmpB.z * 0.4,
         [0x9fd4ff, 0x5e94e8, 0xd8ecff, 0x3f6fd0],
@@ -397,7 +346,6 @@ export class Spaceship {
     if (axis === 0) {
       this.pos.x += d;
       if (this.collides()) {
-        // flush-snap to the face we hit — never wedges, shake-free stops
         this.pos.x = d > 0
           ? Math.floor(this.pos.x + HX) - HX - EPS
           : Math.floor(this.pos.x - HX) + 1 + HX + EPS;
@@ -415,7 +363,6 @@ export class Spaceship {
       }
       return;
     }
-    // y axis: box spans [pos.y - 0.1, pos.y + HY]
     this.pos.y += d;
     if (!this.collides()) return;
     this.pos.y = d > 0
@@ -423,7 +370,6 @@ export class Spaceship {
       : Math.floor(this.pos.y - 0.1) + 1 + 0.1 + EPS;
     this.vel.y = 0;
     if (d < 0) {
-      // landing: remember the touch-down plane (harmless if airborne)
       this.baseY = this.pos.y;
     }
   }

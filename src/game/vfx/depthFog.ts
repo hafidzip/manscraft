@@ -1,30 +1,9 @@
-/**
- * Screen-space exponential height fog — the Unreal-style approach.
- *
- * Runs once per frame as a post pass. It reads the depth buffer, reconstructs
- * each fragment's world position, and integrates an exponentially decaying
- * density field along the view ray (closed form, no raymarching):
- *
- *     density(h) = d0 * exp(-(h - h0) / H)
- *     optical    = ∫ density ds   (analytic)
- *     fog        = 1 - exp(-optical)
- *
- * Because it operates on the composited frame, EVERY material receives the
- * exact same fog — terrain, water, enemies, props — so there can never be a
- * seam between surfaces. The far field converges to uFogColor (which the
- * engine keeps equal to the sky background), so the horizon dissolves into
- * the sky instead of hitting a colour wall.
- *
- * Forward in-scattering tints fragments that look toward the sun warm, and
- * that tint itself fades back to the sky colour as fog reaches full density,
- * so the sun side glows softly without breaking the horizon blend.
- */
 
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { FOG_UNIFORMS } from './heightFog';
 
-const VERT = /* glsl */ `
+const VERT = `
   varying vec2 vUv;
   void main() {
     vUv = uv;
@@ -32,7 +11,7 @@ const VERT = /* glsl */ `
   }
 `;
 
-const FRAG = /* glsl */ `
+const FRAG = `
   uniform sampler2D tDiffuse;
   uniform sampler2D tDepth;
   uniform mat4  uViewProjInv;
@@ -171,7 +150,6 @@ export class DepthFogPass {
     u.tDiffuse.value = readBuffer.texture;
     u.tDepth.value = depthTexture;
 
-    // Camera matrices are fresh after the scene render into the main target.
     this.inv.copy(this.camera.projectionMatrix)
       .multiply(this.camera.matrixWorldInverse)
       .invert();

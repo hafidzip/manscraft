@@ -11,11 +11,8 @@ interface GameCanvasProps {
   home?: PlanetHome | null;
   onEnterSpace?: (home: PlanetHome, snapshot?: string | null) => void;
   persistentInventory?: Inventory | null;
-  /** Camp IDs that were cleared on a previous visit (cross-planet persistence). */
   initialClearedCamps?: number[];
-  /** Called on unmount with the current cleared camp IDs so the parent can store them. */
   onSaveClearedCamps?: (campIds: number[]) => void;
-  /** Fired once the world is ready — the parent uses it to drop the transition overlay. */
   onReady?: () => void;
 }
 
@@ -35,14 +32,8 @@ export function GameCanvas({
   const [stats, setStats] = useState<HudStats | null>(null);
   const [seed, setSeed] = useState(0);
 
-  /**
-   * Cold start = the very first boot of the session. Everything after that
-   * (space → planet descents, planet hops) is a warm re-entry: shortened
-   * preload, no title screen, silent pointer-lock recapture.
-   */
   const [coldStart] = useState(() => !session.booted);
 
-  // Keep stable refs to the latest callbacks for the mount-once effect closure
   const saveRef = useRef(onSaveClearedCamps);
   saveRef.current = onSaveClearedCamps;
   const readyRef = useRef(onReady);
@@ -76,14 +67,10 @@ export function GameCanvas({
         onSelect: setSelected,
         onStats: setStats,
         onEnterSpace: (theme) => {
-          // theme carries spec+star; fall back to the prop home, then to the
-          // deterministic home planet on a cold launch (no planet selected)
           const h =
             homeFromTheme(theme as never) ??
             home ??
             { star: homeStar(), planet: homePlanet() };
-          // grab the last rendered frame so the app can hold it on screen
-          // while the space scene boots — no black loading cut
           const snap = engineRef.current?.getSnapshot() ?? null;
           onEnterSpace?.(h, snap ? snap.toDataURL('image/jpeg', 0.82) : null);
         },
@@ -96,14 +83,11 @@ export function GameCanvas({
     engine.init().then(() => {
       if (cancelled) engine.dispose();
     }).catch((error) => {
-      // Keep initialization failures visible instead of leaving a silent,
-      // permanently queued loading screen.
       console.error('Game initialization failed', error);
     });
 
     return () => {
       cancelled = true;
-      // Persist cleared camp state before disposing
       const cleared = engine.getClearedCampIds();
       saveRef.current?.(cleared);
       engine.dispose();
@@ -111,13 +95,6 @@ export function GameCanvas({
     };
   }, []);
 
-  /**
-   * Warm re-entry: the player just left space via a key/click gesture, so the
-   * browser's transient activation usually still covers a silent pointer-lock
-   * recapture. When it lands, the player drops straight into control with no
-   * screen in between; when the browser refuses, the slim resume chip in the
-   * HUD takes over (it appears ~450 ms after ready — after this attempt).
-   */
   const autoLockTried = useRef(false);
   useEffect(() => {
     if (phase !== 'ready' || coldStart || locked || autoLockTried.current) return;
@@ -131,7 +108,6 @@ export function GameCanvas({
   const play = () => engineRef.current?.requestLock();
   const closeInventory = () => engineRef.current?.toggleInventory(false);
 
-  /** any modal that releases pointer lock should show a normal cursor */
   const modalOpen = stats?.inventoryOpen || stats?.craftingOpen || stats?.furnaceOpen || stats?.shopOpen;
 
   return (

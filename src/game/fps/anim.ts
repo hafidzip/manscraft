@@ -1,5 +1,3 @@
-// Animation toolkit: spring dynamics + keyframe timeline engine
-// used for reloads, bolt cycling, inspecting, equipping.
 import * as THREE from 'three';
 
 export type EaseName = 'linear' | 'smooth' | 'in' | 'out' | 'inout' | 'snap' | 'back' | 'elastic';
@@ -17,13 +15,13 @@ export const EASE: Record<EaseName, (t: number) => number> = {
 
 export interface Key {
   t: number;
-  p?: [number, number, number];   // local position offset
-  r?: [number, number, number];   // local euler rotation (radians)
-  e?: EaseName;                   // easing INTO this key
+  p?: [number, number, number];
+  r?: [number, number, number];
+  e?: EaseName;
 }
 
 export interface Track {
-  node: string;                   // bone name in the rig
+  node: string;
   keys: Key[];
 }
 
@@ -41,13 +39,11 @@ export interface TimelineDef {
 const D2R = Math.PI / 180;
 export const deg = (d: number) => d * D2R;
 
-/** Shorthand key builder. */
 export function K(t: number, p?: [number, number, number], r?: [number, number, number], e: EaseName = 'smooth'): Key {
   return { t, p, r, e };
 }
 
 function sampleTrack(keys: Key[], t: number): Key[] {
-  // returns [k0, k1] surrounding t
   if (t <= keys[0].t) return [keys[0], keys[0]];
   if (t >= keys[keys.length - 1].t) { const l = keys[keys.length - 1]; return [l, l]; }
   for (let i = 0; i < keys.length - 1; i++) {
@@ -57,11 +53,6 @@ function sampleTrack(keys: Key[], t: number): Key[] {
   return [l, l];
 }
 
-/**
- * A playing timeline. Each frame: call sample(t, bones) which sets the
- * local position/rotation of every tracked bone from its keyframes.
- * Untracked bones are left at whatever the caller reset them to.
- */
 export class Timeline {
   t = 0;
   private firedEvt: boolean[];
@@ -70,11 +61,9 @@ export class Timeline {
     private bones: Map<string, THREE.Object3D>
   ) {
     this.firedEvt = (def.events ?? []).map(() => false);
-    // sort keys
     for (const tr of def.tracks) tr.keys.sort((a, b) => a.t - b.t);
   }
 
-  /** Advance by dt; returns true while still playing. */
   update(dt: number): boolean {
     this.t += dt;
     const evts = this.def.events ?? [];
@@ -122,7 +111,6 @@ export class Timeline {
   get done(): boolean { return this.t >= this.def.duration; }
 }
 
-/** Vector spring for smooth recoil / sway responses. */
 export class Spring3 {
   v = new THREE.Vector3();
   vel = new THREE.Vector3();

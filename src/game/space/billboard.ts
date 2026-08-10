@@ -1,11 +1,6 @@
 import * as THREE from 'three';
 import type { PlanetPalette } from './palettes';
 
-// ---------------------------------------------------------------------------
-// Impostor billboards: distant planets render as a shader-lit sphere, distant
-// stars as additive glow sprites. Voxel meshing only activates close-up, so
-// the GPU never pays for bodies it cannot resolve.
-// ---------------------------------------------------------------------------
 
 const SPHERE_GEO = new THREE.PlaneGeometry(2, 2);
 SPHERE_GEO.computeBoundingSphere();
@@ -31,16 +26,10 @@ export function makeGlowTexture(): THREE.CanvasTexture {
   return GLOW_TEX;
 }
 
-/**
- * A camera-facing quad with a sphere shader: terminator (day/night) lighting
- * from the parent star + atmospheric rim. lightDir is a uniform the scene
- * refreshes every frame, so orbiting planets stay correctly lit.
- */
 export function makePlanetImpostor(
   palette: PlanetPalette,
   lightDir: THREE.Vector3
 ): THREE.Mesh {
-  // pick a middle-of-the-ramp base color to represent the planet at range
   const midStop = palette.stops[Math.floor(palette.stops.length * 0.55)][1];
   const base = new THREE.Color(midStop[0], midStop[1], midStop[2]);
   const mat = new THREE.ShaderMaterial({
@@ -51,7 +40,7 @@ export function makePlanetImpostor(
     },
     transparent: true,
     depthWrite: false,
-    vertexShader: /* glsl */ `
+    vertexShader: `
       #include <common>
       #include <logdepthbuf_pars_vertex>
       varying vec2 vUv;
@@ -62,7 +51,7 @@ export function makePlanetImpostor(
         #include <logdepthbuf_vertex>
       }
     `,
-    fragmentShader: /* glsl */ `
+    fragmentShader: `
       #include <common>
       #include <logdepthbuf_pars_fragment>
       uniform vec3 uColor;
@@ -89,7 +78,6 @@ export function makePlanetImpostor(
   return mesh;
 }
 
-/** Additive glow sprite for a distant star. */
 export function makeStarSprite(color: number, radius: number): THREE.Sprite {
   const mat = new THREE.SpriteMaterial({
     map: makeGlowTexture(),

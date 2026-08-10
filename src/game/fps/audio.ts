@@ -1,5 +1,3 @@
-// Procedural WebAudio sound engine — no external assets.
-// Gunshots are layered noise bursts + sub thumps; foley is filtered ticks.
 
 export type ReloadSfx = 'out' | 'in' | 'rack' | 'snap' | 'slap' | 'grab' | 'twist';
 
@@ -20,7 +18,6 @@ export class AudioSynth {
     comp.ratio.value = 5;
     this.master.connect(comp);
     comp.connect(this.ctx.destination);
-    // shared noise buffer
     const len = this.ctx.sampleRate;
     this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
@@ -61,7 +58,6 @@ export class AudioSynth {
   }
 
   shot(def: { freq: number; dur: number; gain: number; sub?: number }) {
-    // crack transient + body + sub thump
     this.noise(0.028, 'highpass', 3400, 0.7, def.gain * 0.9);
     this.noise(def.dur, 'bandpass', def.freq, 0.9, def.gain);
     this.noise(def.dur * 1.6, 'lowpass', def.freq * 0.5, 0.6, def.gain * 0.55, 120);
@@ -97,7 +93,6 @@ export class AudioSynth {
     this.tone(3136, 0.1, 'sine', 0.07);
   }
 
-  /** A coin hitting the purse: bright metallic double-ping, slightly randomised. */
   coin() {
     const f = 2100 + Math.random() * 500;
     this.tone(f, 0.07, 'square', 0.1, f * 0.82);
@@ -105,7 +100,6 @@ export class AudioSynth {
     this.tone(f * 2.25, 0.09, 'sine', 0.06, f * 2, 0.1);
   }
 
-  /** Cash-register chime for a completed purchase. */
   purchase() {
     this.tone(880, 0.09, 'square', 0.12);
     this.tone(1175, 0.09, 'square', 0.12, undefined, 0.07);
@@ -113,7 +107,6 @@ export class AudioSynth {
     this.noise(0.04, 'highpass', 4200, 1, 0.05, undefined);
   }
 
-  /** Dull thud for "can't afford that". */
   deny() {
     this.tone(220, 0.09, 'square', 0.16, 140);
     this.tone(160, 0.12, 'square', 0.12, 90, 0.08);
@@ -145,13 +138,11 @@ export class AudioSynth {
     this.tone(2800 + Math.random() * 2000, 0.12, 'sine', 0.05, 900);
   }
 
-  // ---------------------------------------------------------------- laser
   private laserOsc: OscillatorNode | null = null;
   private laserSub: OscillatorNode | null = null;
   private laserGain: GainNode | null = null;
   private laserFilter: BiquadFilterNode | null = null;
 
-  /** Sustained mining-beam hum; `charge` (0..1) raises the pitch as it heats. */
   setLaser(on: boolean, charge = 0) {
     if (!this.ctx || !this.master) return;
     if (on && !this.laserOsc) {
@@ -178,19 +169,16 @@ export class AudioSynth {
     }
   }
 
-  /** Sizzle tick while the beam eats into a block. */
   laserSizzle() {
     this.noise(0.05, 'highpass', 4200 + Math.random() * 1800, 1.4, 0.05);
   }
 
-  /** Voxel shattering apart. */
   blockBreak() {
     this.noise(0.16, 'lowpass', 1500, 0.9, 0.26, 320);
     this.tone(140 + Math.random() * 70, 0.11, 'square', 0.09, 70);
     this.noise(0.09, 'highpass', 2600, 1.2, 0.1);
   }
 
-  /** Placing a voxel block into the world. */
   blockPlace() {
     this.noise(0.12, 'lowpass', 1200, 1.0, 0.22, 280);
     this.tone(180 + Math.random() * 40, 0.08, 'sine', 0.15, 120);
@@ -201,15 +189,12 @@ export class AudioSynth {
     this.noise(0.08, 'lowpass', 700, 1, 0.14);
   }
 
-  /** Player death: gut-punch impact, body hitting dirt, fading heartbeat. */
   playerDie() {
     this.tone(190, 0.5, 'sawtooth', 0.3, 48);
     this.noise(0.35, 'lowpass', 520, 0.8, 0.32, 90);
     this.tone(70, 1.1, 'sine', 0.34, 26);
-    // body slamming into the ground shortly after the collapse
     this.noise(0.22, 'lowpass', 300, 0.9, 0.3, 60);
     setTimeout(() => { this.noise(0.3, 'lowpass', 260, 0.8, 0.34, 50); this.tone(58, 0.5, 'sine', 0.26, 22); }, 780);
-    // two slow heartbeats fading out
     for (let i = 0; i < 2; i++) {
       const d = 1.15 + i * 0.72;
       this.tone(52, 0.2, 'sine', 0.22 - i * 0.07, 34, d);

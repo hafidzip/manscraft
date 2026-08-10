@@ -1,11 +1,3 @@
-/**
- * SPACE — mounts the open-universe SpaceScene (src/game/space) onto a canvas
- * and renders its HUD: galaxy/sector telemetry, ship speed, target lock,
- * hyperjump overlay and the "break atmosphere" entry flow.
- *
- * Entered from the unified game when the spaceship climbs past the
- * atmosphere; ESC (cursor free) or the LAND button returns to the planet.
- */
 import { useEffect, useRef, useState } from 'react';
 import { SpaceScene, type HudState } from '../game/space/scene';
 import type { PlanetHome } from '../game/space/theme';
@@ -14,7 +6,6 @@ import { session } from '../game/session';
 interface SpaceCanvasProps {
   home?: PlanetHome | null;
   onExit: (home: PlanetHome, snapshot?: string | null) => void;
-  /** Fired once the scene is live — the parent uses it to drop the transition overlay. */
   onReady?: () => void;
 }
 
@@ -25,17 +16,14 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
   const [locked, setLocked] = useState(false);
   const [hasLockedOnce, setHasLockedOnce] = useState(false);
 
-  /** Cold start = the app's first boot; warm = any later space entry. */
   const [coldStart] = useState(() => !session.booted);
 
-  // keep latest callbacks/home without re-creating the scene
   const exitRef = useRef(onExit);
   exitRef.current = onExit;
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
   const homeRef = useRef(home);
   homeRef.current = home;
-  /** last rendered frame, grabbed right before handing off to the planet */
   const snapRef = useRef<HTMLCanvasElement | null>(null);
 
   const grabSnapshot = (): string | null => {
@@ -43,9 +31,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
     return snap ? snap.toDataURL('image/jpeg', 0.82) : null;
   };
 
-  // resolves the home to hand back on LAND: dispose() computes the exit
-  // planet (locked -> nearest -> last-locked) and fires onExit; deep space
-  // falls back to the entry home.
   const exit = () => {
     const s = sceneRef.current;
     snapRef.current = s?.getSnapshot() ?? null;
@@ -65,7 +50,7 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
       setHud(h);
       if (!readySent && scene.isWarm()) {
         readySent = true;
-        readyRef.current?.(); // first live frame — parent drops the overlay
+        readyRef.current?.();
       }
     };
     scene.onExit = (sx) => {
@@ -74,7 +59,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         grabSnapshot(),
       );
     };
-    // landed on a planet (F-descend or auto-land): exit into its voxel world
     scene.onDescend = (planet) => {
       snapRef.current = scene.getSnapshot();
       exitRef.current({ star: scene.getHomeStar(), planet }, grabSnapshot());
@@ -103,11 +87,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
     };
   }, []);
 
-  /**
-   * Warm re-entry: silently try to recapture the pointer (the descend/exit
-   * gesture's transient activation usually still covers it). If the browser
-   * refuses, the slim "take flight control" chip appears shortly after.
-   */
   const [live, setLive] = useState(false);
   useEffect(() => { if (hud) setLive(true); }, [hud]);
   const autoLockTried = useRef(false);
@@ -120,12 +99,11 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
       try {
         const p = c.requestPointerLock() as unknown as Promise<void> | undefined;
         if (p && typeof p.catch === 'function') p.catch(() => undefined);
-      } catch { /* the slim prompt covers this case */ }
+      } catch { }
     }, 120);
     return () => window.clearTimeout(t);
   }, [live, coldStart, locked]);
 
-  // slim resume chip for warm entries (delayed so the auto-lock wins the race)
   const wantPrompt = live && !locked && !coldStart && !hasLockedOnce;
   const [promptReady, setPromptReady] = useState(false);
   useEffect(() => {
@@ -142,10 +120,8 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
     <div className="relative h-screen w-screen overflow-hidden bg-[#03040c]">
       <canvas ref={canvasRef} className="block h-full w-full" />
 
-      {/* vignette */}
       <div className="vignette z-10" />
 
-      {/* ============================== TOP-LEFT: galaxy telemetry ============================== */}
       {hud && (
         <div className="absolute left-4 top-4 z-20 flex flex-col gap-1.5 px-font px-shadow-sm text-[9px] text-white/85 pointer-events-none">
           <div className="text-[#ffd23e] tracking-widest">GALAXY — {hud.galaxy}</div>
@@ -160,7 +136,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== TOP-RIGHT: ship + exit ============================== */}
       {hud && (
         <div className="absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
           <button
@@ -183,7 +158,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== BOTTOM-LEFT: nearest body ============================== */}
       {hud && (
         <div className="absolute left-4 bottom-4 z-20 px-font px-shadow-sm text-[9px] text-white/70 pointer-events-none leading-4">
           <div>NEAREST — <span className="text-white">{hud.nearest}</span></div>
@@ -191,7 +165,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== TARGET LOCK ============================== */}
       {hud && target && target.onScreen && (
         <div
           className="absolute z-30 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
@@ -216,7 +189,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* center reticle */}
       {locked && (
         <div className="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
           <div className="crosshair-line" style={{ width: 2, height: 6, left: -1, top: -8 }} />
@@ -226,7 +198,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== HYPERJUMP OVERLAY ============================== */}
       {hud?.warp && (
         <div className="absolute inset-0 z-40 pointer-events-none">
           {hud.warpPhase === 'flash' && (
@@ -251,7 +222,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== COLD-START TITLE (once per session) ============================== */}
       {!locked && coldStart && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
           style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.75), rgba(3,4,12,0.92))' }}>
@@ -282,7 +252,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== WARM PAUSE (after ESC mid-flight) ============================== */}
       {!locked && !coldStart && hasLockedOnce && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center overlay-in pointer-events-none"
           style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(10,16,32,0.62), rgba(3,4,12,0.86))' }}>
@@ -303,7 +272,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* ============================== WARM ENTRY: slim resume chip ============================== */}
       {wantPrompt && promptReady && (
         <div className="absolute inset-x-0 bottom-[16%] z-40 flex justify-center pointer-events-none overlay-in">
           <button
@@ -320,7 +288,6 @@ export function SpaceCanvas({ home, onExit, onReady }: SpaceCanvasProps) {
         </div>
       )}
 
-      {/* bottom hints while flying */}
       {locked && (
         <div className="absolute right-4 bottom-4 z-20 px-font px-shadow-sm text-[7px] leading-4 text-white/45 pointer-events-none text-right">
           <div>SHIFT — BOOST</div>

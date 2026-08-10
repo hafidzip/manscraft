@@ -1,8 +1,3 @@
-/**
- * Particle system — pooled InstancedMesh of tiny cubes used for
- * block-break debris and placement puffs. Colors come from each block's
- * texture palette; physics is cheap (gravity + lifetime shrink).
- */
 
 import * as THREE from 'three';
 

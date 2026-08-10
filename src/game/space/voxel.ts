@@ -8,11 +8,6 @@ export interface VoxelSpec {
   emissive?: number;
 }
 
-/**
- * Builds a single merged InstancedMesh of unit cubes from a list of voxels.
- * Each voxel gets its own per-instance color. Highly performant for
- * thousands of blocks (planets, suns, ships).
- */
 export function buildVoxels(
   voxels: VoxelSpec[],
   material?: THREE.Material
@@ -36,7 +31,6 @@ export function buildVoxels(
   return mesh;
 }
 
-/** Deterministic integer hash -> [0,1). NOT Math.random. */
 export function hash3(x: number, y: number, z: number): number {
   let h = x * 374761393 + y * 668265263 + z * 2147483647;
   h = (h ^ (h >> 13)) * 1274126177;
@@ -49,7 +43,6 @@ export function lerpColor(a: number, b: number, t: number): number {
   return ca.lerp(cb, Math.min(1, Math.max(0, t))).getHex();
 }
 
-/** Trilinear-interpolated value noise over hash3. */
 export function noise3(x: number, y: number, z: number): number {
   const xi = Math.floor(x);
   const yi = Math.floor(y);
@@ -78,12 +71,6 @@ export function noise3(x: number, y: number, z: number): number {
   return lerp(y0, y1, w);
 }
 
-// ---------------------------------------------------------------------------
-// Perlin gradient noise — zero-centered with full [-1,1] contrast, unlike
-// value noise whose interpolated corners collapse toward the midpoint.
-// Planet palettes are authored for a signed field, so terrain generation
-// rides on this. Deterministic, allocation-free, stateless.
-// ---------------------------------------------------------------------------
 
 function fade(t: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10);
@@ -145,8 +132,6 @@ export function pnoise3(x: number, y: number, z: number): number {
   );
 }
 
-/** Signed fBm over gradient noise — roughly [-1,1], the field the planet
- *  palettes are authored against. */
 export function fbm(x: number, y: number, z: number, oct: number): number {
   let sum = 0;
   let amp = 0.5;

@@ -11,9 +11,6 @@ interface P {
   maxLife: number;
 }
 
-/**
- * Shared additive particle pool used for engine exhaust and effects.
- */
 export class Particles {
   readonly points: THREE.Points;
   private pool: P[] = [];
@@ -48,17 +45,6 @@ export class Particles {
     scene.add(this.points);
   }
 
-  /**
-   * Spawn `count` particles at (x,y,z).
-   *
-   * With no `dir`, velocities are small and fully random (engine exhaust,
-   * impact sparks, etc — the original behaviour, unchanged).
-   *
-   * With `dir` supplied, velocities are biased along that direction and
-   * scaled by `speed`, with `spread` controlling the random cone width —
-   * used for the hyperjump burst so sparks streak past the ship instead of
-   * drifting like exhaust.
-   */
   burst(
     x: number,
     y: number,
@@ -100,7 +86,6 @@ export class Particles {
     for (let i = 0; i < this.max; i++) {
       const p = this.pool[i];
       if (p.life <= 0) {
-        // keep offscreen
         this.positions[i * 3 + 1] = 1e6;
         continue;
       }

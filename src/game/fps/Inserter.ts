@@ -1,23 +1,3 @@
-/**
- * Inserter — an automated item arm sitting on top of a placed machine block.
- *
- * The block itself is part of the static chunk mesh (see world/mesher.ts);
- * the ARM is a dynamic articulated rig managed here: a dark pillar, a swing
- * beam with an orange claw at the tip, and a small voxel cube for whatever it
- * is currently carrying.
- *
- * Behaviour mirrors a Factorio inserter: the arm rests over the cell BEHIND
- * (the pickup side, opposite the block's facing), scoops any grounded item
- * drop there, swings 180° over the top, and releases the item into the cell
- * IN FRONT (the drop side) — where a conveyor belt can carry it onward. The
- * swing always rotates the same way (through the top of the circle), so a
- * working inserter loops grab → swing → drop → swing back forever.
- *
- * Rigs are discovered by scanning the neighbourhood of the player (no engine
- * hooks needed: mined/blown-up blocks simply fail validation), and only the
- * nearest handful get live arms; the machine base keeps rendering at any
- * distance anyway since it is part of the chunk geometry.
- */
 import * as THREE from 'three';
 import { inserterDir, isInserter } from '../world/blocks';
 import { wrapBlock, minImageF } from '../core/constants';
@@ -25,12 +5,8 @@ import { getAtlas, blockCubeGeometry } from './textures';
 import type { ItemDropManager } from './ItemDrop';
 import type { AudioSynth } from './audio';
 
-/** minimal window onto the voxel world */
 type WorldView = { get(x: number, y: number, z: number): number };
 
-// ---------------------------------------------------------------------------
-// shared arm assets (voxel-style boxes, same material family as the blocks)
-// ---------------------------------------------------------------------------
 const pillarGeo = new THREE.BoxGeometry(0.15, 0.5, 0.15);
 pillarGeo.translate(0, 0.25, 0);
 const capGeo = new THREE.BoxGeometry(0.2, 0.1, 0.2);
@@ -49,28 +25,25 @@ const steelMat = new THREE.MeshLambertMaterial({ color: 0x6e6e78 });
 const clawMat = new THREE.MeshLambertMaterial({ color: 0xdc8c1e });
 
 interface Arm {
-  /** wrapped block coords of the inserter block */
   wx: number;
   y: number;
   wz: number;
-  /** last observed block id (re-derives facing when the block is rotated) */
   lastId: number;
   group: THREE.Group;
   swing: THREE.Group;
   tilt: THREE.Group;
   itemCube: THREE.Mesh | null;
   heldId: number;
-  /** current absolute swing angle (grows monotonically by π per half-cycle) */
   swingAngle: number;
   tiltAngle: number;
   state: 'idle' | 'dip' | 'carry' | 'release' | 'return';
   t: number;
 }
 
-const DIP_T = 0.14;       // lowering onto the item
-const CARRY_T = 0.46;     // swing across the top
-const RELEASE_T = 0.12;   // opening the claw
-const RETURN_T = 0.46;    // swinging back
+const DIP_T = 0.14;
+const CARRY_T = 0.46;
+const RELEASE_T = 0.12;
+const RETURN_T = 0.46;
 
 const SCAN_RADIUS = 26;
 const PRUNE_RADIUS = 42;
@@ -84,7 +57,6 @@ export class InserterManager {
   private pruneT = 0;
   private cubeGeoCache = new Map<number, THREE.BufferGeometry>();
   private cubeMat: THREE.MeshLambertMaterial | null = null;
-  /** cube currently in a claw — kept as a child of the arm, not the droppings */
   private readonly heldSize = 0.2;
 
   constructor(
@@ -108,7 +80,6 @@ export class InserterManager {
     return this.cubeMat;
   }
 
-  /** beam points along local +X; world direction for swing angle θ is (cosθ, -sinθ) */
   private static angleFor(dx: number, dz: number): number {
     return Math.atan2(-dz, dx);
   }
@@ -132,7 +103,7 @@ export class InserterManager {
       if ((o as THREE.Mesh).isMesh) {
         o.castShadow = true;
         o.receiveShadow = false;
-        o.frustumCulled = false; // swings wildly; never let the culler freeze it
+        o.frustumCulled = false;
       }
     });
     this.scene.add(group);
@@ -153,7 +124,6 @@ export class InserterManager {
     this.scene.remove(arm.group);
   }
 
-  /** scan the loaded cells around the player for un-tracked inserters */
   private scan(px: number, py: number, pz: number): void {
     const cx = Math.floor(px);
     const cy = Math.floor(py);
@@ -184,7 +154,6 @@ export class InserterManager {
       this.scan(px, py, pz);
     }
 
-    // prune stale entries about once a second (validation for live ones is per-frame)
     this.pruneT -= dt * this.arms.size;
     const pruneNow = this.pruneT <= 0;
     if (pruneNow) this.pruneT = this.arms.size;
@@ -195,11 +164,6 @@ export class InserterManager {
       const iz = pz + minImageF(arm.wz - pz);
       const id = this.world.get(arm.wx, arm.y, arm.wz);
 
-      // destroyed (mined / exploded → the cell reads AIR or something else)
-      // → drop the rig immediately. Unloaded chunk (-1) survives while the
-      // player is reasonably close, so arms survive hiccups in the streamer,
-      // but a far-away tracking entry is forgotten and will be rediscovered
-      // by the scanner when its chunks return.
       if (id >= 0 && !isInserter(id)) {
         this.destroyArm(arm);
         this.arms.delete(key);
@@ -211,7 +175,6 @@ export class InserterManager {
         continue;
       }
 
-      // cap live arms; distant rigs hide their rig but keep tracking
       const far = id < 0 || Math.hypot(ix - px, iz - pz) > SCAN_RADIUS || live >= MAX_ARMS;
       if (far) {
         arm.group.visible = false;
@@ -220,7 +183,6 @@ export class InserterManager {
       live++;
       arm.group.visible = true;
 
-      // rotated with the E key → re-read facing and hold the arm still
       if (id >= 0 && id !== arm.lastId) {
         arm.lastId = id;
         arm.state = 'idle';
@@ -228,7 +190,6 @@ export class InserterManager {
         const dir = inserterDir(id);
         if (dir) arm.swingAngle = InserterManager.angleFor(-dir[0], -dir[1]);
         if (arm.itemCube) {
-          // put the carried cube back as a drop at the pickup side
           const d = dir ?? [0, 0];
           this.drops.spawn(arm.heldId, new THREE.Vector3(ix + 0.5 - d[0], arm.y + 1.15, iz + 0.5 - d[1]),
             new THREE.Vector3(0, -1, 0));
@@ -284,7 +245,7 @@ export class InserterManager {
       case 'carry': {
         const k = Math.min(1, arm.t / CARRY_T);
         arm.swingAngle = rest + Math.PI * smoothstep(k);
-        tiltTarget = k < 0.5 ? 0.22 : -0.28; // up and over, then descend
+        tiltTarget = k < 0.5 ? 0.22 : -0.28;
         if (arm.itemCube) arm.itemCube.rotation.y += dt * 5;
         if (k >= 1) {
           arm.swingAngle = rest + Math.PI;
@@ -298,7 +259,6 @@ export class InserterManager {
         tiltTarget = -0.4;
         if (arm.t >= RELEASE_T) {
           if (arm.itemCube) {
-            // hand world position ≈ a beam-length along the drop direction
             const hx = ix + 0.5 + dir[0] * 0.95;
             const hz = iz + 0.5 + dir[1] * 0.95;
             this.drops.spawn(arm.heldId, new THREE.Vector3(hx, arm.y + 1.22, hz),
@@ -317,7 +277,7 @@ export class InserterManager {
         arm.swingAngle = rest + Math.PI + Math.PI * smoothstep(k);
         tiltTarget = k < 0.5 ? 0.22 : -0.12;
         if (k >= 1) {
-          arm.swingAngle = rest; // completed the full circle
+          arm.swingAngle = rest;
           arm.state = 'idle';
           arm.t = 0;
         }

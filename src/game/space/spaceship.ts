@@ -12,14 +12,8 @@ export interface FlightInput {
   boost: boolean;
 }
 
-/**
- * A spherical collider the ship should not penetrate. Used for planets
- * (surface + atmosphere) and any other large bodies.
- */
 export interface Collider {
-  /** universe-space center */
   pos: Vec3d;
-  /** total radius (planet radius + safety standoff) */
   radius: number;
 }
 
@@ -55,9 +49,6 @@ function buildInstanced(parts: Part[], material: THREE.Material): THREE.Instance
   return mesh;
 }
 
-// ---------------------------------------------------------------------------
-// voxel model (local units = blocks; nose faces -z)
-// ---------------------------------------------------------------------------
 
 const STEEL = 0x9aa4ae;
 const STEEL_HI = 0xc9d1d9;
@@ -125,12 +116,6 @@ function makeFlameTexture(): THREE.CanvasTexture {
   return t;
 }
 
-/**
- * Spaceship — a driveable voxel vehicle for OPEN SPACE.
- * Position/velocity live in universe doubles; the scene syncs its render
- * transform through the Frame each frame. 6DOF look-steered flight with
- * inertia, visual banking, engine FX and a pulse-drive boost.
- */
 export class Spaceship {
   readonly group = new THREE.Group();
   pos: Vec3d = { x: 0, y: 0, z: 0 };
@@ -139,7 +124,7 @@ export class Spaceship {
   yaw = 0;
   pitch = 0;
   private bank = 0;
-  private bobT = Math.random() * 10; // FX only, not generation
+  private bobT = Math.random() * 10;
   private exhaustCd = 0;
   private load = 0;
 
@@ -170,10 +155,6 @@ export class Spaceship {
     this.flame.position.set(0, 0.9, 3.8);
     this.group.add(this.flame);
 
-    // Bounded engine glow: distance=0 + decay=0 (the previous settings) means
-    // NO falloff at all, so the boost tint was flooding the entire scene —
-    // every planet, ring and moon in view picked up the orange color. A
-    // finite range + physical decay keeps this light local to the ship.
     this.light = new THREE.PointLight(0x7fb2ff, 2, 26, 2);
     this.light.position.set(0, 1.2, 3.2);
     this.group.add(this.light);
@@ -187,7 +168,6 @@ export class Spaceship {
     this.vel = { x: 0, y: 0, z: 0 };
   }
 
-  /** Universe -> render placement. Call after Frame.update. */
   syncRender(frame: Frame) {
     const [x, y, z] = frame.toRender(this.pos);
     this.group.position.set(x, y, z);
@@ -202,31 +182,21 @@ export class Spaceship {
     return Math.hypot(this.vel.x, this.vel.y, this.vel.z);
   }
 
-  /**
-   * Resolve penetration against every collider. Must be called BEFORE the
-   * render-position sync in each frame. Works by pushing the ship out
-   * along the collision normal and zeroing the inward velocity component,
-   * with a tiny bounce so you can "ski" off a planet at high speed.
-   */
   resolveColliders(dt: number, colliders: Iterable<Collider>) {
     for (const c of colliders) {
       const dx = this.pos.x - c.pos.x;
       const dy = this.pos.y - c.pos.y;
       const dz = this.pos.z - c.pos.z;
       const d = Math.hypot(dx, dy, dz) || 1e-6;
-      // ship is a point for collision purposes; keep a safety margin for
-      // the hull length so the ship parks just above the atmosphere
       const minR = c.radius + 8;
       if (d > minR) continue;
       const nx = dx / d;
       const ny = dy / d;
       const nz = dz / d;
-      // push out
       const push = minR - d + 0.2;
       this.pos.x += nx * push;
       this.pos.y += ny * push;
       this.pos.z += nz * push;
-      // reflect/cancel velocity along the normal (0.2 restitution)
       const vn =
         this.vel.x * nx + this.vel.y * ny + this.vel.z * nz;
       if (vn < 0) {
@@ -234,7 +204,6 @@ export class Spaceship {
         this.vel.x -= (1 + bounce) * vn * nx;
         this.vel.y -= (1 + bounce) * vn * ny;
         this.vel.z -= (1 + bounce) * vn * nz;
-        // also damp tangential velocity on contact for a soft landing
         this.vel.x *= 0.9;
         this.vel.y *= 0.9;
         this.vel.z *= 0.9;
@@ -246,7 +215,6 @@ export class Spaceship {
   update(dt: number, inp: FlightInput) {
     this.bobT += dt;
 
-    // orientation from yaw (Y), pitch (X), bank (Z)
     this.tmpQ.setFromAxisAngle(UP_AXIS, this.yaw);
     this.tmpQ2.setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.pitch);
     this.quat.copy(this.tmpQ).multiply(this.tmpQ2);
@@ -255,7 +223,6 @@ export class Spaceship {
     this.tmpQ2.setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.bank);
     this.quat.multiply(this.tmpQ2);
 
-    // thrust target in universe space
     const maxSpd = inp.boost ? BOOST_SPEED : MAX_SPEED;
     const cy = this.yaw, cp = this.pitch;
     const fx = -Math.sin(cy) * Math.cos(cp);
@@ -281,7 +248,6 @@ export class Spaceship {
     this.pos.y += this.vel.y * dt;
     this.pos.z += this.vel.z * dt;
 
-    // engine FX
     const spd = this.speed();
     const loadTarget = Math.min(1, spd / MAX_SPEED + (inp.boost ? 0.4 : 0));
     this.load += (loadTarget - this.load) * Math.min(1, 4 * dt);

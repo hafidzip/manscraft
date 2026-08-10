@@ -1,7 +1,3 @@
-/**
- * Biome system. Biomes are chosen per-column from low-frequency
- * temperature / humidity / mountain-ness noise fields.
- */
 
 import { B } from './blocks';
 
@@ -19,9 +15,7 @@ export interface BiomeDef {
   name: string;
   surface: number;
   sub: number;
-  /** rolling-hill amplitude */
   hill: number;
-  /** per-column tree probability */
   trees: number;
   tree: TreeKind;
   flowers: number;
@@ -53,7 +47,6 @@ export const BIOME_DEFS: BiomeDef[] = [
 ];
 
 export function pickBiome(temp: number, humid: number, mount: number, cont: number): Biome {
-  // cliffs & islets off the coast pick the "mountain" look for stony shores
   if (cont < -0.02) return Biome.MOUNTAINS;
   if (mount > 0.68) return temp < 0.3 ? Biome.SNOW : Biome.MOUNTAINS;
   if (temp < 0.26) return Biome.SNOW;

@@ -1,42 +1,17 @@
-/**
- * Chunk mesher. Converts a chunk's voxel data into (up to) three merged
- * BufferGeometries: opaque, alpha-cutout, and translucent water.
- *
- * Features:
- *  - hidden-face culling against neighboring chunk data
- *  - per-face directional shading (Minecraft-style: top brightest)
- *  - per-vertex ambient occlusion with flipped-quad anisotropy fix
- *  - lowered water surface + cross-quad plants
- */
 
 import * as THREE from 'three';
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, chunkIndex } from '../core/constants';
 import { tileUV } from '../core/textures';
 import { B, DEFS, isWaterId, waterHeight, waterInfo } from './blocks';
 
-/** world-space block lookup; -1 = chunk not loaded (treated as occluder) */
 export type BlockGetter = (wx: number, wy: number, wz: number) => number;
 
 interface Face {
   dir: [number, number, number];
-  corners: [number, number, number][]; // ordered TL, BL, BR, TR seen from outside
+  corners: [number, number, number][];
   shade: number;
 }
 
-// ---- Directional face shading ----
-// These vertex-colour multipliers simulate the sky-dome light distribution
-// on each face normal. They multiply on top of Lambert, so the effective
-// range must be kept tight or shadows become unrealistically dark.
-//
-// Physical reference (overcast sky, all faces lit by the hemisphere):
-//   Top    = 1.00 (full sky dome overhead)
-//   Sides  = 0.76 (roughly half the sky visible from a vertical face)
-//   Bottom = 0.62 (ground-bounce only; sky fully occluded)
-//
-// We keep a gentle variation (1.00→0.62, ratio 1.61:1) so blocks read as
-// three-dimensional without crushing the dark faces to black.  With ACES
-// even a 2:1 face-shade ratio was enough to destroy bottom-face detail;
-// Reinhard handles 2.5:1 comfortably but we err on the side of subtlety.
 const FACES: Face[] = [
   { dir: [1, 0, 0], shade: 0.76, corners: [[1, 1, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]] },
   { dir: [-1, 0, 0], shade: 0.76, corners: [[0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 1, 1]] },
@@ -46,18 +21,8 @@ const FACES: Face[] = [
   { dir: [0, 0, -1], shade: 0.70, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
 ];
 
-// ---- Ambient occlusion shade levels ----
-// AO darkens corners/crevices where light is occluded from multiple sides.
-// The range 0.68→1.0 (ratio 1.47:1) gives clear contact shadow at tight
-// block joins while avoiding the "ink-black crevice" look that ACES caused.
-// Full occlusion (3 neighbours blocking) gives 0.68, not 0.55.
 const AO_SHADE = [0.68, 0.80, 0.91, 1.0];
 
-/**
- * Flat-array index deltas for the six FACES directions, in the same order.
- * chunkIndex(x, y, z) = (y * S + z) * S + x, so x steps by 1, z by S and
- * y by S².
- */
 const NEIGHBOR_STRIDE = [1, -1, S * S, -(S * S), S, -S];
 
 interface Bucket {
@@ -65,29 +30,23 @@ interface Bucket {
   nrm: number[];
   uv: number[];
   col: number[];
-  flow: number[]; // per-vertex uv-space flow velocity (water only)
-  sway: number[]; // vec4: phase, strength, top-weight, flutter
+  flow: number[];
+  sway: number[];
   idx: number[];
   base: number;
 }
 
 const newBucket = (): Bucket => ({ pos: [], nrm: [], uv: [], col: [], flow: [], sway: [], idx: [], base: 0 });
 
-/** shared shader-time uniform for the animated water flow */
 export const WATER_TIME = { value: 0 };
-/** shared shader-time uniform for procedural grass/plant sway */
 export const GRASS_TIME = { value: 0 };
-/** camera position, so the vertex shader can distance-cull grass blades */
 export const GRASS_CAM = { value: new THREE.Vector3() };
-/** x = fade start distance, y = fully-collapsed distance (blocks) */
 export const GRASS_FADE = { value: new THREE.Vector2(26, 46) };
-/** camera yaw (radians) — drives grass blade billboard rotation */
 export const GRASS_YAW = { value: 0 };
 
 export interface ChunkGeoms {
   opaque?: THREE.BufferGeometry;
   cutout?: THREE.BufferGeometry;
-  /** leaves — split from grass so they get their own material/shader */
   foliage?: THREE.BufferGeometry;
   water?: THREE.BufferGeometry;
 }
@@ -134,24 +93,16 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         const id = data[idx];
         if (id === B.AIR) continue;
         const d = DEFS[id];
-        // Interior voxels (the overwhelming majority — only the 1-block shell
-        // of a chunk can reach into a neighbour) can read their six face
-        // neighbours straight out of `data` with constant strides, skipping
-        // the bounds-checked cross-chunk getter for every face test.
         const interior = x > 0 && x < S - 1 && z > 0 && z < S - 1 && y > 0 && y < H - 1;
 
         if (d.cross) {
           if (id === B.TALLGRASS) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z);
           else if (id === B.TORCH) {
-            // Detect which face the torch is leaning on — Minecraft attaches torches
-            // either to the floor (solid below) or to a side wall (solid horizontally).
-            // This gives us the visual offset and the flame anchor for lighting.
             const below = localGet(x, y - 1, z);
             let supX = 0, supY = -1, supZ = 0;
             if (below !== -1 && below !== B.AIR && DEFS[below]?.solid) {
               supY = -1;
             } else {
-              // scan walls: +X, -X, +Z, -Z
               const e = localGet(x + 1, y, z);
               const w = localGet(x - 1, y, z);
               const s = localGet(x, y, z + 1);
@@ -161,7 +112,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
               else if (s !== -1 && s !== B.AIR && DEFS[s]?.solid) { supX = 0; supY = 0; supZ = 1; }
               else if (n !== -1 && n !== B.AIR && DEFS[n]?.solid) { supX = 0; supY = 0; supZ = -1; }
               else {
-                // floating fallback — treat as floor so it still renders instead of vanishing
                 supX = 0; supY = -1; supZ = 0;
               }
             }
@@ -172,15 +122,9 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         }
 
         const isWater = !!d.water;
-        // Leaves get their own bucket (and later material/shader): static
-        // alpha-cutout cubes without the grass sway/billboard machinery.
         const isFoliage = id === B.LEAVES;
         const bucket = isWater ? waterB : isFoliage ? foliageB : d.cutout ? cutoutB : opaqueB;
 
-        // ---- water surface + flow ----
-        // Vanilla-style corner heights, symmetric per corner so adjacent
-        // cells agree (seamless), with "air-over-water" transfer so surfaces
-        // dip where water pours over a lip instead of drooping like rubber.
         let cornerH: [number, number, number, number] = [1, 1, 1, 1];
         let flowX = 0;
         let flowZ = 0;
@@ -230,8 +174,6 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
             }
           }
 
-          // flow direction: toward the pour-over edge, or toward the lowest
-          // neighboring level; pools stay still
           const belowId = localGet(x, y - 1, z);
           const belowReplaceable = belowId === B.AIR || (belowId !== -1 && DEFS[belowId].cross === true);
           let bestDir: [number, number] | null = null;
@@ -241,9 +183,9 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
             const ni = waterInfo(nid);
             let score = -1;
             if (belowReplaceable && (nid === B.AIR || (nid !== -1 && DEFS[nid].cross === true))) {
-              score = 3; // pours over this edge: strongest pull
+              score = 3;
             } else if (ni && !ni.falling && ni.level > info.level) {
-              score = 2 - (ni.level - info.level) * 0.1; // downhill
+              score = 2 - (ni.level - info.level) * 0.1;
             }
             if (score > bestScore) {
               bestScore = score;
@@ -274,22 +216,20 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
 
           const tile = f.dir[1] === 1 ? d.top : f.dir[1] === -1 ? d.bottom : d.side;
           const [u0, v0, u1, v1] = tileUV(tile);
-          // water uses its own full-face standalone texture (not atlas space)
           const us = isWater ? [0, 0, 1, 1] : [u0, u0, u1, u1];
           const vs = isWater ? [1, 0, 0, 1] : [v1, v0, v0, v1];
 
           const doAO = !isWater && !d.cutout && !isFoliage;
-          // map world flow (fx,fz) to this face's uv axes; falling water rushes down
           let fu = 0;
           let fv = 0;
           if (isWater) {
             fv = falling ? -0.55 : 0;
             switch (fi) {
-              case 2: case 3: fu = flowX; fv += flowZ; break; // top/bottom: u∝x, v∝z
-              case 0: fu = -flowZ; break; // +x face: u∝-z
-              case 1: fu = flowZ; break; // -x face: u∝+z
-              case 4: fu = flowX; break; // +z face: u∝+x
-              case 5: fu = -flowX; break; // -z face: u∝-x
+              case 2: case 3: fu = flowX; fv += flowZ; break;
+              case 0: fu = -flowZ; break;
+              case 1: fu = flowZ; break;
+              case 4: fu = flowX; break;
+              case 5: fu = -flowX; break;
             }
           }
           const t1 = f.dir[0] !== 0 ? 1 : 0;
@@ -349,14 +289,10 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
   };
 }
 
-/** two diagonal quads (plants) — full-bright, double-sided rendering */
 function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number, swayStrength = 0, wx = x, wz = z): void {
   const m = 0.15;
   const [u0, v0, u1, v1] = tileUV(tile);
   const phase = hashPlant(wx, y, wz, 11) * Math.PI * 2;
-  // Same upward normal bias as tallgrass so flower quads respond to sun and
-  // shadow the same way the ground block they grow from does. Without this
-  // bloom clusters look like glowing patches when the terrain is shadowed.
   const upBias = 0.78;
   const horiz = 1 - upBias;
   const n1x = -0.707 * horiz, n1z = 0.707 * horiz;
@@ -379,8 +315,6 @@ function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number
     );
     for (let i = 0; i < 4; i++) bucket.nrm.push(q.n[0], q.n[1], q.n[2]);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
-    // Root (verts 0, 3) darker so stems blend into the ground they emerge
-    // from; petals up top stay at full brightness.
     const root = 0.62, tip = 0.98;
     bucket.col.push(
       root, root, root,
@@ -399,15 +333,6 @@ function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number
   }
 }
 
-/**
- * Torch: two thin crossed quads. Floor torches stand upright in the centre;
- * wall torches cling to their support side and lean outward like in Minecraft,
- * so they never float in the centre of air. Full-bright vertex colour makes
- * the flame emissive even deep underground — the atlas alpha cutout gives it
- * the flame + shaft silhouette.
- *
- * supX/supY/supZ = offset to the solid support cell (e.g. +1,0,0 = attached to east).
- */
 function emitTorch(
   bucket: Bucket, x: number, y: number, z: number, tile: number,
   supX = 0, supY = -1, supZ = 0,
@@ -418,32 +343,26 @@ function emitTorch(
   let bx: number, bz: number, tx: number, tz: number, bottom: number, top: number;
 
   if (supY === -1) {
-    // floor torch — upright in the middle
     bx = x + 0.5; bz = z + 0.5;
     tx = bx; tz = bz;
     bottom = y + 0.06; top = y + 0.72;
   } else if (supX === 1) {
-    // support to east (+X): torch on east wall, leaning west
     bx = x + 1 - 0.12; bz = z + 0.5;
     tx = bx - 0.26;    tz = bz;
     bottom = y + 0.20; top = y + 0.82;
   } else if (supX === -1) {
-    // support to west (-X)
     bx = x + 0.12;     bz = z + 0.5;
     tx = bx + 0.26;    tz = bz;
     bottom = y + 0.20; top = y + 0.82;
   } else if (supZ === 1) {
-    // support to south (+Z)
     bx = x + 0.5;      bz = z + 1 - 0.12;
     tx = bx;           tz = bz - 0.26;
     bottom = y + 0.20; top = y + 0.82;
   } else if (supZ === -1) {
-    // support to north (-Z)
     bx = x + 0.5;      bz = z + 0.12;
     tx = bx;           tz = bz + 0.26;
     bottom = y + 0.20; top = y + 0.82;
   } else {
-    // fallback
     bx = x + 0.5; bz = z + 0.5; tx = bx; tz = bz; bottom = y + 0.06; top = y + 0.72;
   }
 
@@ -463,10 +382,7 @@ function emitTorch(
     );
     for (let i = 0; i < 4; i++) bucket.nrm.push(q.n[0], q.n[1], q.n[2]);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
-    // full-bright vertex colour (texture is the sole source of shade)
     for (let i = 0; i < 4; i++) bucket.col.push(1, 1, 1);
-    // aSway.y = -1 marks this as an UNLIT torch for the cutout shader
-    // (grass uses aSway.y > 0 for wind strength, so -1 is unambiguous)
     for (let i = 0; i < 4; i++) bucket.sway.push(0, -1, 0, 0);
     bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
     bucket.base += 4;
@@ -481,17 +397,9 @@ function hashPlant(x: number, y: number, z: number, salt: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-/**
- * Procedural tall grass clump: each block grows 4-7 independent blades with
- * unique height/width/angle/lean. The atlas alpha still provides blade cutouts,
- * but the geometry silhouette now differs block-to-block, and each top vertex
- * carries its own sway phase so nearby clumps never move in lockstep.
- */
 function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number): void {
   const [u0, v0, u1, v1] = tileUV(tile);
   const seed = hashPlant(wx, y, wz, 101);
-  // 5-7 blades: packed tight enough to form a solid clump once blades are wider,
-  // but avoiding the 8-12 extra quads per block that a larger count would spend.
   const blades = 5 + Math.floor(seed * 3);
   for (let i = 0; i < blades; i++) {
     const r0 = hashPlant(wx, y, wz, 200 + i * 7);
@@ -511,10 +419,6 @@ function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: nu
     const lz = Math.sin(ang + Math.PI / 2) * lean;
     const phase = hashPlant(wx, y, wz, 206 + i * 7) * Math.PI * 2;
     const strength = 0.07 + hashPlant(wx, y, wz, 207 + i * 7) * 0.06;
-    // Tip stays close to the grass-top surface colour; the root is darker
-    // so the base of every blade visually blends into the ground it grows
-    // from instead of sticking out as a bright line. The gradient also
-    // gives each blade a natural sense of depth.
     const tipShade  = 0.96 + hashPlant(wx, y, wz, 208 + i * 7) * 0.16;
     const rootShade = tipShade * 0.62;
     const vbase = bucket.base;
@@ -525,25 +429,14 @@ function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: nu
       cx + dx + lx, y + h * (0.9 + r1 * 0.14), cz + dz + lz,
       cx + dx, y, cz + dz,
     );
-    // For grass blades the vertex shader overrides the normal to pure world-up
-    // (0,1,0) so lighting matches the ground face. We repurpose the normal
-    // attribute to carry the blade's local centre and original angle, which the
-    // shader uses to billboard-rotate each blade toward the camera.
-    //   normal.x = blade centre X (chunk-local)
-    //   normal.y = blade centre Z (chunk-local)  — NOT the usual Y component!
-    //   normal.z = blade original angle + 100.0 (offset marks this as grass
-    //              data rather than a real normal; the shader checks z > 10)
     for (let k = 0; k < 4; k++) bucket.nrm.push(cx, cz, ang + 100.0);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
-    // Root (vertices 0, 3) darker; tip (1, 2) at full tipShade.
     bucket.col.push(
       rootShade, rootShade, rootShade,
       tipShade,  tipShade,  tipShade,
       tipShade,  tipShade,  tipShade,
       rootShade, rootShade, rootShade,
     );
-    // w carries the blade height so the vertex shader can collapse distant
-    // blades back into the ground (cheap LOD without re-meshing chunks).
     bucket.sway.push(
       phase, strength, 0, h,
       phase, strength, 1, h,

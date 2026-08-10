@@ -1,7 +1,3 @@
-// ---------------------------------------------------------------------------
-// Planet type palettes. Every planet class defines its own elevation ramp,
-// pole colour, atmosphere tint, ring tint, clouds and moon style.
-// ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
 import { Rng, derive } from './rng';
@@ -46,7 +42,6 @@ export interface PlanetPalette {
   name: string;
   emoji: string;
   tagline: string;
-  /** elevation stops: [h, [r,g,b]] with h in ~[-1,1] */
   stops: Array<[number, [number, number, number]]>;
   pole: [number, number, number];
   poleAmount: number;
@@ -343,7 +338,6 @@ export const MOON_STOPS: Record<MoonStyle, Array<[number, [number, number, numbe
   ],
 };
 
-/** Sample a palette color at elevation `h` and abs-latitude `lat` into `out`. */
 export function biomeColorInto(
   h: number,
   lat: number,
@@ -397,8 +391,7 @@ function smoothstep(a: number, b: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Deterministically pick a planet type from a seed. */
 export function pickPlanetType(seed: bigint): PlanetType {
-  const r = new Rng(derive(seed, 0x54595045)); // "TYPE"
+  const r = new Rng(derive(seed, 0x54595045));
   return PLANET_TYPES[Math.floor(r.next() * PLANET_TYPES.length)];
 }

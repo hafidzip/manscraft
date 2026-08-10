@@ -34,82 +34,43 @@ export interface HudState {
   distance: number;
   inSystem: boolean;
   warp: boolean;
-  /** Fine-grained hyperjump stage so the UI can animate charge -> flash -> arrive. */
   warpPhase: WarpPhase;
-  /** 0..1 progress within the current warp phase. */
   warpProgress: number;
-  /** What kind of body the jump is headed for, for HUD copy. */
   warpTargetKind: TargetKind | null;
   warpTargetName: string;
   target: TargetLock | null;
 }
 
-/**
- * Only stars closer than this get a full planet system built. Planets are by
- * far the most expensive objects, so constructing them for every streamed
- * star is what tanked the frame rate.
- */
 const PLANET_BUILD_DIST = 2800;
 
-/** Distance at which the HUD/target-lock considers you "inside" a system. */
 const IN_SYSTEM_DIST = 1400;
 
-/** Orbital spawn altitude, as a multiple of the planet's radius. */
 const ORBIT_SPAWN_MUL = 4;
 
-/**
- * Fixed (never random) unit axis for orbital insertion. Using a constant
- * direction is what makes "leave the voxel world, arrive in orbit" render
- * identically every single time — same planet face, same lighting, same
- * silhouette. Slightly above the orbital plane so the planet reads as a
- * sphere rather than an edge-on disc.
- */
 const ORBIT_SPAWN_AXIS = (() => {
   const a = { x: 0.82, y: 0.34, z: 0.46 };
   const len = Math.hypot(a.x, a.y, a.z);
   return { x: a.x / len, y: a.y / len, z: a.z / len };
 })();
 
-/**
- * How close (in planet radii above the surface) you must be for a planet to
- * count as the body you are exiting/landing onto when no lock is held.
- */
 const EXIT_CAPTURE_MUL = 8;
 
-/** Seconds to keep trying to re-snap onto a not-yet-built spawn planet. */
 const ORBIT_SNAP_TIMEOUT = 5;
 
-/**
- * Distance (in planet radii above the surface) at which the ship "lands":
- * the scene hands off to the voxel world for that planet. Inside this range
- * the atmosphere winks out and the planet becomes the world you walk on.
- */
 const AUTO_LAND_MUL = 1.6;
 
-/** Descriptor handed to the scene when arriving from the voxel world. */
 export interface SpaceEntry {
-  /** System to arrive in. Defaults to the deterministic home star. */
   star: StarSpec;
-  /** Body to enter orbit around. Defaults to planet index 0 of `star`. */
   planet?: PlanetSpec;
-  /** Set false to arrive at the star itself (classic free-space spawn). */
   orbit?: boolean;
 }
 
-/** Descriptor handed back to the app when leaving space (LAND / dispose). */
 export interface SpaceExit {
-  /** System the ship was in when it left. */
   star: StarSpec;
-  /** The planet under the ship — locked target, else nearest captured body. */
   planet: PlanetSpec | null;
-  /** True when that planet is the home world the voxel game launched from. */
   isHome: boolean;
 }
 
-/**
- * Anything that can be orbited: a live PlanetBody, or a plain descriptor
- * computed before the body exists.
- */
 export interface OrbitTarget {
   universe: Vec3d;
   radius?: number;
@@ -131,10 +92,6 @@ export interface TargetLock {
   locked: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// LRU Cache: manages mesh assets so memory load stays flat and we don't
-// instantiate duplicates during rapid streaming.
-// ---------------------------------------------------------------------------
 
 interface CachedBody {
   obj: { group: THREE.Group; dispose?: () => void };
@@ -165,7 +122,7 @@ class BodyCache {
     while (this.map.size > this.max) {
       let oldest: CachedBody | null = null;
       for (const e of this.map.values()) {
-        if (e.obj.group.parent) continue; // skip if mounted in scene
+        if (e.obj.group.parent) continue;
         if (!oldest || e.last < oldest.last) oldest = e;
       }
       if (!oldest) return;
@@ -183,7 +140,6 @@ class BodyCache {
   }
 }
 
-// ---------------------------------------------------------------------------
 
 export class SpaceScene {
   private renderer: THREE.WebGLRenderer;
@@ -197,47 +153,28 @@ export class SpaceScene {
   private starfield: THREE.Points;
   private starLight = new THREE.PointLight(0xfff4e8, 0, 0, 0);
 
-  // Dynamic distance-based mounts for all streamed stars
   private streamedPlanets = new Map<string, PlanetBody[]>();
   private streamedStarBodies = new Map<string, StarBody>();
 
   private jumpCount = 0;
 
-  // ---- home / entry / exit descriptors ------------------------------------
-  /** The system this scene was entered through. */
   private entryStar: StarSpec;
-  /** Planet index 0 of the entry star — the voxel world's home planet. */
   private homePlanetSpec: PlanetSpec;
-  /**
-   * Orbital spawn is computed before any PlanetBody exists, so we re-snap
-   * onto the real body the first frame it is built. Guarantees the framing
-   * is exact no matter what orbital phase the body initialises at.
-   */
   private pendingOrbit: PlanetSpec | null = null;
   private pendingOrbitT = 0;
-  /** Skip the chase-camera lerp for one frame after a teleport. */
   private camSnap = false;
-  /** Nearest planet this frame, for exit capture when nothing is locked. */
   private nearPlanet: PlanetBody | null = null;
   private nearPlanetSurfaceD = Infinity;
-  /** Last planet a target lock actually engaged on (for exit fallback). */
   private lastLockedPlanet: PlanetBody | null = null;
   private currentStar: StarSpec | null = null;
   private lastExit: SpaceExit | null = null;
 
-  /** Fired once when the scene is torn down, carrying the body you left on. */
   onExit?: (exit: SpaceExit) => void;
 
-  /** Fired when the ship lands on a planet (auto-close or F descend). */
   onDescend?: (planet: PlanetSpec) => void;
 
   private landed = false;
 
-  // ---- hyperjump state machine -------------------------------------------
-  // idle -> charge (engines flare, FOV tightens, controls freeze) ->
-  // flash (screen whites out, the instant teleport happens here so the
-  // position swap is fully hidden) -> arrive (FOV eases back, a burst of
-  // fast sparks streaks past to sell "just exited hyperspace") -> idle.
   private warpPhase: WarpPhase = 'idle';
   private warpT = 0;
   private warpKind: TargetKind | null = null;
@@ -248,7 +185,6 @@ export class SpaceScene {
   private static readonly WARP_FLASH_DUR = 0.16;
   private static readonly WARP_ARRIVE_DUR = 0.75;
 
-  // target-lock state
   private lockStar: StarSpec | null = null;
   private lockPlanet: PlanetBody | null = null;
   private lockStrength = 0;
@@ -273,14 +209,11 @@ export class SpaceScene {
   private clock = new THREE.Clock();
   private raf = 0;
 
-  /** rolling snapshot of the last rendered frame (seamless scene handoff) */
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
 
   onHud?: (s: HudState) => void;
 
-  /** Initial entry is ready only after its planet assets have finished their
-   * queued build steps. Later sectors remain streamed under a frame budget. */
   isWarm(): boolean {
     if (this.pendingOrbit) return false;
     for (const planets of this.streamedPlanets.values()) {
@@ -296,9 +229,6 @@ export class SpaceScene {
       powerPreference: 'high-performance',
       logarithmicDepthBuffer: true,
     });
-    // Cap below 2x — this scene is fill-rate bound (additive atmospheres,
-    // sprites, particles), so 4x the pixels of a retina buffer is the single
-    // most expensive thing we can do for almost no visual gain.
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x03040c, 1);
@@ -324,17 +254,11 @@ export class SpaceScene {
 
     this.particles = new Particles(this.scene);
     this.ship = new Spaceship(this.scene, this.particles);
-    // Larger cache so re-visited planets don't rebuild every fly-by.
     this.cache = new BodyCache(48, this.scene);
     this.streamer = new SectorStreamer(this.scene);
 
     this.bindEvents();
 
-    // ---- entry ------------------------------------------------------------
-    // No descriptor? Fall back to the deterministic home star, which is
-    // findNearestPopulated(galaxyCoreSector(0,0,0)) — the same system the
-    // voxel world is carved out of, so the universe is consistent even when
-    // space is opened cold.
     this.entryStar = entry?.star ?? homeStar();
     this.homePlanetSpec = entry?.planet ?? planetSpec(this.entryStar.seed, 0);
 
@@ -392,18 +316,14 @@ export class SpaceScene {
     }
   };
 
-  /** Shared placement: teleport, snap frame origin, warm the streamer. */
   private placeShip(x: number, y: number, z: number, yaw: number, pitch = 0, aim?: Vec3d) {
     this.ship.place(x, y, z);
     if (aim) {
-      // aim AT the planet: forward = -(planet - ship), yaw from atan2(-dx,-dz)
       const dx = aim.x - x;
       const dy = aim.y - y;
       const dz = aim.z - z;
       const len = Math.hypot(dx, dy, dz) || 1;
       this.ship.yaw = Math.atan2(-dx, -dz);
-      // pitch: positive = up (standard FPS/flight look convention used by
-      // onMouse: pitch -= movementY). Clamp to the same ±1.3 as input.
       this.ship.pitch = THREE.MathUtils.clamp(Math.asin(-dy / len), -1.3, 1.3);
     } else {
       this.ship.yaw = yaw;
@@ -429,12 +349,6 @@ export class SpaceScene {
     );
   }
 
-  /**
-   * Insert the ship into a stable orbit around a body — used when arriving
-   * from the voxel world, so the planet you just left is the planet right in
-   * front of you. The offset direction is a fixed deterministic axis (not
-   * random), so the same voxel world always produces the same orbital view.
-   */
   private spawnInOrbit(target: OrbitTarget) {
     this.landed = false;
     const cx = target.universe.x;
@@ -452,43 +366,29 @@ export class SpaceScene {
     );
   }
 
-  /** The planet index 0 of the entry star (the voxel world's home). */
   getHomePlanet(): PlanetSpec {
     return this.homePlanetSpec;
   }
 
-  /** The star this scene was entered through (the home star by default). */
   getHomeStar(): StarSpec {
     return this.entryStar;
   }
 
-  /** The planet currently locked / under the ship, or null in deep space. */
   getLockedPlanet(): PlanetBody | null {
     return this.lockPlanet;
   }
 
-  /**
-   * Land on a planet: hand off to the voxel world immediately. Used by the
-   * F-descend action and the close-range auto-land.
-   */
   private descendTo(p: PlanetBody) {
     if (this.landed) return;
     this.landed = true;
     this.onDescend?.(p.spec);
   }
 
-  /**
-   * Arms the hyperjump — or, when a planet is locked, DESCENDS onto it.
-   * The actual teleport is deferred until the charge phase completes (see
-   * updateWarp) so the position swap always happens behind the screen flash
-   * — never a visible pop mid-flight.
-   */
   private doJump() {
     if (this.warpPhase !== 'idle') return;
     if (this.lockStrength <= 0.55) return;
 
     if (this.lockPlanet) {
-      // F on a locked planet = descend onto it (land), not orbit-drop
       const p = this.lockPlanet;
       this.descendTo(p);
       this.lockPlanet = null;
@@ -522,8 +422,6 @@ export class SpaceScene {
   private beginWarp() {
     this.warpPhase = 'charge';
     this.warpT = 0;
-    // Cut thrust input immediately so the ship holds roughly still while
-    // engines flare — mouse-look stays live, it just doesn't fly anywhere.
     this.input.forward = false;
     this.input.back = false;
     this.input.left = false;
@@ -532,22 +430,16 @@ export class SpaceScene {
     this.input.down = false;
   }
 
-  /**
-   * Drives the three-stage hyperjump sequence. Called once per frame from
-   * the render loop, always — cheap no-op while idle.
-   */
   private updateWarp(dt: number) {
     if (this.warpPhase === 'idle') return;
     this.warpT += dt;
 
     if (this.warpPhase === 'charge') {
       const t = Math.min(1, this.warpT / SpaceScene.WARP_CHARGE_DUR);
-      // Ease-in dolly zoom — tightens the FOV to build tension.
       const ease = t * t;
       this.camera.fov = THREE.MathUtils.lerp(this.baseFov, this.baseFov - 20, ease);
       this.camera.updateProjectionMatrix();
 
-      // Sparks drawing inward toward the ship, converging as the charge builds.
       if (Math.random() < 0.5 + t * 0.4) {
         const a = Math.random() * Math.PI * 2;
         const r = 5 + Math.random() * 5;
@@ -568,8 +460,6 @@ export class SpaceScene {
       }
 
       if (t >= 1) {
-        // Teleport happens exactly at the moment the screen goes white —
-        // the flash phase fully hides the position swap.
         this.warpAction?.();
         this.warpAction = null;
         this.warpPhase = 'flash';
@@ -581,8 +471,6 @@ export class SpaceScene {
 
     if (this.warpPhase === 'flash') {
       const t = Math.min(1, this.warpT / SpaceScene.WARP_FLASH_DUR);
-      // Snap wide for a burst of "speed", eased so the flash phase itself
-      // still feels like part of one continuous motion.
       this.camera.fov = THREE.MathUtils.lerp(this.baseFov - 20, this.baseFov + 34, t);
       this.camera.updateProjectionMatrix();
       if (t >= 1) {
@@ -592,9 +480,8 @@ export class SpaceScene {
       return;
     }
 
-    // arrive
     const t = Math.min(1, this.warpT / SpaceScene.WARP_ARRIVE_DUR);
-    const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic settle
+    const ease = 1 - Math.pow(1 - t, 3);
     this.camera.fov = THREE.MathUtils.lerp(this.baseFov + 34, this.baseFov, ease);
     this.camera.updateProjectionMatrix();
     if (t >= 1) {
@@ -606,11 +493,6 @@ export class SpaceScene {
     }
   }
 
-  /**
-   * Radial burst of fast, bright sparks streaking backward past the ship —
-   * the visual "you just exited hyperspace" beat, fired the instant the
-   * teleport lands.
-   */
   private spawnWarpBurst() {
     const [rx, ry, rz] = this.frame.toRender(this.ship.pos);
     this.ship.forward(this.tmpV);
@@ -637,7 +519,6 @@ export class SpaceScene {
     const fx = this.tmpV.x, fy = this.tmpV.y, fz = this.tmpV.z;
     const CONE = 0.985;
 
-    // Is there a star within "system distance"? (reuses the loop's scan)
     const inSystem = near && near.dist < IN_SYSTEM_DIST;
     const curKey = inSystem ? near!.entry.key : '';
 
@@ -646,7 +527,6 @@ export class SpaceScene {
     let bestStarDist = 0;
 
     for (const e of this.streamer.stars) {
-      // Exclude the parent star if we are inside its captured system boundary
       if (inSystem && e.key === curKey) continue;
       const dx = e.star.pos.x - this.ship.pos.x;
       const dy = e.star.pos.y - this.ship.pos.y;
@@ -661,7 +541,6 @@ export class SpaceScene {
       }
     }
 
-    // Only search current-system planets for lock when in-system
     let bestPlanet: PlanetBody | null = null;
     let bestPlanetDot = -1;
     let bestPlanetDist = 0;
@@ -759,14 +638,8 @@ export class SpaceScene {
     };
   }
 
-  /**
-   * Pop build steps from every resident planet, sorted by distance so the
-   * planets you can actually see finish first. Hard budget in milliseconds
-   * keeps the frame from blowing out even on a huge back-log after warp.
-   */
   private drainBuildQueue(budgetMs: number) {
     const deadline = performance.now() + budgetMs;
-    // gather pending planets with distance-sqr for cheap sorting
     const pending: Array<{ p: PlanetBody; d: number }> = [];
     for (const planets of this.streamedPlanets.values()) {
       for (const p of planets) {
@@ -779,7 +652,6 @@ export class SpaceScene {
     }
     if (pending.length === 0) return;
     pending.sort((a, b) => a.d - b.d);
-    // round-robin one step per planet per pass, respecting the deadline
     while (performance.now() < deadline) {
       let progress = false;
       for (const item of pending) {
@@ -802,12 +674,6 @@ export class SpaceScene {
     return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
   }
 
-  /**
-   * Blit the just-rendered frame into a small offscreen canvas every ~250 ms
-   * (same task as the render, so the WebGL bitmap is guaranteed valid). The
-   * app layer grabs this on descend/exit so the last frame stays on screen
-   * while the voxel world boots — no black loading cut.
-   */
   private captureSnapshot(dt: number): void {
     this.snapT -= dt;
     if (this.snapT > 0) return;
@@ -825,7 +691,6 @@ export class SpaceScene {
     this.snapCanvas.getContext('2d')?.drawImage(src, 0, 0, w, h);
   }
 
-  /** The last captured frame, for the seamless space → planet handoff. */
   getSnapshot(): HTMLCanvasElement | null {
     return this.snapCanvas;
   }
@@ -839,7 +704,6 @@ export class SpaceScene {
     this.raf = requestAnimationFrame(this.loop);
     const dt = Math.min(0.05, this.clock.getDelta());
 
-    // ---- pending orbital spawn: re-snap once the real PlanetBody exists ----
     if (this.pendingOrbit) {
       this.pendingOrbitT += dt;
       let done = false;
@@ -847,8 +711,6 @@ export class SpaceScene {
         for (const p of planets) {
           if (p.spec.seed === this.pendingOrbit!.seed) {
             this.pendingOrbit = null;
-            // place BEFORE the frame rebase using the body's live universe,
-            // so the frame origin is exact for this frame
             this.spawnInOrbit(p);
             done = true;
             break;
@@ -857,32 +719,25 @@ export class SpaceScene {
         if (done) break;
       }
       if (this.pendingOrbit && this.pendingOrbitT > ORBIT_SNAP_TIMEOUT) {
-        this.pendingOrbit = null; // give up; ship stays wherever it is
+        this.pendingOrbit = null;
       }
     }
 
     this.updateWarp(dt);
 
-    // During charge/flash the ship holds still with engines forced to full
-    // burn (reuses the existing boost VFX, now safely bounded to the ship —
-    // see the PointLight fix in spaceship.ts) while ignoring any stray
-    // thrust key the player is still holding.
     const flying = this.warpPhase === 'charge' || this.warpPhase === 'flash';
     const shipInput: FlightInput = flying
       ? { forward: false, back: false, left: false, right: false, up: false, down: false, boost: true }
       : this.input;
     this.ship.update(dt, shipInput);
 
-    // ---- infinite streaming: new sectors materialise as you fly ----
     this.streamer.update(this.ship.pos);
 
-    // Dynamic capture / release of voxel stars and planets based purely on distance
     const activeKeys = new Set<string>();
     for (const e of this.streamer.stars) {
       activeKeys.add(e.key);
       const dist = vdist(this.ship.pos, e.star.pos);
 
-      // --- 1. Manage Star Voxel Mesh vs Sprite ---
       const starVoxelRange = e.star.radius * 40;
       const isStarVoxel = dist < starVoxelRange;
       const hasStarBody = this.streamedStarBodies.has(e.key);
@@ -901,9 +756,6 @@ export class SpaceScene {
         e.sprite.visible = true;
       }
 
-      // --- 2. Manage Planets for this Star ---
-      // Only build planet systems for stars we are actually near. Building
-      // them for every streamed star (hundreds) is what made this heavy.
       const wantPlanets = dist < PLANET_BUILD_DIST;
       const hasPlanets = this.streamedPlanets.has(e.key);
       if (wantPlanets && !hasPlanets) {
@@ -927,7 +779,6 @@ export class SpaceScene {
       }
     }
 
-    // --- 3. Clean up unstreamed systems ---
     for (const key of this.streamedPlanets.keys()) {
       if (!activeKeys.has(key)) {
         const planets = this.streamedPlanets.get(key);
@@ -950,7 +801,6 @@ export class SpaceScene {
       }
     }
 
-    // rebase render frame onto the chase camera
     this.tmpV.set(0, 3.2, 12).applyQuaternion(this.ship.quat);
     const camU = v3(
       this.ship.pos.x + this.tmpV.x,
@@ -959,13 +809,11 @@ export class SpaceScene {
     );
     this.frame.update(camU);
 
-    // streamed star sprites
     for (const e of this.streamer.stars) {
       const [x, y, z] = this.frame.toRender(e.star.pos);
       e.sprite.position.set(x, y, z);
     }
 
-    // primary light from the nearest star, captured or not
     const near = this.streamer.nearest(this.ship.pos);
     this.currentStar = near && near.dist < IN_SYSTEM_DIST ? near.entry.star : null;
     if (near) {
@@ -978,22 +826,18 @@ export class SpaceScene {
       this.starLight.intensity = 0;
     }
 
-    // ---- update all active voxel star bodies ----
     for (const body of this.streamedStarBodies.values()) {
       const [x, y, z] = this.frame.toRender(body.spec.pos);
       body.group.position.set(x, y, z);
       body.update(dt);
     }
 
-    // ---- update all active planets across all systems ----
-    // Drawing-buffer height keeps the pixel-size LOD correct on HiDPI screens.
     const viewportH = this.renderer.domElement.height;
     const sunDirTmp = new THREE.Vector3();
     const colliders: Array<{ pos: Vec3d; radius: number }> = [];
 
     let nearestPlanet: PlanetBody | null = null;
     let minPlanetD = Infinity;
-    // reset exit-capture tracking each frame
     this.nearPlanet = null;
     this.nearPlanetSurfaceD = Infinity;
 
@@ -1009,8 +853,6 @@ export class SpaceScene {
         p.group.position.set(x, y, z);
 
         const dist = vdist(this.ship.pos, p.universe);
-        // Visibility is now decided purely by projected pixel size inside
-        // the planet's own LOD pass, so this only gates the spawn fade.
         p.setVoxelVisible(true);
         p.updateFade(dt);
 
@@ -1025,7 +867,6 @@ export class SpaceScene {
           minPlanetD = dist - p.spec.radius;
           nearestPlanet = p;
         }
-        // exit capture: closest planet within capture range
         if (dist - p.spec.radius < this.nearPlanetSurfaceD) {
           this.nearPlanetSurfaceD = dist - p.spec.radius;
           this.nearPlanet = p;
@@ -1037,13 +878,11 @@ export class SpaceScene {
       }
     }
 
-    // Include any close voxel stars as colliders
     for (const body of this.streamedStarBodies.values()) {
       colliders.push({ pos: body.spec.pos, radius: body.spec.radius });
     }
     this.ship.resolveColliders(dt, colliders);
 
-    // ---- auto-land: inside the atmosphere band -> descend onto the planet ----
     if (
       !this.landed &&
       this.nearPlanet &&
@@ -1052,7 +891,6 @@ export class SpaceScene {
       this.descendTo(this.nearPlanet);
     }
 
-    // ship + chase camera in render space
     this.ship.syncRender(this.frame);
     const [crx, cry, crz] = this.frame.toRender(camU);
     this.ship.forward(this.tmpV);
@@ -1063,7 +901,6 @@ export class SpaceScene {
     );
     const [lx2, ly2, lz2] = this.frame.toRender(lookU);
     if (this.camSnap) {
-      // teleport frames skip the lerp so the view never smears
       this.camPos.set(crx, cry, crz);
       this.camLook.set(lx2, ly2, lz2);
       this.camSnap = false;
@@ -1078,23 +915,13 @@ export class SpaceScene {
 
     this.particles.update(dt);
 
-    // ---- amortized planet construction ---------------------------------
-    // The scene drains each planet's build queue under a strict per-frame
-    // time budget. This is the key optimization that eliminates freeze
-    // frames on both arrival in a new sector and hyper-jumps: instead of
-    // building 5 LODs + clouds + rings + moons synchronously in a
-    // constructor spike, work is spread over the next several frames while
-    // the coarsest LOD is drawn immediately.
-    this.drainBuildQueue(4 /* ms */);
+    this.drainBuildQueue(4);
 
-    // ---- target lock (needs the up-to-date camera projection) ----
     const target = this.computeTarget(dt, near);
 
-    // ---- HUD ----
     const sec = this.streamer.sector;
     const gal = galaxyOfSector(sec.x, sec.y, sec.z);
     
-    // Nearest body for telemetry
     const inSystem = near && near.dist < IN_SYSTEM_DIST;
     const activeStar = inSystem ? near.entry.star : null;
     
@@ -1136,17 +963,9 @@ export class SpaceScene {
 
     this.renderer.render(this.scene, this.camera);
 
-    // keep a fresh frame grab ready for the seamless planet handoff
     this.captureSnapshot(dt);
   };
 
-  /**
-   * The body the ship is under right now — used when leaving space:
-   *  1. the locked planet target, else
-   *  2. the nearest captured planet within EXIT_CAPTURE_MUL radii, else
-   *  3. the last planet a target lock engaged on.
-   * Returns null only in deep space far from everything.
-   */
   getExitPlanet(): PlanetBody | null {
     if (this.lockPlanet) return this.lockPlanet;
     if (this.nearPlanet && this.nearPlanetSurfaceD < EXIT_CAPTURE_MUL * this.nearPlanet.spec.radius) {
@@ -1155,13 +974,11 @@ export class SpaceScene {
     return this.lastLockedPlanet;
   }
 
-  /** Last exit descriptor (null until dispose/LAND). */
   getLastExit(): SpaceExit | null {
     return this.lastExit;
   }
 
   dispose() {
-    // fire exit BEFORE tearing down so the app can read the planet
     const exitPlanet = this.getExitPlanet();
     if (exitPlanet) {
       this.lastExit = {

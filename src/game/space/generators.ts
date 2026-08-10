@@ -1,19 +1,11 @@
-// ---------------------------------------------------------------------------
-// Mesh builders. Everything voxel is instanced — one InstancedMesh per layer —
-// so the whole planet system renders in a handful of draw calls.
-// ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
 import { fbm } from './voxel';
 
-// A tiny RNG interface that mimics `() => number`. My project uses the class
-// `Rng`, but we accept any function so callers can pass `rng.next.bind(rng)`.
 export type RNG = () => number;
 
-/** 3D noise function signature — my project's `noise3` fits. */
 export type NoiseFn = (x: number, y: number, z: number) => number;
 
-// ============================== VOXEL SHELL ==============================
 
 export interface ShellOpts {
   R: number;
@@ -22,7 +14,6 @@ export interface ShellOpts {
   amp?: number;
   octaves?: number;
   offset?: [number, number, number];
-  /** Grid sampling step for LOD — 1 = full res, 2 = half, etc. */
   step?: number;
   rng: RNG;
   noise: NoiseFn;
@@ -44,8 +35,6 @@ export interface ShellData {
   colors: Float32Array;
 }
 
-/** Hollow, terraced voxel shell: keep only cells ~1 voxel thick at the
- *  noise-displaced surface. Single grid pass, cheap spherical reject first. */
 export function generateVoxelShell(o: ShellOpts): ShellData {
   const {
     R,
@@ -63,11 +52,6 @@ export function generateVoxelShell(o: ShellOpts): ShellData {
   const start = -R - 4;
   const end = R + 4;
 
-  // ---- analytic shell bounds -------------------------------------------
-  // The surface can only ever live in R*(1±amp), and we keep `shell` units
-  // below it. Combined with the original R-6 floor this gives the exact
-  // radial band that can possibly produce a voxel, so we never touch the
-  // ~90% of the bounding cube that would be rejected anyway.
   const loR = Math.max(Math.max(0, R - 6), R * (1 - amp) - shell);
   const hiR = Math.min(end, R * (1 + amp));
   const lo2 = loR * loR;
@@ -82,7 +66,6 @@ export function generateVoxelShell(o: ShellOpts): ShellData {
       const rxy = x2 + y * y;
       if (rxy > hi2) continue;
 
-      // z-spans that intersect the spherical band at this (x, y) column
       const zOuter = Math.sqrt(hi2 - rxy);
       let bandCount: number;
       if (rxy < lo2) {
@@ -99,8 +82,6 @@ export function generateVoxelShell(o: ShellOpts): ShellData {
         const zA = Math.max(bands[b * 2], start);
         const zB = Math.min(bands[b * 2 + 1], end);
         if (zA > zB) continue;
-        // snap to the same integer lattice the original loop walked, so the
-        // accepted-voxel order (and therefore rng consumption) is identical
         let z = start + Math.ceil((zA - start) / step - EPS) * step;
         for (; z <= zB + EPS; z += step) {
           const d = Math.sqrt(rxy + z * z);
@@ -108,8 +89,6 @@ export function generateVoxelShell(o: ShellOpts): ShellData {
           const nx = x / d;
           const ny = y / d;
           const nz = z / d;
-          // signed gradient-noise fBm (~[-1,1]) — exactly the field the
-          // palette elevation stops are authored against
           const h = fbm(
             nx * freq + offset[0],
             ny * freq + offset[1],
@@ -120,7 +99,7 @@ export function generateVoxelShell(o: ShellOpts): ShellData {
           if (d > surf || d < surf - shell) continue;
           const lat = Math.abs(ny);
           o.color(h, lat, c);
-          const j = 0.9 + o.rng() * 0.2; // per-voxel colour jitter
+          const j = 0.9 + o.rng() * 0.2;
           positions.push(x, y, z);
           colors.push(c.r * j, c.g * j, c.b * j);
           o.onVoxel?.(x, y, z, h, lat, nx, ny, nz);
@@ -148,7 +127,6 @@ export function instancedVoxelMesh(
   );
   const m = new THREE.Object3D();
   const c = new THREE.Color();
-  // coarse shells use fewer, larger blocks so the sphere stays watertight
   const blockScale = scaleMul * Math.max(1, step);
   for (let i = 0; i < count; i++) {
     m.position.set(
@@ -174,7 +152,6 @@ export function instancedVoxelMesh(
   return mesh;
 }
 
-// ================================ CLOUDS =================================
 
 export interface CloudSpec {
   hex: number;
@@ -195,9 +172,6 @@ export function generateClouds(
   const colors: number[] = [];
   const c = new THREE.Color(spec.hex);
 
-  // Same analytic band walk as the terrain shell. The cloud layer is only
-  // ~8% of R thick, so restricting the z-scan removes the overwhelming
-  // majority of the bounding-cube iterations.
   const start = -R - 5;
   const end = R + 5;
   const lo2 = inner * inner;
@@ -255,7 +229,6 @@ export function generateClouds(
   };
 }
 
-// ============================= CITY LIGHTS ===============================
 
 export interface LightInstance {
   x: number;
@@ -275,8 +248,6 @@ export interface CityLightsData {
   count: number;
 }
 
-/** Small unlit voxels on the night side; brightness is recomputed every frame
- *  from the sun direction in planet-local space. */
 export function createCityLights(
   items: LightInstance[],
   rng: RNG
@@ -326,7 +297,6 @@ export function createCityLights(
   return { mesh, base, normals, phase, count: n };
 }
 
-// ============================== LAVA GLOW ================================
 
 export interface LavaData {
   mesh: THREE.InstancedMesh;
@@ -371,7 +341,6 @@ export function createLava(items: LightInstance[], rng: RNG): LavaData | null {
   return { mesh, mat, count: n };
 }
 
-// ================================ RINGS ==================================
 
 export function createRings(rng: RNG, R: number, hex: number): THREE.InstancedMesh {
   const count = 2600;
@@ -421,9 +390,6 @@ export function createRings(rng: RNG, R: number, hex: number): THREE.InstancedMe
   return mesh;
 }
 
-// ============================= ATMOSPHERE ================================
-// Fresnel rim glow on a BackSide sphere, biased by the sun direction so the
-// lit limb glows and the night side falls to near-black.
 
 export function createAtmosphere(
   R: number,
@@ -439,7 +405,7 @@ export function createAtmosphere(
       uPower: { value: power },
       uStrength: { value: strength },
     },
-    vertexShader: /* glsl */ `
+    vertexShader: `
       #include <common>
       #include <logdepthbuf_pars_vertex>
       varying vec3 vN;
@@ -452,7 +418,7 @@ export function createAtmosphere(
         #include <logdepthbuf_vertex>
       }
     `,
-    fragmentShader: /* glsl */ `
+    fragmentShader: `
       #include <common>
       #include <logdepthbuf_pars_fragment>
       uniform vec3  uColor;

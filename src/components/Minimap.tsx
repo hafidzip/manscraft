@@ -1,24 +1,16 @@
-/**
- * Minimap — circular radar in the top-right corner.
- * Renders a 96×96-block window around the player from the world's cached
- * column colors (fog-of-war for unexplored chunks). Sampling is fully
- * toroidal, so the map scrolls seamlessly across the world wrap seam.
- * North is up; the white arrow shows the player heading.
- */
 
 import { useEffect, useRef, type RefObject } from 'react';
 import type { GameEngine } from '../game/engine';
 import { SEA_LEVEL, WORLD_SIZE, wrapDelta } from '../game/core/constants';
 
-const SIZE = 176; // css px — deliberately compact
-const SAMPLES = 96; // logical blocks per edge shown
+const SIZE = 176;
+const SAMPLES = 96;
 const HALF = SAMPLES / 2;
 const REFRESH_MS = 180;
 
 const CELL = SIZE / SAMPLES;
 const MAP_R = SIZE / 2;
 const MARKER_R = 5.5;
-/** clamp off-map camps to the rim as small chevrons; false = strict in-view only */
 const EDGE_HINTS = true;
 
 function campGlyph(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
@@ -41,7 +33,6 @@ function drawCamps(
   ctx.save();
   ctx.lineJoin = 'round';
   for (const c of camps) {
-    // same wrapped player-centered math as the terrain loop → seam-correct
     const dx = wrapDelta(c.x - px, WORLD_SIZE);
     const dz = wrapDelta(c.z - pz, WORLD_SIZE);
     let mx = (dx + HALF) * CELL + CELL / 2;
@@ -60,14 +51,14 @@ function drawCamps(
 
     campGlyph(ctx, mx, my, r);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';   // dark outline for contrast
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
     ctx.stroke();
     ctx.fillStyle = c.cleared
       ? 'rgba(120,120,120,0.6)'
       : edge ? 'rgba(255,120,60,0.75)' : '#ff6a3c';
     ctx.fill();
 
-    if (c.cleared) {                        // tiny check over the dim tent
+    if (c.cleared) {
       ctx.beginPath();
       ctx.moveTo(mx - r * 0.5, my + r * 0.15);
       ctx.lineTo(mx - r * 0.1, my + r * 0.55);
@@ -78,7 +69,7 @@ function drawCamps(
     } else if (!edge && d < nearD) { nearD = d; nx = mx; ny = my; }
   }
 
-  if (nearD < Infinity) {                   // cheap pulse on the closest active camp
+  if (nearD < Infinity) {
     const t = 0.5 + 0.5 * Math.sin(now / 380);
     ctx.beginPath();
     ctx.arc(nx, ny, MARKER_R + 3 + t * 3, 0, Math.PI * 2);
@@ -99,10 +90,6 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
     ctx.imageSmoothingEnabled = false;
 
     const img = ctx.createImageData(SAMPLES, SAMPLES);
-    // Reused sample buffers: the radar reads 9,216 columns per refresh, which
-    // used to allocate one result object per pixel (~50k short-lived objects a
-    // second). The world now fills these typed arrays in one chunk-ordered
-    // pass, so the refresh is allocation-free.
     const heights = new Uint8Array(SAMPLES * SAMPLES);
     const colors = new Uint32Array(SAMPLES * SAMPLES);
     const water = new Uint8Array(SAMPLES * SAMPLES);
@@ -124,7 +111,6 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
         const height = heights[s];
         d[i + 3] = 255;
         if (height <= 0) {
-          // unexplored
           d[i] = 13;
           d[i + 1] = 19;
           d[i + 2] = 28;
@@ -134,13 +120,11 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
         let r = (color >> 16) & 255;
         let g = (color >> 8) & 255;
         let b = color & 255;
-        // relief shading by altitude
         const f = 0.6 + 0.5 * Math.min(1, Math.max(0, (height - 12) / 46));
         r *= f;
         g *= f;
         b *= f;
         if (water[s]) {
-          // depth tint: sink toward deep navy below sea level
           const deep = Math.min(1, Math.max(0, (SEA_LEVEL - height) / 12));
           r = r * (1 - deep) + 18 * deep;
           g = g * (1 - deep) + 40 * deep;
@@ -151,19 +135,16 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
         d[i + 2] = b;
       }
 
-      // compose: clipped circle, scaled pixel grid, overlay ring glow
       ctx.clearRect(0, 0, SIZE, SIZE);
       ctx.save();
       ctx.beginPath();
       ctx.arc(SIZE / 2, SIZE / 2, SIZE / 2 - 2, 0, Math.PI * 2);
       ctx.clip();
-      // nearest-neighbor scale of the sample grid (drawImage respects the clip)
       ctx.putImageData(img, 0, 0);
       ctx.drawImage(canvas, 0, 0, SAMPLES, SAMPLES, 0, 0, SIZE, SIZE);
 
       drawCamps(ctx, engine.getCamps?.() ?? [], px, pz, performance.now());
 
-      // heading arrow
       const yaw = player.yaw;
       const fx = -Math.sin(yaw);
       const fz = -Math.cos(yaw);
@@ -183,7 +164,6 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
       ctx.stroke();
       ctx.restore();
 
-      // cardinal ticks
       ctx.save();
       ctx.font = '10px VT323, monospace';
       ctx.textAlign = 'center';

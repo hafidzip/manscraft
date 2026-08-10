@@ -1,4 +1,3 @@
-// Inventory state manager for Minecraft-style voxel items & hotbar.
 import { B } from './World';
 
 export type SlotItem =
@@ -23,7 +22,6 @@ export const FOOD_NAMES: Record<string, string> = Object.fromEntries(
 export interface SlotRef {
   isHotbar: boolean;
   index: number;
-  /** third slot bank: the crafting grid (2×2 pocket or 3×3 table) */
   isCraft?: boolean;
 }
 
@@ -49,7 +47,6 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.CONVEYOR]: 'Conveyor Belt',
   [B.INSERTER]: 'Inserter',
   [B.LASER_MINER]: 'Laser Miner',
-  // gemstones (fps ids 50-57)
   50: 'Ruby Ore',
   51: 'Amber Ore',
   52: 'Luminescence Ore',
@@ -80,7 +77,6 @@ export class Inventory {
     return arr;
   })();
 
-  /** Add any stackable item (stacks then spills into empty slots). */
   addItem(item: SlotItem): boolean {
     if (item.kind === 'block') return this.addBlock(item.blockId, item.count);
     if (item.kind === 'food') return this.addFood(item.foodId, item.count);
@@ -113,7 +109,6 @@ export class Inventory {
     return count === 0;
   }
 
-  /** Consume `n` of any item from a slot. */
   consumeAt(ref: SlotRef, n = 1): boolean {
     const arr = ref.isHotbar ? this.hotbar : this.mainInv;
     const item = arr[ref.index];
@@ -123,11 +118,9 @@ export class Inventory {
     return true;
   }
 
-  /** Add mined block item. Returns true if added. */
   addBlock(blockId: number, count = 1): boolean {
     if (blockId === B.AIR || blockId === B.BEDROCK) return false;
 
-    // 1. Try to stack into existing hotbar block slots
     for (let i = 0; i < this.hotbar.length; i++) {
       const item = this.hotbar[i];
       if (item && item.kind === 'block' && item.blockId === blockId && item.count < 64) {
@@ -139,7 +132,6 @@ export class Inventory {
       }
     }
 
-    // 2. Try to stack into main inventory block slots
     for (let i = 0; i < this.mainInv.length; i++) {
       const item = this.mainInv[i];
       if (item && item.kind === 'block' && item.blockId === blockId && item.count < 64) {
@@ -151,7 +143,6 @@ export class Inventory {
       }
     }
 
-    // 3. Place into empty main inventory slot
     for (let i = 0; i < this.mainInv.length; i++) {
       if (!this.mainInv[i]) {
         const add = Math.min(64, count);
@@ -161,7 +152,6 @@ export class Inventory {
       }
     }
 
-    // 4. Place into empty hotbar slot
     for (let i = 0; i < this.hotbar.length; i++) {
       if (!this.hotbar[i]) {
         const add = Math.min(64, count);
@@ -174,7 +164,6 @@ export class Inventory {
     return count === 0;
   }
 
-  /** Consume 1 block from a specific slot. */
   consumeBlock(slotRef: SlotRef): boolean {
     const arr = slotRef.isHotbar ? this.hotbar : this.mainInv;
     const item = arr[slotRef.index];
@@ -186,11 +175,9 @@ export class Inventory {
     return true;
   }
 
-  /** the crafting grid — 9 cells, only the first craftSize² are active */
   craft: (SlotItem | null)[] = Array(9).fill(null);
   craftSize: 2 | 3 = 2;
 
-  /** active crafting cells for the current grid size */
   get craftCells(): (SlotItem | null)[] {
     const s = this.craftSize;
     return this.craft.slice(0, s * s);
@@ -201,11 +188,6 @@ export class Inventory {
     return ref.isHotbar ? this.hotbar : this.mainInv;
   }
 
-  /**
-   * Switch the crafting grid between the 2×2 pocket and the 3×3 table.
-   * When shrinking, cells that fall outside the smaller grid are pushed back
-   * into storage; if storage is full the switch is refused and returns false.
-   */
   setCraftSize(size: 2 | 3): boolean {
     if (size === this.craftSize) return true;
     if (size === 2) {
@@ -217,7 +199,6 @@ export class Inventory {
     return true;
   }
 
-  /** Swap or move items between slots. */
   swapSlots(from: SlotRef, to: SlotRef) {
     const arrFrom = this.bank(from);
     const arrTo = this.bank(to);
@@ -225,7 +206,6 @@ export class Inventory {
     const itemFrom = arrFrom[from.index];
     const itemTo = arrTo[to.index];
 
-    // Stacking same block type
     if (
       itemFrom && itemTo &&
       itemFrom.kind === 'block' && itemTo.kind === 'block' &&
@@ -243,7 +223,6 @@ export class Inventory {
       }
     }
 
-    // Stacking same food type
     if (
       itemFrom && itemTo &&
       itemFrom.kind === 'food' && itemTo.kind === 'food' &&
@@ -261,7 +240,6 @@ export class Inventory {
       }
     }
 
-    // Direct swap
     arrFrom[from.index] = itemTo;
     arrTo[to.index] = itemFrom;
   }
@@ -272,12 +250,10 @@ export class Inventory {
     return arr[ref.index] ?? null;
   }
 
-  /** overwrite a slot in place (used by the furnace quick-move) */
   setItem(ref: SlotRef, item: SlotItem | null): void {
     this.bank(ref)[ref.index] = item;
   }
 
-  /** would `item` fit without mutating anything? (used to gate crafting) */
   canAdd(item: SlotItem): boolean {
     const need = (key: (s: SlotItem) => string | null) => {
       let count = item.kind === 'weapon' ? 1 : item.count;

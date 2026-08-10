@@ -1,6 +1,5 @@
 import type * as THREE from 'three';
 
-/** Legacy inventory IDs shared by the FPS UI and the unified voxel engine. */
 export const B = {
   AIR: 0,
   GRASS: 1,
@@ -59,7 +58,6 @@ export interface RayHit {
   dist: number;
 }
 
-/** Surface required by combat, effects, drops, and pathfinding. */
 export interface WorldLike {
   group: THREE.Group;
   spawn: THREE.Vector3;

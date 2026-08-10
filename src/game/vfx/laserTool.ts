@@ -1,21 +1,11 @@
-/**
- * Laser mining tool — a voxel-style viewmodel held in the right hand.
- * Fires an additive energy beam (core + scrolling glow cylinder) from the
- * barrel tip to the targeted block, with muzzle flare, pulsing impact
- * flare, a real point light at the impact point, spark-friendly motion,
- * idle sway and firing recoil.
- */
 
 import * as THREE from 'three';
 
 export interface LaserState {
   visible: boolean;
   firing: boolean;
-  /** world-space impact point (null when not aiming at a block) */
   target: THREE.Vector3 | null;
-  /** 0..1 mining progress — beam heats up as the block weakens */
   charge: number;
-  /** player horizontal speed (drives sway) */
   speed: number;
 }
 
@@ -25,22 +15,21 @@ export interface Part {
   c: number;
 }
 
-/** parts in voxel units; +z points back toward the player, barrel at -z */
 const BODY_PARTS: Part[] = [
-  { x: 0, y: 0.1, z: 3.6, w: 2.1, h: 3.6, d: 2.4, c: 0x4a3b28 }, // grip
-  { x: 0, y: 1.4, z: 0.6, w: 3.0, h: 2.8, d: 7.2, c: 0x3a4148 }, // body
-  { x: 0, y: 3.05, z: 0.8, w: 2.2, h: 0.5, d: 5.4, c: 0x2c3238 }, // top rail
-  { x: -1.68, y: 1.4, z: 0.8, w: 0.4, h: 1.2, d: 4.6, c: 0x23282e }, // side plate L
-  { x: 1.68, y: 1.4, z: 0.8, w: 0.4, h: 1.2, d: 4.6, c: 0x23282e }, // side plate R
-  { x: 0, y: 1.5, z: -4.4, w: 2.0, h: 1.9, d: 3.6, c: 0x4d565f }, // barrel shroud
-  { x: 0, y: 1.6, z: -6.35, w: 2.5, h: 2.5, d: 0.9, c: 0x23282e }, // muzzle ring
-  { x: 0, y: 1.6, z: -6.15, w: 1.1, h: 1.1, d: 1.7, c: 0x15181c }, // inner barrel
+  { x: 0, y: 0.1, z: 3.6, w: 2.1, h: 3.6, d: 2.4, c: 0x4a3b28 },
+  { x: 0, y: 1.4, z: 0.6, w: 3.0, h: 2.8, d: 7.2, c: 0x3a4148 },
+  { x: 0, y: 3.05, z: 0.8, w: 2.2, h: 0.5, d: 5.4, c: 0x2c3238 },
+  { x: -1.68, y: 1.4, z: 0.8, w: 0.4, h: 1.2, d: 4.6, c: 0x23282e },
+  { x: 1.68, y: 1.4, z: 0.8, w: 0.4, h: 1.2, d: 4.6, c: 0x23282e },
+  { x: 0, y: 1.5, z: -4.4, w: 2.0, h: 1.9, d: 3.6, c: 0x4d565f },
+  { x: 0, y: 1.6, z: -6.35, w: 2.5, h: 2.5, d: 0.9, c: 0x23282e },
+  { x: 0, y: 1.6, z: -6.15, w: 1.1, h: 1.1, d: 1.7, c: 0x15181c },
 ];
 
 const GLOW_PARTS: Part[] = [
-  { x: 0, y: 1.55, z: -2.2, w: 3.15, h: 1.5, d: 1.5, c: 0xffffff }, // energy window
-  { x: 0, y: 3.15, z: 2.4, w: 1.5, h: 0.7, d: 1.8, c: 0xffffff }, // rear cell
-  { x: 0, y: 1.6, z: -6.95, w: 1.3, h: 1.3, d: 0.4, c: 0xffffff }, // emitter tip
+  { x: 0, y: 1.55, z: -2.2, w: 3.15, h: 1.5, d: 1.5, c: 0xffffff },
+  { x: 0, y: 3.15, z: 2.4, w: 1.5, h: 0.7, d: 1.8, c: 0xffffff },
+  { x: 0, y: 1.6, z: -6.95, w: 1.3, h: 1.3, d: 0.4, c: 0xffffff },
 ];
 
 const VOX = 0.045;
@@ -138,7 +127,7 @@ export class LaserTool {
   private tmpQ = new THREE.Quaternion();
 
   constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera) {
-    scene.add(camera); // required so camera children render
+    scene.add(camera);
 
     this.group.scale.setScalar(VOX);
     this.tip.position.set(0, 1.6, -7.6);
@@ -149,7 +138,6 @@ export class LaserTool {
     this.group.rotation.set(0.05, 0.16, 0);
     camera.add(this.group);
 
-    // ---- energy beam (world space) ----
     this.coreMat = new THREE.MeshBasicMaterial({
       color: 0xfff3df, transparent: true, opacity: 0.8,
       blending: THREE.AdditiveBlending, depthWrite: false,
@@ -168,7 +156,6 @@ export class LaserTool {
       scene.add(m);
     }
 
-    // ---- flares & light ----
     const glowTex = makeGlowTexture();
     this.impact = new THREE.Sprite(new THREE.SpriteMaterial({
       map: glowTex, color: 0xff5a1e, transparent: true, opacity: 0,
@@ -224,7 +211,6 @@ export class LaserTool {
       );
       this.group.rotation.set(0.05 + jitter * 0.5, 0.16, 0);
 
-      // energy cells: dim idle glow -> hot chaotic pulse while firing
       const pulse = st.firing
         ? 0.72 + 0.28 * Math.sin(this.t * 22)
         : 0.42 + 0.1 * Math.sin(this.t * 3);
@@ -262,7 +248,6 @@ export class LaserTool {
     this.coreMat.opacity = vis * (0.55 + 0.3 * flick + st.charge * 0.3);
     this.glowBeamMat.opacity = vis * (0.3 + 0.25 * flick);
 
-    // impact flare grows with mining progress
     this.impact.position.copy(this.tmpB);
     const impactScale = (0.42 + st.charge * 0.55 + Math.sin(this.t * 29) * 0.05) * vis;
     this.impact.scale.setScalar(Math.max(0.01, impactScale));
@@ -271,7 +256,6 @@ export class LaserTool {
     this.impactCore.scale.setScalar(Math.max(0.01, impactScale * 0.45));
     this.impactCore.material.opacity = vis * (0.6 + 0.4 * flick);
 
-    // muzzle flare
     this.flare.position.copy(this.tmpA);
     this.flare.scale.setScalar(Math.max(0.01, (0.16 + 0.08 * flick) * vis));
     this.flare.material.opacity = vis * 0.65;

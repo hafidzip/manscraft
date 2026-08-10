@@ -1,8 +1,3 @@
-/**
- * VOXELCRAFT — unified HUD. The inventory overlay, hotbar, hearts and pixel
- * icons match the original voxel-fps shell; the Minecraft stat chips, pilot
- * readout and ship prompt are layered on top for the unified game.
- */
 
 import { useEffect, useState, type RefObject } from 'react';
 import {
@@ -23,11 +18,6 @@ export interface HudProps {
   phase: 'loading' | 'ready';
   locked: boolean;
   hasPlayed: boolean;
-  /**
-   * True only for the app's very first boot. The full VOXELCRAFT title screen
-   * belongs to that moment alone — warm planet/space re-entries drop straight
-   * into the world with (at most) a tiny "resume control" chip.
-   */
   coldStart: boolean;
   progress: number;
   label: string;
@@ -53,7 +43,6 @@ const TIPS = [
   'Inserters scoop up dropped items and place them forward. Press E to rotate.',
 ];
 
-// ---------------------------------------------------------- pixel weapon icons
 type Rect = [number, number, number, number, string];
 const ICONS: Record<string, Rect[]> = {
   handgun: [
@@ -102,8 +91,6 @@ function WeaponIcon({ id, size = 46 }: { id: string; size?: number }) {
   );
 }
 
-// ---------------------------------------------------------- block + food icons
-/** Face tile for each block (matches the world's side texture). */
 function blockTile(blockId: number): number {
   switch (blockId) {
     case B.GRASS: return T.GRASS_SIDE;
@@ -121,7 +108,6 @@ function blockTile(blockId: number): number {
     case B.CRAFTING_TABLE: return T.CRAFT_TOP;
     case B.GLASS: return T.GLASS;
     case B.FURNACE: return T.FURNACE;
-    // gemstone ores (fps ids 50-57)
     case 50: return T.ORE_RUBY;
     case 51: return T.ORE_AMBER;
     case 52: return T.ORE_LUMI;
@@ -140,9 +126,6 @@ function blockTile(blockId: number): number {
 }
 
 function BlockIcon({ blockId, size = 22 }: { blockId: number; size?: number }) {
-  // Atlas is built + encoded once at module scope (see atlasDataUrl in textures.ts).
-  // The previous `useMemo(() => buildAtlas().image.toDataURL(), [])` rebuilt the
-  // entire 128×224 procedural atlas per icon mount — freezing the menu open.
   const url = atlasDataUrl();
   const [u0, v0, u1, v1] = tileUV(blockTile(blockId));
   const tu0 = Math.min(u0, u1), tu1 = Math.max(u0, u1);
@@ -165,7 +148,6 @@ function BlockIcon({ blockId, size = 22 }: { blockId: number; size?: number }) {
 }
 
 function DrumstickIcon({ size = 26 }: { size?: number }) {
-  // Cached at module scope — see drumstickDataUrl in textures.ts.
   const url = drumstickDataUrl();
   return (
     <img src={url} width={size} height={size} alt="Chicken Drum"
@@ -186,7 +168,6 @@ function itemName(item: SlotItem | null): string {
   return FOODS[item.foodId]?.name ?? item.foodId;
 }
 
-// ---------------------------------------------------------- slot renderer
 interface RenderSlotItemProps {
   item: SlotItem | null;
   hovered?: boolean;
@@ -214,7 +195,6 @@ function RenderSlotItem({ item, hovered }: RenderSlotItemProps) {
   );
 }
 
-// ---------------------------------------------------------- pixel hearts
 const HEART_GRID = [
   '.XX.XX.',
   'XXXXXXX',
@@ -240,10 +220,8 @@ function PixelHeart({ mode = 'full' }: { mode?: 'full' | 'half' | 'empty' }) {
   );
 }
 
-// ---------------------------------------------------------- pieces kept from the minecraft HUD
 const LABELS: Record<string, string> = { handgun: 'P9', smg: 'KV-9', rifle: 'AR-77', sniper: 'LW-50', bazooka: 'RPG-9', laser: 'MK-7' };
 
-/** cockpit readout while flying */
 function PilotChip({ stats }: { stats: HudStats }) {
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-24 z-20 flex flex-col items-center gap-2">
@@ -264,7 +242,6 @@ function PilotChip({ stats }: { stats: HudStats }) {
   );
 }
 
-/** "press E to board" proximity prompt */
 function BoardPrompt() {
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-1/3 z-20 flex justify-center">
@@ -276,8 +253,6 @@ function BoardPrompt() {
   );
 }
 
-// ---------------------------------------------------------- merchant economy
-/** Pixel-art gold coin used across the purse, the shop and item prices. */
 function CoinIcon({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 10 10" style={{ imageRendering: 'pixelated' }} shapeRendering="crispEdges">
@@ -292,13 +267,11 @@ function CoinIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-/** Render a shop item's icon — block texture tile or drumstick for food */
 function ShopItemIcon({ item, size = 32 }: { item: typeof SHOP_ITEMS[0]; size?: number }) {
   if (item.goods.kind === 'food') return <DrumstickIcon size={size} />;
   return <BlockIcon blockId={item.goods.blockId} size={size} />;
 }
 
-/** "press E to trade" prompt above an idle merchant */
 function TradePrompt() {
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-1/3 z-20 flex justify-center">
@@ -311,7 +284,6 @@ function TradePrompt() {
   );
 }
 
-/** full merchant shop overlay — styled to match the crafting/furnace mc-book panels */
 function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject<GameEngine | null> }) {
   const [flash, setFlash] = useState<string | null>(null);
   const [sellFlash, setSellFlash] = useState<string | null>(null);
@@ -320,7 +292,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
 
   const isSell = stats.shopSellOpen;
 
-  // ----- BUY tab: only show stocked items
   const stockedItems = stats.shopStock.length > 0
     ? stats.shopStock.map((s) => ({
         stock: s,
@@ -339,7 +310,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
     }
   };
 
-  // ----- SELL tab: sell from inventory
   const sellItem = (ref: { isHotbar: boolean; index: number }, amount: number) => {
     const ok = engineRef.current?.sellShopItem(ref, amount);
     if (ok) {
@@ -351,7 +321,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
 
   const hoveredEntry = hoverItem ? SHOP_ITEMS.find((i) => i.id === hoverItem) ?? null : null;
 
-  // Build sellable items from inventory
   const sellableInventory = (() => {
     const inv = engineRef.current?.inventory;
     if (!inv) return [];
@@ -377,7 +346,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           <X size={14} />
         </button>
 
-        {/* title */}
         <div className="flex items-center justify-center gap-2 mb-2">
           <CoinIcon size={16} />
           <span className="px-font px-shadow text-[12px] text-white tracking-widest">
@@ -385,7 +353,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           </span>
         </div>
 
-        {/* Buy / Sell tabs */}
         <div className="flex gap-1 mb-2">
           <button
             onClick={() => engineRef.current?.toggleShopSell(false)}
@@ -401,7 +368,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           </button>
         </div>
 
-        {/* Coin info — right after tabs */}
         <div className="mc-book-slot flex items-center justify-center gap-3 px-3 py-1.5 mb-2 rounded-sm">
           <div className="flex items-center gap-2">
             <CoinIcon size={16} />
@@ -412,7 +378,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           <span className="px-font text-[6px] text-white/35">COINS</span>
         </div>
 
-        {/* tooltip strip */}
         <div className="h-8 px-2 flex items-center mc-book-slot overflow-hidden mb-2 rounded-sm">
           {!isSell && hoveredEntry ? (
             <div className="flex items-center gap-2 truncate">
@@ -430,10 +395,8 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           )}
         </div>
 
-        {/* List content with custom scrollbar */}
         <div className="mc-book-slot p-2 h-[320px] overflow-y-auto scroll-shop space-y-1 rounded-sm">
           {!isSell ? (
-            /* BUY list — list layout like sell tab */
             stockedItems.map(({ item, stock }) => {
               const affordable = stats.coins >= item.price;
               const isFlash = flash === item.id;
@@ -450,11 +413,9 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
                     ${soldOut ? 'opacity-30 cursor-not-allowed grayscale' : ''}
                     ${!soldOut && !affordable ? 'opacity-45 cursor-not-allowed' : ''}`}
                 >
-                  {/* icon */}
                   <div className="w-9 h-9 flex items-center justify-center flex-shrink-0 mc-book-slot rounded-sm">
                     <ShopItemIcon item={item} size={24} />
                   </div>
-                  {/* info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="px-font text-[8px] text-white truncate">{item.name}</span>
@@ -465,7 +426,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
                       <span className="px-font text-[6px] text-white/30">· stock: {soldOut ? '0' : stock.quantity}</span>
                     </div>
                   </div>
-                  {/* price + buy */}
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <div className="flex items-center gap-0.5 bg-[#1a1408]/80 px-1.5 py-0.5 rounded-sm border border-white/10">
                       <CoinIcon size={8} />
@@ -477,7 +437,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
               );
             })
           ) : (
-            /* SELL list */
             sellableInventory.length === 0 ? (
               <div className="flex items-center justify-center py-10">
                 <span className="px-font text-[8px] text-white/30">NO SELLABLE ITEMS — MINE BLOCKS OR GATHER FOOD</span>
@@ -535,7 +494,6 @@ function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: RefObject
           )}
         </div>
 
-        {/* bottom key hints */}
         <div className="flex items-center gap-4 mt-2 px-font px-shadow-sm text-[7px] text-white/55">
           <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
           {!isSell && <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> BUY</span>}
@@ -568,14 +526,9 @@ function LoadingScreen({ progress, label }: { progress: number; label: string })
   );
 }
 
-// ---------------------------------------------------------- app
 export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stats, onPlay, onCloseInventory, engineRef }: HudProps) {
   const playing = phase === 'ready' && locked;
 
-  // The pause/title menu only appears after the "unlocked, no modal" state
-  // has settled for a beat. Pointer-lock release and modal flags land on
-  // React at slightly different times; without this delay, closing the
-  // inventory (or opening it before first deploy) flashes the title screen.
   const unlockedIdle = phase === 'ready' && !locked
     && !stats?.inventoryOpen && !stats?.craftingOpen && !stats?.furnaceOpen && !stats?.shopOpen;
   const [menuReady, setMenuReady] = useState(false);
@@ -584,13 +537,8 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
     const t = setTimeout(() => setMenuReady(true), 130);
     return () => clearTimeout(t);
   }, [unlockedIdle]);
-  // The big branded title screen is a once-per-session moment (cold boot) or
-  // the ESC pause after you've already deployed. Warm planet re-entries
-  // (hasPlayed still false, coldStart false) get only the slim resume chip.
   const showMenu = unlockedIdle && menuReady && (coldStart || hasPlayed);
 
-  // Warm re-entry chip: delayed a beat so the silent auto pointer-lock
-  // (fired ~120 ms after ready) wins the race and the chip never flashes.
   const wantPrompt = unlockedIdle && !coldStart && !hasPlayed;
   const [promptReady, setPromptReady] = useState(false);
   useEffect(() => {
@@ -600,19 +548,16 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
   }, [wantPrompt]);
   const game = () => engineRef.current;
 
-  // inventory UI state
   const [selectedSlot, setSelectedSlot] = useState<SlotRef | null>(null);
   const [hoverSlot, setHoverSlot] = useState<SlotRef | null>(null);
   const [dragItem, setDragItem] = useState<{ item: SlotItem; from: SlotRef } | null>(null);
   const [, setInvSeq] = useState(0);
   const refreshInv = () => setInvSeq((s) => s + 1);
 
-  // console recipe-book selection (persists across open/close)
   const [bookGroup, setBookGroup] = useState<RecipeGroupId>('building');
   const [bookSel, setBookSel] = useState<string | null>(null);
   const [bookFlash, setBookFlash] = useState(0);
 
-  /** slot identity across the three banks (hotbar / storage / craft grid) */
   const sameRef = (a: SlotRef, b: SlotRef) =>
     a.isHotbar === b.isHotbar && !!a.isCraft === !!b.isCraft && a.index === b.index;
 
@@ -681,7 +626,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
     };
   };
 
-  /** click a recipe chip: pull ingredients from inventory into the grid */
   const fillRecipe = (r: Recipe) => {
     const g = game();
     if (!g) return;
@@ -689,7 +633,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
     if (r.grid === 3 && !inv.setCraftSize(3)) return;
     const size = inv.craftSize;
 
-    // required block id per active cell (centered shaped patterns)
     const need: (number | null)[] = Array(size * size).fill(null);
     if (r.shaped) {
       const off = Math.floor((size - r.shaped.length) / 2);
@@ -700,7 +643,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
       r.shapeless!.forEach((ing, i) => { need[i] = ing.blockId; });
     }
 
-    // feasibility: enough of every ingredient across hotbar + storage?
     const req = new Map<number, number>();
     for (const id of need) if (id != null) req.set(id, (req.get(id) ?? 0) + 1);
     const avail = new Map<number, number>();
@@ -708,15 +650,13 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
       if (s && s.kind === 'block') avail.set(s.blockId, (avail.get(s.blockId) ?? 0) + s.count);
     for (const [id, n] of req) if ((avail.get(id) ?? 0) < n) return;
 
-    // return whatever is in the grid first
     for (let i = 0; i < size * size; i++) {
       const it = inv.craft[i];
       if (it) {
-        if (!inv.addItem(it)) { inv.craft[i] = it; return; } // no room — abort
+        if (!inv.addItem(it)) { inv.craft[i] = it; return; }
         inv.craft[i] = null;
       }
     }
-    // pull one of each required block into its cell
     for (let i = 0; i < size * size; i++) {
       const id = need[i];
       if (id == null) continue;
@@ -736,7 +676,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
     refreshInv();
   };
 
-  // hitmarker flash
   const [hitFlash, setHitFlash] = useState(0);
   useEffect(() => {
     if (!stats || stats.hitSeq === 0) return;
@@ -752,18 +691,14 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
 
   return (
     <div className="absolute inset-0 overflow-hidden">
-      {/* vignette + underwater tint */}
       <div className="vignette z-10" />
       {stats?.underwater && playing && (
         <div className="pointer-events-none absolute inset-0 z-10 bg-blue-600/25" />
       )}
       {playing && stats && stats.hp > 0 && stats.hp <= 30 && !stats.dead && <div className="lowhp-vignette z-30" />}
 
-      {/* damage feedback */}
       {(stats?.damageSeq ?? 0) > 0 && <div key={stats!.damageSeq} className="dmg-vignette z-30" />}
 
-      {/* directional hit marker: chevron rotates around the reticle to point
-          back at whoever just landed a shot, remounted on every new hit */}
       {stats && stats.damageSeq > 0 && !stats.dead && (
         <div
           key={`dmg-dir-${stats.damageSeq}`}
@@ -774,7 +709,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </div>
       )}
 
-      {/* death scene */}
       {stats?.dead && (
         <>
           <div key={`flash-${stats.damageSeq}`} className="death-flash z-40" />
@@ -798,7 +732,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </>
       )}
 
-      {/* sniper scope overlay */}
       {stats?.scoped && locked && (
         <div className="absolute inset-0 pointer-events-none z-30 overlay-in">
           <div className="absolute inset-0" style={{ background: 'radial-gradient(circle at center, transparent 0, transparent min(34vh, 34vw), rgba(3,3,4,0.985) calc(min(34vh, 34vw) + 2px))' }} />
@@ -809,7 +742,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </div>
       )}
 
-      {/* crosshair */}
       {playing && stats && !stats.dead && !stats.scoped && stats.toolMode !== 'laser' && stats.ads < 0.5 && !stats.piloting && (
         <div className="absolute left-1/2 top-1/2 z-20 pointer-events-none" style={{ transform: 'translate(-50%,-50%)' }}>
           <div className="crosshair-line" style={{ width: 2, height: 9, left: -1, top: -(spread + 9) }} />
@@ -820,7 +752,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </div>
       )}
 
-      {/* hitmarker */}
       {hitFlash > 0 && (
         <div key={hitFlash} className="absolute left-1/2 top-1/2 z-20 pointer-events-none" style={{ animation: 'hit-pop 0.14s steps(3) forwards' }}>
           <svg width="36" height="36" viewBox="0 0 36 36" style={{ transform: 'translate(-50%,-50%)' }}>
@@ -835,14 +766,12 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
             <PilotChip stats={stats} />
           ) : (
             <>
-              {/* weapon name toast */}
               {stats.switchAt > 0 && (
                 <div key={stats.switchAt} className="absolute right-[26px] bottom-[150px] z-20 pointer-events-none fade-up px-font px-shadow text-[11px] text-[#ffd23e]">
                   {stats.weaponName}
                 </div>
               )}
 
-              {/* ammo / laser / block / food readout */}
               <div className="absolute right-4 bottom-4 z-20 pointer-events-none flex flex-col items-end gap-1">
                 <div className="px-font text-[8px] px-shadow-sm text-white/60 tracking-widest">{toolLabel}</div>
                 {stats.weaponId === 'laser' ? (
@@ -878,7 +807,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 )}
               </div>
 
-              {/* hearts + hotbar stack */}
               <div className="absolute left-1/2 -translate-x-1/2 bottom-3 z-20 flex flex-col items-center gap-1.5 pointer-events-none">
                 <div className="flex gap-[3px]">
                   {Array.from({ length: 10 }).map((_, i) => {
@@ -888,7 +816,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                   })}
                 </div>
 
-                {/* reload progress */}
                 {stats.reloading && (
                   <div className="flex flex-col items-center gap-1 mb-0.5">
                     <div className="px-font px-shadow-sm text-[7px] text-[#ffd23e] px-blink">RELOADING</div>
@@ -898,7 +825,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                   </div>
                 )}
 
-                {/* hotbar */}
                 <div className="flex gap-[3px]">
                   {(game()?.inventory.hotbar ?? Array(6).fill(null)).map((item, i) => (
                     <div key={i} className={`mc-slot relative w-[50px] h-[44px] flex items-center justify-center ${stats.slot === i ? 'mc-slot-active border-[#ffd23e]' : ''}`}>
@@ -909,7 +835,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 </div>
               </div>
 
-              {/* hints */}
               <div className="absolute left-4 bottom-4 z-20 px-font px-shadow-sm text-[8px] leading-4 text-white/55 pointer-events-none">
                 <div>TAB — INVENTORY</div>
                 <div>R — RELOAD</div>
@@ -926,27 +851,22 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </>
       )}
 
-      {/* ============================== MERCHANT SHOP ============================== */}
       {phase === 'ready' && stats && stats.shopOpen && (
         <>
-          {/* transparent overlay prevents the canvas from stealing hover/click */}
           <div className="absolute inset-0 z-30 cursor-default" />
           <ShopPanel stats={stats} engineRef={engineRef} />
         </>
       )}
 
-      {/* ============================== INVENTORY OVERLAY (TAB) ============================== */}
       {phase === 'ready' && stats && stats.inventoryOpen && (() => {
         const inv = game()?.inventory;
         if (!inv) return null;
-        // Pocket 2×2 crafting grid, always kept at size 2 in inventory
         const pocketSize = 2;
         const pocketCells = inv.craft.slice(0, 4);
         const pocketResult = matchCraft(pocketCells, pocketSize);
         const pocketOutput = pocketResult?.output ?? null;
         const takePocket = (n: number) => {
           if (!inv) return;
-          // temporarily shrink to 2 so takeCraftResult sees 2×2
           const prev = inv.craftSize;
           inv.craftSize = 2;
           if (game()?.takeCraftResult(n)) refreshInv();
@@ -955,15 +875,12 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         const itemTip = hoverItem ?? (selItem ? selItem : dragItem?.item ?? null);
         return (
           <div className="absolute inset-0 z-50 flex items-center justify-center overlay-in bg-black/80 backdrop-blur-sm">
-            {/* Two-column layout: crafting on left, storage on right */}
             <div className="flex gap-3 items-start max-h-[92vh] overflow-y-auto px-4 pb-4 pt-2">
 
-              {/* LEFT: Pocket crafting 2×2 */}
               <div className="mc-panel p-4 flex flex-col gap-3 w-[220px] flex-shrink-0">
                 <div className="flex items-center gap-2 px-font text-[9px] text-[#ffd23e]">
                   <Hammer size={12} /> CRAFTING
                 </div>
-                {/* 2×2 grid + arrow + output */}
                 <div className="flex items-center gap-3 justify-center">
                   <div className="grid grid-cols-2 gap-1.5">
                     {[0,1,2,3].map((i) => {
@@ -992,7 +909,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     </div>
                   </div>
                 </div>
-                {/* pocket recipe hint */}
                 <div className="border-t border-white/10 pt-2 flex flex-col gap-1.5">
                   <div className="px-font text-[7px] text-white/35">RECIPES (2×2)</div>
                   <div className="flex flex-wrap gap-1">
@@ -1022,7 +938,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 </div>
               </div>
 
-              {/* RIGHT: Inventory */}
               <div className="mc-panel p-4 flex flex-col gap-3 relative">
                 <button onClick={onCloseInventory}
                   className="absolute top-3 right-3 text-white/50 hover:text-white cursor-pointer">
@@ -1031,7 +946,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 <div className="flex items-center gap-2 px-font text-[9px] text-[#ffd23e]">
                   <Package size={12} /> INVENTORY
                 </div>
-                {/* tooltip strip */}
                 <div className="h-8 px-2 flex items-center mc-slot overflow-hidden">
                   {itemTip ? (
                     <div className="flex items-center gap-2">
@@ -1043,7 +957,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     </div>
                   ) : <span className="px-font text-[7px] text-white/30">HOVER TO INSPECT · CLICK/DRAG TO MOVE</span>}
                 </div>
-                {/* 3×9 storage */}
                 <div className="flex flex-col gap-1">
                   <div className="px-font text-[7px] text-white/40">STORAGE</div>
                   <div className="grid grid-cols-9 gap-1.5">
@@ -1062,7 +975,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     })}
                   </div>
                 </div>
-                {/* hotbar */}
                 <div className="flex flex-col gap-1 border-t border-white/10 pt-2">
                   <div className="px-font text-[7px] text-[#ffd23e]">HOTBAR</div>
                   <div className="grid grid-cols-6 gap-1.5">
@@ -1082,7 +994,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     })}
                   </div>
                 </div>
-                {/* bottom row */}
                 <div className="flex items-center justify-between px-font text-[7px] text-white/35 border-t border-white/10 pt-2">
                   <div className="flex items-center gap-3">
                     <Shield size={11} className={stats.enemiesEnabled ? 'text-[#ff5347]' : 'text-[#6dc24a]'} />
@@ -1099,7 +1010,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         );
       })()}
 
-      {/* ================= CRAFTING TABLE — legacy console recipe book ================= */}
       {phase === 'ready' && stats && stats.craftingOpen && (() => {
         const inv = game()?.inventory;
         if (!inv) return null;
@@ -1107,14 +1017,12 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         const list = RECIPES.filter((r) => r.group === activeGroup.id);
         const sel: Recipe | null = list.find((r) => r.id === bookSel) ?? list[0] ?? null;
 
-        // how many of a block the player currently owns
         const countOf = (id: number) => {
           let n = 0;
           for (const arr of [inv.hotbar, inv.mainInv])
             for (const s of arr) if (s && s.kind === 'block' && s.blockId === id) n += s.count;
           return n;
         };
-        // ingredient requirement of the selected recipe
         const needMap = new Map<number, number>();
         if (sel) for (const ing of recipeIngredients(sel))
           needMap.set(ing.blockId, (needMap.get(ing.blockId) ?? 0) + 1);
@@ -1122,7 +1030,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         for (const [id, n] of needMap) maxCraft = Math.min(maxCraft, Math.floor(countOf(id) / n));
         const craftable = maxCraft > 0;
 
-        // 3×3 display grid for the selected recipe (patterns centered)
         const gridCells: (number | null)[] = Array(9).fill(null);
         if (sel?.shaped) {
           const off = Math.floor((3 - sel.shaped.length) / 2);
@@ -1146,7 +1053,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
             onClick={(e) => { if (e.target === e.currentTarget) game()?.closeCraftingTable(); }}>
             <div className="relative">
 
-              {/* ---- top category tabs ---- */}
               <div className="flex gap-1 pl-16 relative z-0">
                 {RECIPE_GROUPS.map((g) => (
                   <button
@@ -1161,9 +1067,7 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 ))}
               </div>
 
-              {/* ---- panel + left rail ---- */}
               <div className="flex relative">
-                {/* left vertical recipe rail */}
                 <div className="flex flex-col items-center gap-1 pr-1 -mr-[2px] z-10 self-center -translate-x-1">
                   <div className="mc-book-rail w-[44px] h-[20px] flex items-center justify-center">
                     <ChevronUp size={12} className="text-white/35" />
@@ -1184,9 +1088,7 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                   </div>
                 </div>
 
-                {/* main panel */}
                 <div className="mc-book px-5 pt-4 pb-4 w-[860px]">
-                  {/* group title */}
                   <div className="flex items-center justify-center gap-2 mb-3">
                     <Hammer size={13} className="text-[#ffd23e]" />
                     <span className="px-font px-shadow text-[12px] text-white tracking-widest">
@@ -1194,7 +1096,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     </span>
                   </div>
 
-                  {/* horizontal recipe strip */}
                   <div className="flex gap-1 justify-center mb-4">
                     {list.map((r) => {
                       const rNeeds = recipeIngredients(r);
@@ -1219,15 +1120,12 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                     ))}
                   </div>
 
-                  {/* bottom: recipe detail + inventory */}
                   <div className="flex gap-4">
-                    {/* recipe detail */}
                     <div className="mc-book-slot flex-1 p-3">
                       <div className="px-font px-shadow-sm text-center text-[9px] text-[#ffd23e] tracking-wider mb-3">
                         {sel ? sel.name.toUpperCase() : '—'}
                       </div>
                       <div className="flex items-center justify-center gap-5">
-                        {/* 3×3 pattern */}
                         <div className="grid grid-cols-3 gap-[3px]">
                           {gridCells.map((id, i) => (
                             <div key={i}
@@ -1237,9 +1135,7 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                             </div>
                           ))}
                         </div>
-                        {/* arrow */}
                         <ArrowRight size={26} className="text-white/45 flex-shrink-0" />
-                        {/* output */}
                         <button
                           key={bookFlash}
                           onClick={doCraft}
@@ -1262,7 +1158,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                           )}
                         </button>
                       </div>
-                      {/* ingredient tally */}
                       <div className="flex items-center justify-center gap-3 mt-3 pt-2 border-t border-white/10">
                         {[...needMap.entries()].map(([id, n]) => {
                           const have = countOf(id);
@@ -1279,7 +1174,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                       </div>
                     </div>
 
-                    {/* inventory */}
                     <div className="mc-book-slot w-[430px] p-3">
                       <div className="flex items-center justify-center gap-2 mb-3">
                         <Package size={11} className="text-[#8ab4ff]" />
@@ -1307,7 +1201,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 </div>
               </div>
 
-              {/* ---- bottom key hints ---- */}
               <div className="flex items-center gap-4 mt-3 pl-2 px-font px-shadow-sm text-[7px] text-white/55">
                 <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
                 <span className="flex items-center gap-1.5"><span className="mc-book-key">CLICK</span> CRAFT</span>
@@ -1319,7 +1212,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         );
       })()}
 
-      {/* ================= FURNACE (RMB a placed furnace) ================= */}
       {phase === 'ready' && stats && stats.furnaceOpen && (() => {
         const g = game();
         const inv = g?.inventory;
@@ -1329,19 +1221,14 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         const burn = stats.furnaceBurn ?? 0;
         const cook = stats.furnaceCook ?? 0;
 
-        // Furnace slots: one click returns the whole stack to the inventory
-        // (like MC shift-click); output collects everything.
         const takeBack = (slot: 'input' | 'fuel' | 'output') => () => {
           g.furnaceTransfer(slot, true);
           refreshInv();
         };
-        // Inventory stacks: one click auto-routes the whole stack —
-        // smeltable → input, fuel → fuel. Exactly MC's shift-click behaviour.
         const quickMove = (isHotbar: boolean, index: number) => () => {
           g.furnaceQuickMove({ isHotbar, index });
           refreshInv();
         };
-        /** eligibility → outline colour class for an inventory stack */
         const slotClass = (item: SlotItem | null): string => {
           if (!item || item.kind !== 'block') return 'opacity-60';
           if (smeltResult(item.blockId))
@@ -1360,23 +1247,19 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 <X size={14} />
               </button>
 
-              {/* title */}
               <div className="flex items-center justify-center gap-2 mb-4">
                 <Flame size={13} className={burn > 0 ? 'text-[#ff8b4e]' : 'text-white/40'} />
                 <span className="px-font px-shadow text-[12px] text-white tracking-widest">FURNACE</span>
               </div>
 
-              {/* smelting row: input over fuel, flame gauge, arrow, output */}
               <div className="flex items-center justify-center gap-4 mb-4">
                 <div className="flex flex-col items-center gap-2">
-                  {/* input */}
                   <button onClick={takeBack('input')} title={fur.input ? 'Click: return to inventory' : 'Click a smeltable item below to load'}
                     className={`mc-book-slot w-[52px] h-[52px] flex items-center justify-center relative
                       ${fur.input ? 'mc-book-slot-hoverable cursor-pointer' : '!outline-dashed !outline-[#6dc24a]/40'}`}>
                     {!fur.input && <span className="px-font text-[6px] text-[#6dc24a]/60 absolute inset-0 flex items-center justify-center">SMELT</span>}
                     <RenderSlotItem item={fur.input} />
                   </button>
-                  {/* flame gauge */}
                   <div className="relative w-[26px] h-[26px]">
                     <Flame size={26} className="absolute inset-0 text-white/12" strokeWidth={2} />
                     <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(${(1 - burn) * 100}% 0 0 0)` }}>
@@ -1384,7 +1267,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                         style={{ filter: burn > 0 ? 'drop-shadow(0 0 5px rgba(255,139,78,0.85))' : 'none' }} />
                     </div>
                   </div>
-                  {/* fuel */}
                   <button onClick={takeBack('fuel')} title={fur.fuel ? 'Click: return to inventory' : 'Click a fuel item below to load (planks, logs, leaves, cactus)'}
                     className={`mc-book-slot w-[52px] h-[52px] flex items-center justify-center relative
                       ${fur.fuel ? 'mc-book-slot-hoverable cursor-pointer' : '!outline-dashed !outline-[#ff8b4e]/40'}`}>
@@ -1393,7 +1275,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                   </button>
                 </div>
 
-                {/* progress arrow */}
                 <div className="relative w-[62px] h-[22px] flex items-center">
                   <div className="absolute inset-0 flex items-center">
                     <ArrowRight size={30} className="text-white/15" strokeWidth={2.5} />
@@ -1404,7 +1285,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                   </div>
                 </div>
 
-                {/* output */}
                 <button onClick={takeBack('output')} title="Click: collect"
                   className={`mc-book-slot w-[62px] h-[62px] flex items-center justify-center relative
                     ${fur.output ? 'cursor-pointer !outline-[#6dc24a] hover:!bg-[#3f5a34]/80' : 'opacity-60'}`}>
@@ -1412,7 +1292,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 </button>
               </div>
 
-              {/* interactive inventory: click a highlighted stack to load it */}
               <div className="mc-book-slot p-3">
                 <div className="flex items-center justify-center gap-3 mb-2">
                   <Package size={11} className="text-[#8ab4ff]" />
@@ -1443,7 +1322,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
                 </div>
               </div>
 
-              {/* key hints */}
               <div className="flex items-center gap-4 mt-3 px-font px-shadow-sm text-[7px] text-white/55">
                 <span className="flex items-center gap-1.5"><span className="mc-book-key !text-[#ff5347]">ESC</span> EXIT</span>
                 <span>CLICK ITEM → AUTO-LOADS · CLICK FURNACE SLOT → RETURNS</span>
@@ -1455,7 +1333,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
 
       {phase === 'loading' && <LoadingScreen progress={progress} label={label} />}
 
-      {/* ============ WARM RE-ENTRY: slim resume chip (no title screen) ============ */}
       {wantPrompt && promptReady && (
         <div className="absolute inset-x-0 bottom-[16%] z-40 flex justify-center pointer-events-none overlay-in">
           <button
@@ -1472,7 +1349,6 @@ export function HUD({ phase, locked, hasPlayed, coldStart, progress, label, stat
         </div>
       )}
 
-      {/* ============================== START / PAUSE ============================== */}
       {showMenu && (
         <div className="absolute inset-0 z-40 flex items-center justify-center overlay-in"
           style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(24,34,54,0.82), rgba(6,8,12,0.94))' }}>

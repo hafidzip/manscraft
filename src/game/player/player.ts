@@ -1,8 +1,3 @@
-/**
- * Player — kinematic character controller with AABB-vs-voxel collision.
- * Axis-separated integration with cell-boundary snapping (never tunnels),
- * swimming physics, and coyote-free instant jumping.
- */
 
 import * as THREE from 'three';
 import * as C from '../core/constants';
@@ -24,7 +19,7 @@ const CROUCH_HEIGHT = 1.35;
 const CROUCH_EYE = 1.12;
 
 export class Player {
-  readonly pos = new THREE.Vector3(8.5, 45, 8.5); // feet position
+  readonly pos = new THREE.Vector3(8.5, 45, 8.5);
   readonly vel = new THREE.Vector3();
   yaw = 0;
   pitch = 0;
@@ -32,10 +27,8 @@ export class Player {
   inWater = false;
   headInWater = false;
   wasFalling = 0;
-  /** was the player in water last frame? used for water-exit jump */
   private wasInWater = false;
 
-  // unified-game viewmodel state (consumed by the weapon system)
   movePhase = 0;
   speedSmooth = 0;
   sprintAmt = 0;
@@ -43,16 +36,13 @@ export class Player {
   recoilY = 0;
   shake = 0;
 
-  // ---- crouch (ported from the voxel-fps controller) ----
   crouching = false;
-  crouchAmt = 0; // 0 = standing, 1 = fully crouched
-  /** current collider height (shrinks while crouching) */
+  crouchAmt = 0;
   height = C.PLAYER_HEIGHT;
 
-  // ---- death / collapse animation state (ported from the voxel-fps controller)
   dying = false;
   deathT = 0;
-  private deathSide = 1;          // -1 topple left, +1 topple right
+  private deathSide = 1;
   private deathYaw0 = 0;
   private deathYawTarget = 0;
   private deathPitch0 = 0;
@@ -66,7 +56,6 @@ export class Player {
     this.vel.set(0, 0, 0);
   }
 
-  /** camera pitch/yaw kick from gunfire (decays each frame) */
   addRecoil(pitch: number, yawR: number): void {
     this.recoilP += pitch;
     this.recoilY += yawR;
@@ -76,11 +65,6 @@ export class Player {
     this.shake = Math.min(0.06, this.shake + amp);
   }
 
-  /**
-   * Begin the death collapse (ported from voxel-fps Player.startDeath).
-   * `attackerPos` makes the body topple away from the incoming fire and
-   * slowly turn the head toward the killer.
-   */
   startDeath(attackerPos?: THREE.Vector3): void {
     if (this.dying) return;
     this.dying = true;
@@ -97,11 +81,9 @@ export class Player {
       const dx = attackerPos.x - this.pos.x;
       const dz = attackerPos.z - this.pos.z;
       const len = Math.hypot(dx, dz) || 1;
-      // camera right vector at the current yaw
       const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
       const dotRight = (dx / len) * rx + (dz / len) * rz;
-      this.deathSide = dotRight > 0 ? -1 : 1;   // topple away from the shot
-      // turn the head toward whoever killed us
+      this.deathSide = dotRight > 0 ? -1 : 1;
       const target = Math.atan2(-dx, -dz);
       let d = target - this.yaw;
       while (d > Math.PI) d -= Math.PI * 2;
@@ -119,7 +101,6 @@ export class Player {
     this.recoilY = 0;
   }
 
-  /** advance the collapse while dead (engine calls this each frame) */
   updateDeath(dt: number): void {
     this.deathT += dt;
     this.vel.set(0, 0, 0);
@@ -130,12 +111,6 @@ export class Player {
     this.recoilY *= Math.max(0, 1 - 9 * dt);
   }
 
-  /**
-   * Death camera (ported verbatim from voxel-fps Player.applyDeathCamera):
-   * an impact jolt, knees buckling, the body toppling onto its side with the
-   * head arcing over, a hard ground impact with rebound, then a slow settle
-   * with fading twitches.
-   */
   applyDeathCamera(cam: THREE.PerspectiveCamera): void {
     const t = this.deathT;
     const S = this.deathSide;
@@ -144,25 +119,20 @@ export class Player {
       return x * x * (3 - 2 * x);
     };
 
-    // --- collapse curve: slow buckle, accelerating fall, hard stop at ~0.85s
     const FALL_START = 0.09, FALL_END = 0.86;
     const p = THREE.MathUtils.clamp((t - FALL_START) / (FALL_END - FALL_START), 0, 1);
-    const fall = Math.pow(p, 1.75);                       // gravity-like accel
+    const fall = Math.pow(p, 1.75);
 
-    // --- ground impact rebound (head bouncing off the dirt)
     const since = t - FALL_END;
     const bounce = since > 0 ? Math.exp(-since * 8.5) * Math.sin(since * 21) : 0;
 
-    // --- impact jolt from the killing shot
     const jolt = Math.exp(-t * 11);
     const joltP = jolt * Math.sin(t * 46) * 0.055;
     const joltY = jolt * Math.sin(t * 33 + 1.1) * 0.04;
 
-    // --- height: eye level down to just above the ground
     const GROUND_EYE = 0.26;
     const eyeY = THREE.MathUtils.lerp(C.EYE_HEIGHT, GROUND_EYE, fall) + bounce * 0.055;
 
-    // --- the head arcs sideways as the body pivots on its feet
     const lateral = Math.sin(fall * 1.5) * 0.62 * S;
     const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
     const fwdX = -Math.sin(this.yaw), fwdZ = -Math.cos(this.yaw);
@@ -174,15 +144,12 @@ export class Player {
       this.pos.z + rz * lateral + fwdZ * forwardSlump
     );
 
-    // --- slowly turn the head toward the killer while going down
     const look = ss(0.05, 1.25);
     const yaw = THREE.MathUtils.lerp(this.deathYaw0, this.deathYawTarget, look) + joltY;
 
-    // --- roll onto the side, pitch tips toward the ground
     const roll = fall * 1.52 * S + bounce * 0.085 * S;
     const pitch = THREE.MathUtils.lerp(this.deathPitch0, -0.22, fall) + joltP + bounce * 0.05;
 
-    // --- fading death twitches once settled
     let twitchR = 0, twitchP = 0;
     if (t > 1.0) {
       const q = Math.exp(-(t - 1.0) * 1.1);
@@ -212,7 +179,6 @@ export class Player {
     return new THREE.Vector3(this.pos.x, this.pos.y + eyeH, this.pos.z);
   }
 
-  /** Is there enough headroom to return to full standing height? */
   private canStandUp(): boolean {
     const hw = C.PLAYER_HALF_WIDTH;
     const minX = Math.floor(this.pos.x - hw), maxX = Math.floor(this.pos.x + hw);
@@ -231,12 +197,10 @@ export class Player {
   }
 
   update(dt: number, inp: InputState): void {
-    // --- sensing (any water state: source, flowing, falling) ---
     const feetId = this.blockAt(this.pos.x, this.pos.y + 0.3, this.pos.z);
     this.inWater = isWaterId(feetId) || isWaterId(this.blockAt(this.pos.x, this.pos.y + 0.9, this.pos.z));
     this.headInWater = isWaterId(this.blockAt(this.pos.x, this.pos.y + C.EYE_HEIGHT, this.pos.z));
 
-    // --- desired horizontal velocity from yaw ---
     const fx = -Math.sin(this.yaw);
     const fz = -Math.cos(this.yaw);
     const rx = -fz;
@@ -250,9 +214,8 @@ export class Player {
     const len = Math.hypot(wx, wz);
     if (len > 0) { wx /= len; wz /= len; }
 
-    // ---- crouch: hold to duck; can only stand back up with headroom ----
     if (!inp.crouch && this.crouching && !this.canStandUp()) {
-      this.crouching = true; // blocked by a ceiling
+      this.crouching = true;
     } else {
       this.crouching = inp.crouch && !this.inWater;
     }
@@ -270,10 +233,8 @@ export class Player {
     this.vel.x += (wx * speed - this.vel.x) * k;
     this.vel.z += (wz * speed - this.vel.z) * k;
 
-    // --- vertical ---
     if (this.inWater) {
       this.vel.y -= C.GRAVITY * 0.24 * dt;
-      // Allow a normal jump from ground even when in water (Minecraft-style)
       if (inp.jump && this.onGround && !this.crouching) {
         this.vel.y = C.JUMP_VELOCITY;
         this.onGround = false;
@@ -289,23 +250,18 @@ export class Player {
         this.vel.y = C.JUMP_VELOCITY;
         this.onGround = false;
       }
-      // Jump out of water: if we just exited water while holding jump,
-      // give a proper jump boost so the player can climb out.
       if (inp.jump && this.wasInWater && !this.crouching) {
         this.vel.y = C.JUMP_VELOCITY;
       }
     }
 
-    // Track water state for next-frame water-exit detection.
     this.wasInWater = this.inWater;
 
-    // --- integrate with collision (axis separated) ---
     this.moveX(this.vel.x * dt);
     this.moveZ(this.vel.z * dt);
     this.onGround = false;
     this.moveY(this.vel.y * dt);
 
-    // --- unified-game viewmodel signals ---
     const hs = Math.hypot(this.vel.x, this.vel.z);
     this.speedSmooth += (hs - this.speedSmooth) * Math.min(1, dt * 10);
     this.sprintAmt += ((inp.sprint && this.onGround && hs > 0.5 ? 1 : 0) - this.sprintAmt) * Math.min(1, dt * 8);
@@ -352,7 +308,6 @@ export class Player {
 
   private moveY(d: number): void {
     if (d === 0) {
-      // still register ground contact when standing still
       this.pos.y -= EPS;
       if (this.collides()) {
         this.pos.y += EPS;
@@ -372,12 +327,10 @@ export class Player {
     }
   }
 
-  /** horizontal speed (for footsteps / bob / fov) */
   horizontalSpeed(): number {
     return Math.hypot(this.vel.x, this.vel.z);
   }
 
-  /** block id directly beneath the feet (for footstep sounds) */
   groundBlock(): number {
     const id = this.world.getBlockRaw(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.01), Math.floor(this.pos.z));
     return id >= 0 ? id : B.STONE;

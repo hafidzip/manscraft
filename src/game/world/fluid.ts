@@ -1,25 +1,8 @@
-/**
- * Dynamic water simulation — Minecraft-style scheduled fluid ticks.
- *
- * Model (faithful to classic MC):
- *  - Source blocks (level 0) are infinite and eternal; they can only be
- *    removed by scooping them or replacing them with a solid block.
- *  - Water always tries to fall straight down, preserving its level, as
- *    "falling water" (renders as a full column -> waterfalls).
- *  - Once a water cell has support underneath (solid ground or standing
- *    water), it spreads horizontally with level + 1, up to 7 levels.
- *  - Every flowing cell must keep a valid parent (a lower-level neighbor,
- *    or falling water above). Lose the parent -> drain away. Drainage
- *    therefore cascades automatically when a source is removed.
- *
- * Ticks are delayed (~120 ms hop) so flow & drainage visibly cascade.
- * Edits run inside a World batch so affected chunks remesh once per frame.
- */
 
 import { B, DEFS, waterId, waterInfo, WATER_MAX_LEVEL } from './blocks';
 import type { World } from './world';
 
-const FLOW_DELAY = 0.12; // seconds per flow hop
+const FLOW_DELAY = 0.12;
 const MAX_PER_FRAME = 420;
 const MAX_QUEUE = 6000;
 
@@ -46,7 +29,6 @@ export class FluidSim {
     return `${x},${y},${z}`;
   }
 
-  /** schedule a single cell for revalidation */
   poke(x: number, y: number, z: number, delay = FLOW_DELAY): void {
     const k = this.key(x, y, z);
     if (this.pending.has(k) || this.queue.length > MAX_QUEUE) return;
@@ -54,7 +36,6 @@ export class FluidSim {
     this.queue.push({ x, y, z, time: this.now + delay });
   }
 
-  /** schedule a cell and its 6 neighbors (call after block edits near water) */
   pokeAround(x: number, y: number, z: number, delay = FLOW_DELAY): void {
     this.poke(x, y, z, delay);
     for (const [ox, oz] of H_OFF) this.poke(x + ox, y, z + oz, delay);
@@ -88,7 +69,6 @@ export class FluidSim {
     }
   }
 
-  // ------------------------------------------------------------- sim rules
 
   private g(x: number, y: number, z: number): number {
     return this.world.getBlockRaw(x, y, z);
@@ -96,13 +76,12 @@ export class FluidSim {
 
   private replaceable(id: number): boolean {
     if (id === -1) return false;
-    return id === B.AIR || DEFS[id].cross === true; // air & plants
+    return id === B.AIR || DEFS[id].cross === true;
   }
 
-  /** solid ground or standing (non-falling) water below = this cell can flow sideways */
   private hasSupport(x: number, y: number, z: number): boolean {
     const below = this.g(x, y - 1, z);
-    if (below === -1) return true; // unloaded: treat as solid wall
+    if (below === -1) return true;
     if (DEFS[below].solid) return true;
     const bi = waterInfo(below);
     return bi !== null && !bi.falling;
@@ -113,7 +92,6 @@ export class FluidSim {
     const info = waterInfo(id);
     if (!info) return;
 
-    // source: eternal, just keeps its children alive
     if (info.level === 0 && !info.falling) {
       this.fallBelow(x, y, z, 0);
       if (this.hasSupport(x, y, z)) this.spreadHorizontal(x, y, z, 1);
@@ -121,7 +99,6 @@ export class FluidSim {
     }
 
     if (info.falling) {
-      // falling water only exists while fed from above
       const ai = waterInfo(this.g(x, y + 1, z));
       if (!ai) {
         this.drain(x, y, z);
@@ -138,7 +115,6 @@ export class FluidSim {
       return;
     }
 
-    // flowing water, level >= 1: needs the best (lowest) reachable parent
     let best = Infinity;
     for (const [ox, oz] of H_OFF) {
       const ni = waterInfo(this.g(x + ox, y, z + oz));
@@ -151,7 +127,6 @@ export class FluidSim {
       return;
     }
     if (best !== info.level) {
-      // level correction toward the closest source
       this.world.setBlock(x, y, z, waterId(best, false));
       this.poke(x, y, z);
     }
@@ -161,7 +136,6 @@ export class FluidSim {
     }
   }
 
-  /** create / correct the falling cell directly below */
   private fallBelow(x: number, y: number, z: number, level: number): void {
     const below = this.g(x, y - 1, z);
     if (this.replaceable(below)) {
@@ -176,7 +150,6 @@ export class FluidSim {
     }
   }
 
-  /** create / correct flowing neighbors at childLevel */
   private spreadHorizontal(x: number, y: number, z: number, childLevel: number): void {
     for (const [ox, oz] of H_OFF) {
       const nx = x + ox;
@@ -188,7 +161,6 @@ export class FluidSim {
         continue;
       }
       const ni = waterInfo(nid);
-      // shorten the path: neighbor has a worse (higher) level than we provide
       if (ni && !ni.falling && ni.level > childLevel) {
         this.world.setBlock(nx, y, nz, waterId(childLevel, false));
         this.poke(nx, y, nz);

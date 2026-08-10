@@ -1,8 +1,3 @@
-/**
- * Block registry — the single source of truth for every block type.
- * Each definition declares its atlas tiles, physics flags, break behavior,
- * sound material and particle palette.
- */
 
 import { TILES, tintsFromTheme } from '../core/textures';
 import type { PlanetTheme } from '../space/theme';
@@ -29,11 +24,6 @@ export const B = {
   FURNACE: 18,
   FURNACE_LIT: 19,
   COBBLE: 20,
-  // NOTE: ids 24-38 are reserved for the dynamic water encoding
-  // (WATER_FLOW_BASE=24..30, WATER_FALL_BASE=31..38). Gemstone ores MUST live
-  // clear of that range, otherwise isWaterId() treats them as flowing water
-  // and they render/simulate as random water blocks.
-  // gemstone ores (40-47)
   ORE_RUBY: 40,
   ORE_AMBER: 41,
   ORE_LUMINESCENCE: 42,
@@ -44,21 +34,16 @@ export const B = {
   ORE_EMERALD: 47,
   COAL_ORE: 48,
   TORCH: 49,
-  // item-only pseudo blocks (held/dropped icons, never generated or placed)
   COAL_ITEM: 50,
   STICK_ITEM: 51,
-  // conveyor belt (4 directional variants)
   CONVEYOR_N: 52,
   CONVEYOR_E: 53,
   CONVEYOR_S: 54,
   CONVEYOR_W: 55,
-  // inserter (4 directional variants — grabs drops behind and places in front)
   INSERTER_N: 56,
   INSERTER_E: 57,
   INSERTER_S: 58,
   INSERTER_W: 59,
-  // laser miner (4 directional variants — a turret that mines blocks in the
-  // cone of view in front and drops them behind; the turret is a dynamic mesh)
   LASER_MINER_N: 60,
   LASER_MINER_E: 61,
   LASER_MINER_S: 62,
@@ -69,27 +54,18 @@ export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 
 
 export interface BlockDef {
   name: string;
-  /** atlas tiles */
   top: number;
   side: number;
   bottom: number;
-  /** tile used for the hotbar icon */
   icon: number;
-  /** participates in collision */
   solid: boolean;
-  /** fully occludes neighbor faces */
   opaque: boolean;
-  /** alpha-cutout rendering (leaves, glass, plants) */
   cutout?: boolean;
-  /** cross-quad plant shape */
   cross?: boolean;
   water?: boolean;
-  /** seconds to mine; Infinity = unbreakable */
   hardness: number;
   sound: SoundMat;
-  /** particle palette for break VFX */
   colors: number[];
-  /** emits point light (torches). 0 = none */
   light?: number;
 }
 
@@ -221,7 +197,6 @@ DEFS[B.FURNACE_LIT] = def({
   colors: [0x7c7c80, 0xffa028, 0xe45818, 0xffd65c],
 });
 
-// ---- gemstone ores: harder than stone, valuable drops ----
 DEFS[B.ORE_RUBY] = def({
   name: 'Ruby Ore', top: TILES.ore_ruby, hardness: 2.5, sound: 'stone',
   colors: [0xb41e28, 0xff505a, 0x7a7a80],
@@ -264,8 +239,6 @@ DEFS[B.TORCH] = def({
   hardness: 0.05, sound: 'wood', light: 1,
   colors: [0xffd65c, 0xffa028, 0x6b5136],
 });
-// item-only pseudo blocks — never generated/placed, just a tile source for
-// the held item + floating drop meshes so coal & sticks read correctly.
 DEFS[B.COAL_ITEM] = def({
   name: 'Coal', top: TILES.coal, icon: TILES.coal,
   solid: false, opaque: false, cutout: true,
@@ -277,7 +250,6 @@ DEFS[B.STICK_ITEM] = def({
   hardness: 0, sound: 'wood', colors: [0x8a643a, 0xa67c4a],
 });
 
-// ---- conveyor belt: one block per facing, distinguished by its arrow tile ----
 const beltDef = (top: number): BlockDef =>
   def({
     name: 'Conveyor Belt',
@@ -290,8 +262,6 @@ DEFS[B.CONVEYOR_E] = beltDef(TILES.conveyor_top_e);
 DEFS[B.CONVEYOR_S] = beltDef(TILES.conveyor_top_s);
 DEFS[B.CONVEYOR_W] = beltDef(TILES.conveyor_top_w);
 
-// ---- inserter: solid machine block; the swinging arm is a dynamic mesh ----
-// managed by the InserterManager (not part of the chunk mesh).
 const inserterDef = (top: number): BlockDef =>
   def({
     name: 'Inserter',
@@ -304,13 +274,10 @@ DEFS[B.INSERTER_E] = inserterDef(TILES.inserter_top_e);
 DEFS[B.INSERTER_S] = inserterDef(TILES.inserter_top_s);
 DEFS[B.INSERTER_W] = inserterDef(TILES.inserter_top_w);
 
-/** Returns true for any inserter variant. */
 export function isInserter(id: number): boolean {
   return id === B.INSERTER_N || id === B.INSERTER_E || id === B.INSERTER_S || id === B.INSERTER_W;
 }
 
-// ---- laser miner: solid machine base; the turret + beam are dynamic meshes ----
-// managed by the LaserMinerManager (not part of the chunk mesh).
 const laserMinerDef = (): BlockDef =>
   def({
     name: 'Laser Miner',
@@ -324,17 +291,11 @@ DEFS[B.LASER_MINER_E] = laserMinerDef();
 DEFS[B.LASER_MINER_S] = laserMinerDef();
 DEFS[B.LASER_MINER_W] = laserMinerDef();
 
-/** Returns true for any laser miner variant. */
 export function isLaserMiner(id: number): boolean {
   return id === B.LASER_MINER_N || id === B.LASER_MINER_E ||
     id === B.LASER_MINER_S || id === B.LASER_MINER_W;
 }
 
-/**
- * Returns the forward (mining) direction [dx, dz] for a laser miner block, or
- * null. It mines the cone of view in FRONT and ejects drops BEHIND.
- * N = -Z, E = +X, S = +Z, W = -X.
- */
 export function laserMinerDir(id: number): [number, number] | null {
   switch (id) {
     case B.LASER_MINER_N: return [0, -1];
@@ -345,11 +306,6 @@ export function laserMinerDir(id: number): [number, number] | null {
   }
 }
 
-/**
- * Returns the drop direction [dx, dz] for an inserter block (it picks drops up
- * from the cell BEHIND and places them into the cell IN FRONT), or null.
- * N = -Z, E = +X, S = +Z, W = -X.
- */
 export function inserterDir(id: number): [number, number] | null {
   switch (id) {
     case B.INSERTER_N: return [0, -1];
@@ -360,15 +316,10 @@ export function inserterDir(id: number): [number, number] | null {
   }
 }
 
-/** Returns true for any conveyor variant. */
 export function isConveyor(id: number): boolean {
   return id === B.CONVEYOR_N || id === B.CONVEYOR_E || id === B.CONVEYOR_S || id === B.CONVEYOR_W;
 }
 
-/**
- * Returns the push direction [dx, dz] for a conveyor block, or null.
- * N = -Z, E = +X, S = +Z, W = -X.
- */
 export function conveyorDir(id: number): [number, number] | null {
   switch (id) {
     case B.CONVEYOR_N: return [0, -1];
@@ -379,19 +330,12 @@ export function conveyorDir(id: number): [number, number] | null {
   }
 }
 
-/** hotbar pseudo-item: the water bucket (not a placeable block id) */
 export const BUCKET_ID = 100;
 
-/** blocks the player can select (hotbar slots 1-9) */
 export const HOTBAR: number[] = [
   B.GRASS, B.DIRT, B.STONE, B.PLANKS, B.LOG, B.SAND, B.GLASS, B.LEAVES, BUCKET_ID,
 ];
 
-// ---------------------------------------------------------------------------
-// dynamic water state encoding
-// ---------------------------------------------------------------------------
-// level 0 = source (B.WATER), levels 1..7 = flowing (ids 24..30),
-// falling water (waterfalls) levels 0..7 = ids 31..38
 
 export const WATER_FLOW_BASE = 24;
 export const WATER_FALL_BASE = 31;
@@ -419,14 +363,12 @@ export function waterId(level: number, falling: boolean): number {
 
 export const WATER_MAX_LEVEL = 7;
 
-/** rendered surface height of a water state (top face as a fraction of a block) */
 export function waterHeight(level: number, falling: boolean): number {
   if (falling) return 1;
-  if (level === 0) return 0.875; // sources sit at 14/16
-  return (8 - level) / 9; // MC formula: level 1 -> 0.778 ... level 7 -> 0.111
+  if (level === 0) return 0.875;
+  return (8 - level) / 9;
 }
 
-// register defs for every dynamic water state + fill reserved holes safely
 {
   const waterDef = (name: string): BlockDef =>
     def({
@@ -440,11 +382,7 @@ export function waterHeight(level: number, falling: boolean): number {
   }
 }
 
-// ---------------------------------------------------------------------------
-// theme tinting for particle / minimap colours
-// ---------------------------------------------------------------------------
 
-/** which tint group each block's particle palette follows */
 const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.STONE]: 'stone', [B.SAND]: 'sand',
   [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.WATER]: 'water', [B.SNOW]: 'snow',
@@ -459,14 +397,8 @@ const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.LASER_MINER_S]: 'stone', [B.LASER_MINER_W]: 'stone',
 };
 
-/** stock colours, captured once so re-theming is never cumulative */
 const BASE_COLORS: number[][] = DEFS.map((d) => (d ? d.colors.slice() : []));
 
-/**
- * Re-tint DEFS[].colors to match a planet theme. Call once right after
- * createTextures(theme) so break particles and the minimap agree with the
- * atlas. Passing null/undefined restores the stock palette.
- */
 export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
   const tints = tintsFromTheme(theme);
   for (let id = 0; id < DEFS.length; id++) {

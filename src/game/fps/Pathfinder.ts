@@ -1,7 +1,3 @@
-// Voxel A* pathfinding for humanoid agents (2-block tall, 1-2 block jump-up,
-// multi-block falls, gap bridging). Pooled binary heap + hard node budget
-// keeps cost bounded. Returns a best-effort partial path when the goal is
-// unreachable so agents still close the distance.
 import * as THREE from 'three';
 import { type WorldLike } from './World';
 import { WORLD_SIZE, WORLD_HEIGHT } from '../core/constants';
@@ -12,7 +8,6 @@ const LAYER = SIZE * SIZE;
 
 const packKey = (x: number, y: number, z: number) => (y * SIZE + z) * SIZE + x;
 
-// ------------------------------------------------------------------ min-heap
 class MinHeap {
   private keys: number[] = [];
   private prio: number[] = [];
@@ -59,33 +54,29 @@ class MinHeap {
   }
 }
 
-// pooled search state (single-threaded, one search at a time)
 const heap = new MinHeap();
 const gScore = new Map<number, number>();
 const cameFrom = new Map<number, number>();
 const closed = new Set<number>();
 
 export interface PathOptions {
-  maxNodes?: number;    // max A* expansions (CPU guard)
-  maxFall?: number;     // max blocks an agent drops in one step
-  maxJump?: number;     // max blocks the agent jumps up (1 = step, 2 = pillar-jump)
-  reachRadius?: number; // accept within this distance of goal
+  maxNodes?: number;
+  maxFall?: number;
+  maxJump?: number;
+  reachRadius?: number;
 }
 
-/** Can a 2-block-tall entity stand with its feet at (x,y,z)? */
 export function canStand(world: WorldLike, x: number, y: number, z: number): boolean {
   if (y < 1 || y >= HEIGHT - 1) return false;
   if (x < 0 || z < 0 || x >= SIZE || z >= SIZE) return false;
   return world.solid(x, y - 1, z) && !world.solid(x, y, z) && !world.solid(x, y + 1, z);
 }
 
-/** Can a 2-block-tall entity pass through (x,y,z) — no floor requirement. */
 function passable(world: WorldLike, x: number, y: number, z: number): boolean {
   if (y < 0 || y >= HEIGHT - 1 || x < 0 || z < 0 || x >= SIZE || z >= SIZE) return false;
   return !world.solid(x, y, z) && !world.solid(x, y + 1, z);
 }
 
-/** Snap a position to the nearest standable voxel (scans down, then up). */
 export function snapToGround(world: WorldLike, x: number, y: number, z: number, range = 8): number {
   if (canStand(world, x, y, z)) return y;
   for (let d = 1; d <= range; d++) {
@@ -100,10 +91,6 @@ const NEIGHBORS: [number, number][] = [
   [1, 1], [1, -1], [-1, 1], [-1, -1],
 ];
 
-/**
- * A* through the voxel world. Returns true = full path found, false =
- * partial best-effort path toward the goal (or empty = totally stuck).
- */
 export function findPath(
   world: WorldLike,
   sx: number, sy: number, sz: number,
@@ -148,7 +135,7 @@ export function findPath(
 
   while (heap.size > 0 && expanded < maxNodes) {
     const cur = heap.pop();
-    if (closed.has(cur)) continue;   // skip stale entries
+    if (closed.has(cur)) continue;
     closed.add(cur);
 
     const cx = cur % SIZE;
@@ -172,8 +159,6 @@ export function findPath(
       const diag = dx !== 0 && dz !== 0;
       const baseCost = diag ? 1.414 : 1;
 
-      // diagonal must not clip corners (all 4 cells clear at the 2 adjacent
-      // columns as well as the destination)
       if (diag) {
         if (!passable(world, cx + dx, cy, cz) || !passable(world, cx, cy, cz + dz)) continue;
       }
@@ -181,28 +166,23 @@ export function findPath(
       let ny = -1;
       let cost = baseCost;
 
-      // 1. flat walk
       if (canStand(world, nx, cy, nz)) {
         ny = cy;
       }
-      // 2. step / jump up 1 block (need headroom above current position)
       if (ny < 0 && maxJump >= 1 && canStand(world, nx, cy + 1, nz) && !world.solid(cx, cy + 2, cz)) {
         ny = cy + 1;
         cost = baseCost + 0.9;
       }
-      // 3. jump up 2 blocks (need 3 blocks clear above current feet)
       if (ny < 0 && maxJump >= 2 && canStand(world, nx, cy + 2, nz) &&
           !world.solid(cx, cy + 2, cz) && !world.solid(cx, cy + 3, cz) &&
           passable(world, nx, cy, nz)) {
         ny = cy + 2;
         cost = baseCost + 2.0;
       }
-      // 4. walk off a ledge and fall
       if (ny < 0) {
         for (let d = 1; d <= maxFall; d++) {
           const fy = cy - d;
           if (fy < 1) break;
-          // the drop shaft at the neighbor column must be open
           if (world.solid(nx, fy + 1, nz) || world.solid(nx, fy + 2, nz)) break;
           if (canStand(world, nx, fy, nz)) {
             ny = fy;
@@ -211,18 +191,13 @@ export function findPath(
           }
         }
       }
-      // 5. bridge-over-gap: step across a 1-block gap at the same level
-      //    (can be vital for crossing chasms or navigating architecture)
       if (ny < 0 && !diag) {
         const bx = cx + dx * 2, bz = cz + dz * 2;
         if (bx >= 0 && bz >= 0 && bx < SIZE && bz < SIZE &&
-            passable(world, nx, cy, nz) &&         // gap column is clear
-            canStand(world, bx, cy, bz)) {          // landing is solid
-          // add an intermediate waypoint at the landing
+            passable(world, nx, cy, nz) &&
+            canStand(world, bx, cy, bz)) {
           ny = cy;
           cost = baseCost * 2.2;
-          // The actual path will route to the gap then again to the landing,
-          // so we just treat the landing as the neighbor for A* purposes.
           const lKey = packKey(bx, cy, bz);
           const lng = cg + cost;
           const lp = gScore.get(lKey);
@@ -233,7 +208,7 @@ export function findPath(
             if (lh < bestH) { bestH = lh; bestKey = lKey; }
             heap.push(lKey, lng + lh);
           }
-          continue;   // skip normal neighbor insertion for this direction
+          continue;
         }
       }
 
@@ -254,7 +229,6 @@ export function findPath(
     }
   }
 
-  // reconstruct
   let k = bestKey;
   const rev: number[] = [];
   let guard = 0;

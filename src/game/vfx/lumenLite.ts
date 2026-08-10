@@ -1,18 +1,8 @@
-/**
- * LumenLitePass — production fixed using user's provided SSGI + SSR shader
- *
- * Integrates into the existing pipeline:
- *   scene → mainRT (full, with depthTexture)
- *   ssgi (half-res) → giRT (diffuse bake + AO in alpha)
- *   blur (half-res)  → blurRT (bilateral depth-aware)
- *   ssr + composite (full) → lightingRT (mainRT + gi + reflection + ACES)
- *   depthFog → fogRT → bloom → volumetric → output
- */
 
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
-const VERT = /* glsl */ `
+const VERT = `
   varying vec2 vUv;
   void main() {
     vUv = uv;
@@ -20,8 +10,7 @@ const VERT = /* glsl */ `
   }
 `;
 
-// ------------------------------------------------------------------ DEPTH helpers (from user's code, cleaned for GLSL ES)
-const DEPTH_GLSL = /* glsl */ `
+const DEPTH_GLSL = `
   uniform sampler2D tDepth;
   uniform mat4 uInvProj;
   uniform vec2 uTexel;
@@ -80,8 +69,7 @@ const DEPTH_GLSL = /* glsl */ `
   }
 `;
 
-// Sky color lookup (analytical, no sample)
-const SKY_GLSL = /* glsl */ `
+const SKY_GLSL = `
   uniform vec3 uSkyColor;
   uniform vec3 uSunDirWorld;
   uniform float uDayFactor;
@@ -100,7 +88,7 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-const SSGI_FRAG = /* glsl */ `
+const SSGI_FRAG = `
   varying vec2 vUv;
   uniform sampler2D tDiffuse;
   uniform mat4 uProj;
@@ -191,7 +179,7 @@ const SSGI_FRAG = /* glsl */ `
   }
 `;
 
-const BLUR_FRAG = /* glsl */ `
+const BLUR_FRAG = `
   varying vec2 vUv;
   uniform sampler2D tDiffuse;
   uniform sampler2D tDepth;
@@ -215,7 +203,7 @@ const BLUR_FRAG = /* glsl */ `
   }
 `;
 
-const SSR_FRAG = /* glsl */ `
+const SSR_FRAG = `
   varying vec2 vUv;
   uniform sampler2D tScene;
   uniform sampler2D tGi;
@@ -348,11 +336,9 @@ export class LumenLitePass {
   readonly material: THREE.ShaderMaterial;
   private fsQuad: FullScreenQuad;
 
-  // Half-res render targets for SSGI + blur (created externally in engine)
   public giRT?: THREE.WebGLRenderTarget;
   public blurRT?: THREE.WebGLRenderTarget;
 
-  // Pass materials (created once)
   private giMat: THREE.ShaderMaterial;
   private blurMat: THREE.ShaderMaterial;
   private ssrMat: THREE.ShaderMaterial;
@@ -361,7 +347,6 @@ export class LumenLitePass {
   private ssrQuad: FullScreenQuad;
 
   constructor(private camera: THREE.PerspectiveCamera, public W: number, public H: number) {
-    // 3 passes: GI (half), blur (half), SSR + composite (full)
     this.giMat = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null }, tDepth: { value: null },
@@ -412,9 +397,7 @@ export class LumenLitePass {
     this.blurQuad = new FullScreenQuad(this.blurMat);
     this.ssrQuad = new FullScreenQuad(this.ssrMat);
 
-    // Composite material (only needed if using full pipeline with lightingRT)
-    // For simplicity use the SSR material as composite by feeding scene + gi directly
-    this.material = this.ssrMat; // alias for engine compatibility
+    this.material = this.ssrMat;
     this.fsQuad = this.ssrQuad;
   }
 
@@ -444,7 +427,6 @@ export class LumenLitePass {
     this.ssrMat.uniforms.uExposure.value = 1.15 + dayFactor * 0.25;
   }
 
-  // Full pipeline render using 3 stages
   renderPipeline(
     renderer: THREE.WebGLRenderer,
     mainRT: THREE.WebGLRenderTarget,
@@ -455,7 +437,6 @@ export class LumenLitePass {
     const w = this.W;
     const h = this.H;
 
-    // 1. Half-res SSGI pass (reads full-res mainRT scene + depth)
     this.giMat.uniforms.tDiffuse.value = mainRT.texture;
     this.giMat.uniforms.tDepth.value = mainRT.depthTexture;
     (this.giMat.uniforms.uInvProj.value as THREE.Matrix4).copy(
@@ -464,34 +445,25 @@ export class LumenLitePass {
     );
     (this.giMat.uniforms.uTexel.value as THREE.Vector2).set(1 / Math.max(1, w), 1 / Math.max(1, h));
     this.giMat.uniforms.uProj.value.copy(this.camera.projectionMatrix);
-    // GI: punchier bounce (1.1), softer AO (0.6), wider radius (8.0) for broader
-    // color bleed. The half-res pass is inherently low-frequency, so this
-    // doesn't add cost but lifts shadows noticeably.
     this.giMat.uniforms.uIntensitY.value = 1.1;
     this.giMat.uniforms.uAoStrength.value = 0.7;
     this.giMat.uniforms.uThickness.value = 0.22;
-    // Radius in view units — 8.0 covers a full terrain block at typical view
-    // distance, so bounce light from a sunlit wall reaches the ground behind.
     renderer.setRenderTarget(giTarget);
     renderer.clear();
     this.giQuad.render(renderer);
 
-    // 2. Half-res bilateral blur (horizontal + vertical = 2 passes if needed; do 1 pass here for perf)
-    // We'll do a single pass; for production quality do two passes (H then V) in sequence.
     this.blurMat.uniforms.tDiffuse.value = giTarget.texture;
-    this.blurMat.uniforms.tDepth.value = mainRT.depthTexture; // use full-res depth for sharp edge
-    this.blurMat.uniforms.uDirection.value.set(1, 0); // horizontal
+    this.blurMat.uniforms.tDepth.value = mainRT.depthTexture;
+    this.blurMat.uniforms.uDirection.value.set(1, 0);
     renderer.setRenderTarget(blurTarget);
     renderer.clear();
     this.blurQuad.render(renderer);
-    // Second blur pass vertical — overwrite blurTarget with vertical
     this.blurMat.uniforms.tDiffuse.value = blurTarget.texture;
     this.blurMat.uniforms.uDirection.value.set(0, 1);
-    renderer.setRenderTarget(blurTarget); // write back to same target
+    renderer.setRenderTarget(blurTarget);
     renderer.clear();
     this.blurQuad.render(renderer);
 
-    // 3. Full-res SSR + composite (main scene + blurred GI + reflection + ACES film tone)
     this.ssrMat.uniforms.tScene.value = mainRT.texture;
     this.ssrMat.uniforms.tGi.value = blurTarget.texture;
     this.ssrMat.uniforms.tDepth.value = mainRT.depthTexture;
@@ -501,11 +473,6 @@ export class LumenLitePass {
     );
     (this.ssrMat.uniforms.uTexel.value as THREE.Vector2).set(1 / Math.max(1, w), 1 / Math.max(1, h));
     this.ssrMat.uniforms.uProj.value.copy(this.camera.projectionMatrix);
-    // uView = View matrix (world -> view) = camera.matrixWorldInverse.
-    // uInvView = inverse of that (view -> world) = camera.matrixWorld.
-    // These were previously swapped, which fed world-space reconstruction,
-    // the water ripple normal and the sky-reflection direction a matrix
-    // transforming the WRONG way — a real source of broken/garbled GI+SSR.
     this.ssrMat.uniforms.uView.value.copy(this.camera.matrixWorldInverse);
     this.ssrMat.uniforms.uInvView.value.copy(this.camera.matrixWorld);
     this.ssrMat.uniforms.uTime.value = Date.now() * 0.001;
@@ -522,10 +489,7 @@ export class LumenLitePass {
     writeBuffer: THREE.WebGLRenderTarget,
     readBuffer: THREE.WebGLRenderTarget,
   ): void {
-    // Single-pass fallback: just render SSR composite directly (no half-res GI)
-    // In production pipeline, use renderPipeline above instead.
     this.ssrMat.uniforms.tScene.value = readBuffer.texture;
-    // provide a 1x1 black fallback for tGi so the composite does not sample null
     if (!this.ssrMat.uniforms.tGi.value) {
       const fallback = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
       fallback.needsUpdate = true;

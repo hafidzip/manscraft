@@ -1,19 +1,11 @@
-/**
- * Procedural texture system.
- * Every block texture is painted pixel-by-pixel onto a shared canvas atlas
- * (no image assets). Also produces:
- *  - a standalone animated water texture
- *  - 5 crack-stage overlay textures for block-breaking feedback
- *  - per-block data-URL icons for the hotbar
- */
 
 import * as THREE from 'three';
 import { mulberry32 } from './noise';
 import { PLANET_PALETTES } from '../space/palettes';
 import type { PlanetTheme } from '../space/theme';
 
-export const TILE = 16; // px per tile
-export const TPR = 8; // tiles per atlas row
+export const TILE = 16;
+export const TPR = 8;
 
 const TILE_NAMES = [
   'grass_top', 'grass_side', 'dirt', 'stone', 'sand', 'gravel',
@@ -23,15 +15,11 @@ const TILE_NAMES = [
   'craft_top', 'craft_side', 'craft_bottom',
   'furnace_front', 'furnace_front_lit', 'furnace_side', 'furnace_top',
   'cobble',
-  // gemstone ores
   'ore_ruby', 'ore_amber', 'ore_luminescence', 'ore_diamond',
   'ore_gold', 'ore_silver', 'ore_jade', 'ore_emerald',
-  // coal / crafting materials / torch
   'coal_ore', 'coal', 'stick', 'torch',
-  // conveyor belt: one arrow tile per facing + a shared chassis side
   'conveyor_top_n', 'conveyor_top_e', 'conveyor_top_s', 'conveyor_top_w',
   'conveyor_side',
-  // inserter: static base plate per facing (the arm itself is a dynamic mesh)
   'inserter_top_n', 'inserter_top_e', 'inserter_top_s', 'inserter_top_w',
   'inserter_side',
 ] as const;
@@ -44,9 +32,6 @@ export const ATLAS_ROWS = Math.ceil(TILE_NAMES.length / TPR);
 export const ATLAS_W = ATLAS_COLS * TILE;
 export const ATLAS_H = ATLAS_ROWS * TILE;
 
-// ---------------------------------------------------------------------------
-// low-level painting helpers
-// ---------------------------------------------------------------------------
 
 type RGB = readonly [number, number, number];
 
@@ -67,12 +52,7 @@ function vary(base: RGB, amt: number, r: () => number): RGB {
   ] as const;
 }
 
-// --------------------------------------------------------------------------
-// palette tinting: every tile is painted with its stock Minecraft colour, then
-// multiplied by a per-theme factor derived from the planet's elevation ramp.
-// --------------------------------------------------------------------------
 
-/** sample a palette elevation ramp at h -> linear rgb in [0,1] (no pole blend) */
 function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RGB {
   let i = 0;
   for (let k = 0; k < stops.length - 1; k++) {
@@ -90,7 +70,6 @@ function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RG
   ] as const;
 }
 
-/** the stock colour each tile group is authored around (tint reference) */
 const TINT_REF: Record<string, RGB> = {
   grass: [96, 162, 54],
   dirt: [121, 85, 58],
@@ -104,7 +83,6 @@ const TINT_REF: Record<string, RGB> = {
   cactus: [62, 138, 56],
 };
 
-/** which reference group each atlas tile belongs to (absent = never tinted) */
 const TILE_GROUP: Record<string, string> = {
   grass_top: 'grass', grass_side: 'grass', tallgrass: 'grass',
   dirt: 'dirt', snow_side: 'snow',
@@ -114,15 +92,13 @@ const TILE_GROUP: Record<string, string> = {
   log_side: 'log', log_top: 'log', planks: 'planks',
   craft_top: 'planks', craft_side: 'planks', craft_bottom: 'planks',
   snow: 'snow', water: 'water', cactus_side: 'cactus', cactus_top: 'cactus',
-  // flower_red / flower_yellow / glass stay untinted on purpose
 };
 
-export type TintMap = Record<string, RGB>; // group -> rgb multiplier
+export type TintMap = Record<string, RGB>;
 
-const TINT_STRENGTH = 0.85; // 0 = stock colours, 1 = pure palette
+const TINT_STRENGTH = 0.85;
 const clampMul = (v: number) => Math.max(0.22, Math.min(2.4, v));
 
-/** ramp mid-stop sample points per group */
 function targetFor(group: string, theme: PlanetTheme): RGB {
   const pal = PLANET_PALETTES[theme.type];
   const s = pal.stops;
@@ -141,7 +117,6 @@ function targetFor(group: string, theme: PlanetTheme): RGB {
   }
 }
 
-/** build per-group RGB multipliers for a theme (null = stock textures) */
 export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
   if (!theme || !PLANET_PALETTES[theme.type]) return null;
   const out: TintMap = {};
@@ -150,11 +125,9 @@ export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
     const tgt = targetFor(g, theme);
     const m: number[] = [];
     for (let k = 0; k < 3; k++) {
-      // tgt is 0..1 linear, ref is 0..255 sRGB-ish -> normalise before ratio
       const raw = clampMul((tgt[k] * 255) / Math.max(1, ref[k]));
       m[k] = 1 + (raw - 1) * TINT_STRENGTH;
     }
-    // molten worlds: bias rock warm and bright regardless of ramp
     if (theme.lava && (g === 'stone' || g === 'dirt')) {
       m[0] *= 1.18; m[1] *= 0.9; m[2] *= 0.78;
     }
@@ -163,7 +136,6 @@ export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
   return out;
 }
 
-/** multiply an already-painted tile region in place */
 function tintTile(img: ImageData, tile: number, m: RGB): void {
   if (m[0] === 1 && m[1] === 1 && m[2] === 1) return;
   const ox = (tile % TPR) * TILE;
@@ -180,7 +152,6 @@ function tintTile(img: ImageData, tile: number, m: RGB): void {
   }
 }
 
-/** fill a whole 16x16 tile region of an ImageData using fn(x, y) -> color|null (null = transparent) */
 function tileRegion(
   img: ImageData,
   tile: number,
@@ -196,15 +167,11 @@ function tileRegion(
   }
 }
 
-// ---------------------------------------------------------------------------
-// tile painters (pixel-art blocks)
-// ---------------------------------------------------------------------------
 
 type Painter = (img: ImageData, r: () => number) => void;
 
 const GRASS_BASE: RGB = [96, 162, 54];
 
-/** multiply an rgb tuple by a scalar factor (authentic MC monochrome noise) */
 function shadeMul(base: RGB, f: number): RGB {
   return [
     Math.max(0, Math.min(255, Math.floor(base[0] * f))),
@@ -219,19 +186,12 @@ const paintDirt: Painter = (img, r) =>
     return r() < 0.08 ? vary([88, 62, 42], 10, r) : c;
   });
 
-/**
- * Deterministic per-pixel hash → [0,1). The belt tiles are repainted every
- * animation frame; sequential RNG (mulberry32) would resample new noise on
- * each repaint and make the whole surface flicker. Hashing the *pattern-space*
- * coordinate keeps every speck stable AND moving with the belt.
- */
 function pixelHash(x: number, y: number, salt: number): number {
   let h = Math.imul(x + 0x9e37, 0x85ebca6b) ^ Math.imul(y + 0x1b87, 0xc2b2ae35) ^ salt;
   h = Math.imul(h ^ (h >>> 13), 0x27d4eb2f);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-/** vary() twin driven by a hash value instead of a sequential RNG */
 function varyH(base: RGB, amt: number, h: number): RGB {
   const v = Math.floor((h * 2 - 1) * amt);
   return [
@@ -241,17 +201,6 @@ function varyH(base: RGB, amt: number, h: number): RGB {
   ] as const;
 }
 
-/**
- * Conveyor belt top face: rubber band with roller grooves and two chevrons.
- * `rot` rotates the whole pattern by 90° steps (0 = arrows toward image +X).
- * `phase` scrolls the moving pattern along the travel axis (in pixels) — the
- * animation driver repaints these tiles with an advancing phase so the belt
- * visibly runs in its facing direction.
- *
- * The moving pattern is fully periodic in x (grooves period 4, chevrons
- * period 8) so any integer phase wraps seamlessly; only the guide rails on
- * the cross-axis edges are static.
- */
 function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number): void {
   const N = TILE;
   tileRegion(img, tile, (px, py) => {
@@ -260,34 +209,24 @@ function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number):
     else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
     else if (rot === 3) { x = N - 1 - py; y = px; }
 
-    // static guide rails along the travel direction
     if (y === 0 || y === N - 1) return varyH([44, 44, 50], 5, pixelHash(x, y, 11));
     if (y === 1 || y === N - 2) return varyH([88, 88, 96], 7, pixelHash(x, y, 12));
 
-    // pattern space: scrolls toward +x as phase grows (+x = arrow direction)
     const wx = ((x - phase) % N + N) % N;
 
-    // roller grooves across the belt
     if (wx % 4 === 0) return varyH([50, 50, 56], 6, pixelHash(wx, y, 13));
-    // two chevrons pointing toward +x, spaced half a tile apart (period 8)
     const cw = wx % 8;
     const dx = cw - 5;
     if (dx >= -2 && dx <= 0) {
-      const spread = -dx;                       // 0 at the tip, 2 at the tails
+      const spread = -dx;
       const off = Math.abs(y - 7.5);
       if (off >= spread - 0.5 && off <= spread + 1.5)
         return varyH([226, 146, 34], 12, pixelHash(wx, y, 14));
     }
-    // belt surface
     return varyH([74, 74, 80], 9, pixelHash(wx, y, 15));
   });
 }
 
-/**
- * Inserter base plate (static): armored dark plate with the same directional
- * chevrons as the belt so players can read the drop side, plus a bolted pivot
- * ring in the middle where the dynamic arm mounts.
- */
 function paintInserterTop(img: ImageData, tile: number, rot: number, r: () => number): void {
   const N = TILE;
   tileRegion(img, tile, (px, py) => {
@@ -296,45 +235,30 @@ function paintInserterTop(img: ImageData, tile: number, rot: number, r: () => nu
     else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
     else if (rot === 3) { x = N - 1 - py; y = px; }
 
-    // plate rim
     if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42], 5, r);
     if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68], 7, r);
 
-    // central pivot ring (radius ~3.5 px) with darker hub
     const dx = x - 7.5;
     const dz = y - 7.5;
     const d = Math.sqrt(dx * dx + dz * dz);
     if (d < 2.2) return vary([28, 28, 32], 4, r);
     if (d < 3.4) return vary([98, 98, 106], 8, r);
 
-    // single long chevron toward +x (the drop side)
     if (x >= 10 && x <= 13 && Math.abs(y - 7.5) <= (x - 10) + 1 && Math.abs(y - 7.5) > (x - 10) - 1)
       return vary([226, 146, 34], 10, r);
 
-    // rivets in the free corners
     if ((x === 3 || x === 12) && Math.abs(y - 7.5) > 4 && (y === 3 + (Math.abs(x - 7.5) > 3 ? 1 : 0) || y === 12 - (Math.abs(x - 7.5) > 3 ? 1 : 0)))
       return vary([110, 110, 118], 8, r);
 
-    // plate body
     return vary([72, 72, 80], 9, r);
   });
 }
 
-// ---------------------------------------------------------------------------
-// conveyor animation driver
-// ---------------------------------------------------------------------------
 
-/** pixels the belt pattern advances per second (≈ item transport speed) */
 const BELT_ANIM_PX_PER_SEC = 20;
 
 let beltPhase = -1;
 
-/**
- * Advance the conveyor tiles inside a live atlas. Called once per frame from
- * the engine; only actually repaints when the quantized pixel phase changes
- * (~20 Hz), and uploads just the belt row of the canvas via the dirty rect.
- * The atlas has no mipmaps (NearestFilter), so the re-upload is trivial.
- */
 export function animateConveyorTiles(set: TextureSet, time: number): void {
   const phase = Math.floor(time * BELT_ANIM_PX_PER_SEC) % TILE;
   if (phase === beltPhase) return;
@@ -346,7 +270,6 @@ export function animateConveyorTiles(set: TextureSet, time: number): void {
   paintBeltTop(img, TILES.conveyor_top_s, 2, phase);
   paintBeltTop(img, TILES.conveyor_top_w, 3, phase);
 
-  // dirty rect spanning the four (contiguous) top tiles
   const tiles = [
     TILES.conveyor_top_n, TILES.conveyor_top_e,
     TILES.conveyor_top_s, TILES.conveyor_top_w,
@@ -364,14 +287,12 @@ export function animateConveyorTiles(set: TextureSet, time: number): void {
 
 const PAINTERS: Partial<Record<string, Painter>> = {
   grass_top: (img, r) =>
-    // authentic Minecraft: flat, uniform monochrome brightness noise
     tileRegion(img, TILES.grass_top, () => {
       let s = 0.78 + r() * 0.34;
-      if (r() < 0.06) s *= 0.82; // sparse darker flecks
+      if (r() < 0.06) s *= 0.82;
       return shadeMul(GRASS_BASE, s);
     }),
   grass_side: (img, r) => {
-    // jagged green band, 2-4px like the original
     const edge: number[] = [];
     for (let x = 0; x < TILE; x++) edge[x] = 2 + Math.floor(r() * 3);
     tileRegion(img, TILES.grass_side, (x, y) => {
@@ -421,18 +342,18 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       const dx = x - 7.5;
       const dy = y - 7.5;
       const d = Math.max(Math.abs(dx), Math.abs(dy));
-      if (d > 6.5) return vary([86, 60, 34], 10, r); // bark rim
+      if (d > 6.5) return vary([86, 60, 34], 10, r);
       const ring = Math.floor(d + r() * 0.6) % 2 === 0;
       return ring ? vary([176, 138, 90], 8, r) : vary([150, 114, 70], 8, r);
     }),
   leaves: (img, r) =>
     tileRegion(img, TILES.leaves, () => {
-      if (r() < 0.14) return null; // sky holes (alpha cutout)
+      if (r() < 0.14) return null;
       return r() < 0.4 ? vary([38, 96, 34], 14, r) : vary([52, 124, 44], 18, r);
     }),
   planks: (img, r) =>
     tileRegion(img, TILES.planks, (x, y) => {
-      if (y % 4 === 3) return vary([96, 70, 40], 8, r); // plank seams
+      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
       const joint = (Math.floor(y / 4) % 2 === 0 ? x === 11 : x === 4);
       if (joint) return vary([96, 70, 40], 8, r);
       return vary([164, 129, 76], 10, r);
@@ -463,13 +384,13 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     }),
   flower_red: (img, r) =>
     tileRegion(img, TILES.flower_red, (x, y) => {
-      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r); // stem
-      if (y === 8 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r); // leaves
+      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r);
+      if (y === 8 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r);
       const px = x - 7.5;
       const py = y - 3.5;
       const petal = Math.abs(px) <= 1.6 && Math.abs(py) <= 1.6 && !(Math.abs(px) === 1.5 && Math.abs(py) === 1.5);
       if (petal && y < 6) return vary([205, 47, 42], 18, r);
-      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [255, 214, 92]; // heart
+      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [255, 214, 92];
       return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
     }),
   flower_yellow: (img, r) =>
@@ -484,8 +405,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
     }),
   tallgrass: (img, r) => {
-    // same base palette as grass_top — dark foliage values turn dense grass
-    // into black needles under shadow, so we shade the grass green instead
     const blades: { x: number; h: number; lean: number }[] = [];
     for (let i = 0; i < 7; i++) {
       blades.push({
@@ -496,7 +415,7 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     }
     return tileRegion(img, TILES.tallgrass, (x, y) => {
       for (const b of blades) {
-        const by = TILE - 1 - y; // grow upward from the bottom
+        const by = TILE - 1 - y;
         if (by < b.h) {
           const bx = b.x + Math.floor((by / b.h) * 2) * b.lean;
           if (x === bx) return shadeMul(GRASS_BASE, 0.86 + r() * 0.24);
@@ -509,7 +428,7 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     tileRegion(img, TILES.cactus_side, (x) => {
       const rib = x % 4 === 1;
       const c = rib ? vary([42, 106, 40], 8, r) : vary([62, 138, 56], 10, r);
-      return r() < 0.04 ? [226, 236, 214] : c; // spines
+      return r() < 0.04 ? [226, 236, 214] : c;
     }),
   cactus_top: (img, r) =>
     tileRegion(img, TILES.cactus_top, (x, y) => {
@@ -524,7 +443,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return wave ? vary([92, 138, 244], 8, r) : vary([58, 102, 222], 10, r);
     }),
 
-  // ---- crafting table: planks base with a worked-in grid motif on top ----
   craft_top: (img, r) =>
     tileRegion(img, TILES.craft_top, (x, y) => {
       const seam = x === 7 || x === 8 || y === 7 || y === 8;
@@ -537,8 +455,8 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     const base: RGB[] = [];
     for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] : [164, 129, 76];
     return tileRegion(img, TILES.craft_side, (x, y) => {
-      if (y < 2) return vary([120, 92, 54], 8, r);              // top trim
-      if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {             // tool-panel inset
+      if (y < 2) return vary([120, 92, 54], 8, r);
+      if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {
         if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28], 6, r);
         return vary([132, 102, 60], 8, r);
       }
@@ -551,7 +469,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary([150, 118, 70], 10, r);
     }),
 
-  // chunky cobblestone: irregular light stones separated by dark mortar
   cobble: (img, r) =>
     tileRegion(img, TILES.cobble, (x, y) => {
       const cell = ((x + (Math.floor(y / 5) % 2) * 3) / 5) | 0;
@@ -563,12 +480,10 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary(base, 12, r);
     }),
 
-  // ---- furnace: cobble shell, dark arch opening, lit variant glows ----
   furnace_top: (img, r) =>
     tileRegion(img, TILES.furnace_top, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
       if (rim) return vary([88, 88, 92], 8, r);
-      // recessed vent square in the middle
       if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66], 8, r);
       return vary([124, 124, 128], 12, r);
     }),
@@ -580,11 +495,10 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     tileRegion(img, TILES.furnace_front, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
       if (rim) return vary([88, 88, 92], 8, r);
-      // hearth opening: arch across the lower-middle
       if (x >= 3 && x <= 12) {
-        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);   // lintel shadow
-        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);  // dark mouth
-        if (y === 12) return vary([70, 70, 74], 6, r);           // hearth lip
+        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
+        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);
+        if (y === 12) return vary([70, 70, 74], 6, r);
       }
       return vary([124, 124, 128], 12, r);
     }),
@@ -595,7 +509,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       if (x >= 3 && x <= 12) {
         if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
         if (y >= 7 && y <= 11) {
-          // flame tongues rising out of the coals
           const h = 11 - y;
           const flame = (x * 7 + h * 3) % 5;
           if (h >= 3) return flame < 2 ? vary([255, 214, 92], 18, r) : vary([28, 24, 22], 5, r);
@@ -607,12 +520,9 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary([124, 124, 128], 12, r);
     }),
 
-  // ---- gemstone ores: stone base with colored crystal veins ----
   ore_ruby: (img, r) =>
     tileRegion(img, TILES.ore_ruby, (x, y) => {
-      // dark stone base
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // ruby crystals: deep red with bright highlights
       const crystal = (x * 3 + y * 7) % 11 < 3 && r() < 0.5;
       if (crystal) {
         const bright = r() < 0.3;
@@ -623,7 +533,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_amber: (img, r) =>
     tileRegion(img, TILES.ore_amber, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // amber: warm orange-yellow, translucent look
       const crystal = (x * 5 + y * 3) % 9 < 3 && r() < 0.45;
       if (crystal) {
         const bright = r() < 0.35;
@@ -634,7 +543,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_luminescence: (img, r) =>
     tileRegion(img, TILES.ore_luminescence, (x, y) => {
       if (r() < 0.08) return vary([52, 52, 58], 8, r);
-      // luminescence: pale blue-green glow crystals
       const crystal = (x * 7 + y * 5) % 10 < 3 && r() < 0.5;
       if (crystal) {
         const bright = r() < 0.4;
@@ -645,7 +553,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_diamond: (img, r) =>
     tileRegion(img, TILES.ore_diamond, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // diamond: cyan-blue sparkle
       const crystal = (x * 4 + y * 6) % 10 < 3 && r() < 0.4;
       if (crystal) {
         const bright = r() < 0.35;
@@ -656,7 +563,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_gold: (img, r) =>
     tileRegion(img, TILES.ore_gold, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // gold: rich yellow metallic flecks
       const fleck = (x * 6 + y * 4) % 8 < 2 && r() < 0.5;
       if (fleck) {
         const bright = r() < 0.4;
@@ -667,7 +573,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_silver: (img, r) =>
     tileRegion(img, TILES.ore_silver, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // silver: white-grey metallic
       const fleck = (x * 5 + y * 7) % 9 < 2 && r() < 0.5;
       if (fleck) {
         const bright = r() < 0.4;
@@ -678,7 +583,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_jade: (img, r) =>
     tileRegion(img, TILES.ore_jade, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // jade: soft green with subtle variation
       const crystal = (x * 4 + y * 5) % 9 < 3 && r() < 0.45;
       if (crystal) {
         const bright = r() < 0.35;
@@ -689,7 +593,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   ore_emerald: (img, r) =>
     tileRegion(img, TILES.ore_emerald, (x, y) => {
       if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      // emerald: deep vivid green
       const crystal = (x * 6 + y * 4) % 10 < 3 && r() < 0.4;
       if (crystal) {
         const bright = r() < 0.35;
@@ -698,7 +601,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary([118, 118, 124], 14, r);
     }),
 
-  // ---- coal ore: stone base with black coal chunks ----
   coal_ore: (img, r) =>
     tileRegion(img, TILES.coal_ore, (x, y) => {
       const chunk = (x * 5 + y * 3) % 9 < 3 && r() < 0.55;
@@ -709,38 +611,31 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary([118, 118, 124], 14, r);
     }),
 
-  // ---- coal lump item: rounded black nugget on transparent bg ----
   coal: (img, r) =>
     tileRegion(img, TILES.coal, (x, y) => {
       const dx = x - 8, dy = y - 8;
       const d = Math.sqrt(dx * dx + dy * dy);
       if (d > 6.2) return null;
-      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r); // sheen
+      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r);
       return vary([28, 28, 32], 10, r);
     }),
 
-  // ---- stick item: two crossed brown twigs ----
   stick: (img, r) =>
     tileRegion(img, TILES.stick, (x, y) => {
-      // diagonal stick from bottom-left to top-right
       if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58], 14, r);
       if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38], 10, r);
       return null;
     }),
 
-  // ---- torch: wooden shaft with a glowing flame head (alpha cutout) ----
   torch: (img, r) => {
     void r;
     return tileRegion(img, TILES.torch, (x, y) => {
       const cx = x >= 6 && x <= 9;
-      // shaft (lower 2/3)
       if (cx && y >= 6) {
         if (y === 6) return [120, 88, 50];
         return (x === 6) ? [96, 68, 38] : (x === 9 ? [80, 56, 32] : [138, 100, 58]);
       }
-      // ember block at top of shaft
       if (x >= 6 && x <= 9 && y >= 4 && y <= 5) return [40, 30, 24];
-      // flame
       const fx = x - 7.5, fy = y - 2;
       const df = Math.sqrt(fx * fx + fy * fy * 0.6);
       if (y <= 5) {
@@ -752,12 +647,6 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     });
   },
 
-  // ---- conveyor belt ----------------------------------------------------
-  // On the top face the atlas image +X axis runs toward world -Z and image +Y
-  // toward world +X (see the mesher's top-face corner/UV order). The base
-  // pattern therefore points NORTH, and the other three facings are the same
-  // pattern sampled through a 90° rotation. Painted at phase 0 here; the
-  // engine re-drives the phase every frame via animateConveyorTiles().
   conveyor_top_n: (img) => paintBeltTop(img, TILES.conveyor_top_n, 0, 0),
   conveyor_top_e: (img) => paintBeltTop(img, TILES.conveyor_top_e, 1, 0),
   conveyor_top_s: (img) => paintBeltTop(img, TILES.conveyor_top_s, 2, 0),
@@ -766,19 +655,15 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     tileRegion(img, TILES.conveyor_side, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
       if (rim) return vary([42, 42, 48], 5, r);
-      // roller circles at each end
       if (y >= 5 && y <= 10 && (x <= 4 || x >= 11)) {
         const cx = x <= 4 ? 2.5 : 13.5;
         const dx = x - cx, dy = y - 7.5;
         if (dx * dx + dy * dy < 5) return vary([100, 100, 106], 8, r);
       }
-      // belt band across middle
       if (y >= 3 && y <= 5) return vary([58, 58, 64], 6, r);
-      // chassis
       return vary([66, 66, 72], 8, r);
     }),
 
-  // ---- inserter: static base plates (one per facing) + chassis side ----
   inserter_top_n: (img, r) => paintInserterTop(img, TILES.inserter_top_n, 0, r),
   inserter_top_e: (img, r) => paintInserterTop(img, TILES.inserter_top_e, 1, r),
   inserter_top_s: (img, r) => paintInserterTop(img, TILES.inserter_top_s, 2, r),
@@ -787,37 +672,30 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     tileRegion(img, TILES.inserter_side, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
       if (rim) return vary([40, 40, 46], 5, r);
-      // armored pillar silhouette in the middle
       if (x >= 5 && x <= 10 && y >= 2) {
         if (x === 5 || x === 10) return vary([100, 100, 108], 8, r);
         if (y === 8 || y === 9) return vary([226, 146, 34], 10, r);
         return vary([62, 62, 70], 8, r);
       }
-      // vent slots at the base
       if (y >= 12 && y <= 14 && x % 3 !== 0) return vary([30, 30, 34], 4, r);
       return vary([56, 56, 62], 8, r);
     }),
 };
 
-// ---------------------------------------------------------------------------
-// public API
-// ---------------------------------------------------------------------------
 
 export interface TextureSet {
   atlas: THREE.CanvasTexture;
   water: THREE.CanvasTexture;
   cracks: THREE.CanvasTexture[];
   atlasCanvas: HTMLCanvasElement;
-  /** live pixel buffer + context, kept so animated tiles can repaint in place */
   atlasImg: ImageData;
   atlasCtx: CanvasRenderingContext2D;
 }
 
-/** UV rect (u0, vBottom, u1, vTop) of a tile inside the atlas */
 export function tileUV(tile: number): [number, number, number, number] {
   const col = tile % ATLAS_COLS;
   const row = Math.floor(tile / ATLAS_COLS);
-  const e = 0.02; // tiny inset against bleeding
+  const e = 0.02;
   const u0 = (col * TILE + e) / ATLAS_W;
   const u1 = ((col + 1) * TILE - e) / ATLAS_W;
   const vTop = 1 - (row * TILE + e) / ATLAS_H;
@@ -825,7 +703,6 @@ export function tileUV(tile: number): [number, number, number, number] {
   return [u0, vBottom, u1, vTop];
 }
 
-/** Procedural water-bucket icon for the hotbar */
 export function makeBucketIcon(size = 44): string {
   const c = document.createElement('canvas');
   c.width = size;
@@ -847,31 +724,25 @@ export function makeBucketIcon(size = 44): string {
   const SILVER = '#c8ced6';
   const STEEL = '#8d969e';
   const DARK = '#5c646c';
-  // handle arc
   px(4, 3, STEEL); px(5, 2, STEEL); px(6, 1, STEEL); px(7, 1, STEEL);
   px(8, 1, STEEL); px(9, 1, STEEL); px(10, 2, STEEL); px(11, 3, STEEL);
-  // rim
   row(4, 11, 4, SILVER);
-  // body with water fill
   for (let y = 5; y <= 12; y++) {
     px(4, y, STEEL);
     px(11, y, DARK);
     for (let x = 5; x <= 10; x++) {
-      if (y === 5) px(x, y, x === 6 || x === 9 ? '#6f93f2' : '#4a74e8'); // water surface
-      else if (y <= 9) px(x, y, '#4266d8'); // water body
-      else if (y <= 12) px(x, y, '#3554b8'); // deep water
+      if (y === 5) px(x, y, x === 6 || x === 9 ? '#6f93f2' : '#4a74e8');
+      else if (y <= 9) px(x, y, '#4266d8');
+      else if (y <= 12) px(x, y, '#3554b8');
     }
   }
-  // bottom
   row(5, 10, 13, DARK);
   row(5, 10, 12, STEEL);
-  // side shading
   for (let y = 6; y <= 11; y++) px(5, y, '#4f71db');
   ctx.drawImage(off, 0, 0, TILE, TILE, 0, 0, size, size);
   return c.toDataURL();
 }
 
-/** Extract a single tile as a pixelated data-URL icon */
 export function makeIcon(atlasCanvas: HTMLCanvasElement, tile: number, size = 44): string {
   const c = document.createElement('canvas');
   c.width = size;
@@ -929,7 +800,6 @@ export function createTextures(theme?: PlanetTheme | null): TextureSet {
   TILE_NAMES.forEach((name, i) => {
     const painter = PAINTERS[name];
     if (painter) painter(img, mulberry32(1337 + i * 7919));
-    // >>> tint pass: runs immediately after the tile is painted
     if (tints) {
       const g = TILE_GROUP[name];
       if (g && tints[g]) tintTile(img, TILES[name], tints[g]);
@@ -937,7 +807,6 @@ export function createTextures(theme?: PlanetTheme | null): TextureSet {
   });
   ctx.putImageData(img, 0, 0);
 
-  // standalone water texture (so its pattern can scroll independently)
   const wc = document.createElement('canvas');
   wc.width = TILE;
   wc.height = TILE;

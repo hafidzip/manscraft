@@ -1,10 +1,9 @@
-// Procedural pixel-art textures (Minecraft-style block atlas + weapon/sfx textures).
 import * as THREE from 'three';
 import { mulberry32 } from '../core/noise';
 
-const TILE = 32;          // pixels per tile
+const TILE = 32;
 const ATLAS_COLS = 4;
-const ATLAS_ROWS = 9;     // grew to fit coal/stick/torch/belt/inserter tiles
+const ATLAS_ROWS = 9;
 
 function mkCanvas(w: number, h: number) {
   const c = document.createElement('canvas');
@@ -37,14 +36,12 @@ function noisyTile(g: CanvasRenderingContext2D, ox: number, oy: number, base: st
   }
 }
 
-// Tile ids (index into 4x4 atlas)
 export const T = {
   GRASS_TOP: 0, GRASS_SIDE: 1, DIRT: 2, STONE: 3,
   SAND: 4, SANDSTONE: 5, SANDSTONE_TOP: 6, LOG_SIDE: 7,
   LOG_TOP: 8, LEAVES: 9, CACTUS_SIDE: 10, CACTUS_TOP: 11,
   PLANK: 12, ORE: 13, COBBLE: 14, TARGET_WOOL: 15, CRAFT_TOP: 16, GLASS: 17,
   FURNACE: 18,
-  // gemstone ores (match the world-atlas gem set)
   ORE_RUBY: 19, ORE_AMBER: 20, ORE_LUMI: 21, ORE_DIAMOND: 22,
   ORE_GOLD: 23, ORE_SILVER: 24, ORE_JADE: 25, ORE_EMERALD: 26,
   COAL_ORE: 27, COAL: 28, STICK: 29, TORCH: 30,
@@ -55,17 +52,11 @@ export const T = {
 
 let atlasTex: THREE.CanvasTexture | null = null;
 
-/** Returns the shared block atlas (lazy build). */
 export function getAtlas(): THREE.CanvasTexture {
   if (!atlasTex) atlasTex = buildAtlas();
   return atlasTex;
 }
 
-// ── cached data-URL helpers ─────────────────────────────────────────────
-// `HTMLCanvasElement.toDataURL()` on the 128×224 atlas takes a few ms, and
-// BlockIcon/DrumstickIcon each call it per mount. The inventory renders 80+
-// icons at once, so the original code rebuilt + re-encoded the atlas on every
-// menu open — a noticeable 2–3 s freeze. Build once, share everywhere.
 let atlasDataUrlCache: string | null = null;
 export function atlasDataUrl(): string {
   if (atlasDataUrlCache) return atlasDataUrlCache;
@@ -170,7 +161,6 @@ export function buildAtlas(): THREE.CanvasTexture {
   });
   tile(T.TARGET_WOOL, (ox, oy) => noisyTile(g, ox, oy, '#e8e6df', 8, 116, ['#d8d5cc']));
 
-  // crafting table top: planks with a worked-in cross seam + rim
   tile(T.CRAFT_TOP, (ox, oy) => {
     noisyTile(g, ox, oy, '#a48150', 10, 131, ['#b8935e', '#8f6d3f']);
     px(ox, oy, 0, 0, TILE, 2, '#64482a');
@@ -183,17 +173,14 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 14, 14, 4, 4, '#70512e');
   });
 
-  // furnace face: cobble shell with a dark arch and glowing coals
   tile(T.FURNACE, (ox, oy) => {
     noisyTile(g, ox, oy, '#7c7c80', 12, 151, ['#8e8e92', '#68686c']);
     px(ox, oy, 0, 0, TILE, 3, '#5a5a5e');
     px(ox, oy, 0, TILE - 3, TILE, 3, '#5a5a5e');
     px(ox, oy, 0, 0, 3, TILE, '#5a5a5e');
     px(ox, oy, TILE - 3, 0, 3, TILE, '#5a5a5e');
-    // hearth arch
     px(ox, oy, 6, 8, 20, 6, '#3a3a3e');
     px(ox, oy, 6, 14, 20, 10, '#181819');
-    // coals + flame licks
     px(ox, oy, 8, 20, 16, 4, '#e45818');
     px(ox, oy, 10, 17, 3, 4, '#ffa028');
     px(ox, oy, 15, 15, 3, 6, '#ffd65c');
@@ -201,7 +188,6 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 6, 24, 20, 2, '#55555a');
   });
 
-  // glass: pale frame + diagonal glint, transparent body
   tile(T.GLASS, (ox, oy) => {
     px(ox, oy, 0, 0, TILE, 2, '#cee8f5');
     px(ox, oy, 0, TILE - 2, TILE, 2, '#cee8f5');
@@ -212,15 +198,12 @@ export function buildAtlas(): THREE.CanvasTexture {
     px(ox, oy, 18, 20, 4, 4, '#e0f4fc');
   });
 
-  // ---- gemstone ores: MC-style diamond clusters on a stone base ----
-  // dark = crystal body, lite = facet highlight, spark = 1px glint
   const oreTile = (idx: number, seed: number, dark: string, lite: string, spark: string) => {
     tile(idx, (ox, oy) => {
       noisyTile(g, ox, oy, '#82858a', 12, seed, ['#75787d', '#8f9297']);
       const rand = mulberry32(seed);
       for (let i = 0; i < 6; i++) {
         const x = 3 + Math.floor(rand() * 22), y = 3 + Math.floor(rand() * 22);
-        // diamond-shaped cluster (like MC ore blobs)
         px(ox, oy, x + 1, y, 3, 1, dark);
         px(ox, oy, x, y + 1, 5, 3, dark);
         px(ox, oy, x + 1, y + 4, 3, 1, dark);
@@ -238,7 +221,6 @@ export function buildAtlas(): THREE.CanvasTexture {
   oreTile(T.ORE_JADE,    407, '#3f8a52', '#8cdc9f', '#d8ffe2');
   oreTile(T.ORE_EMERALD, 408, '#178c46', '#50ff78', '#c8ffd8');
 
-  // coal ore: stone base with black coal chunks
   tile(T.COAL_ORE, (ox, oy) => {
     noisyTile(g, ox, oy, '#82858a', 12, 431, ['#75787d', '#8f9297']);
     const rand = mulberry32(431);
@@ -248,7 +230,6 @@ export function buildAtlas(): THREE.CanvasTexture {
       px(ox, oy, x + 1, y + 1, 2, 2, '#44444a');
     }
   });
-  // coal lump item
   tile(T.COAL, (ox, oy) => {
     const rand = mulberry32(432);
     g.clearRect(ox, oy, TILE, TILE);
@@ -260,7 +241,6 @@ export function buildAtlas(): THREE.CanvasTexture {
     }
     px(ox, oy, 11, 11, 4, 4, '#55555c');
   });
-  // stick item: diagonal twig
   tile(T.STICK, (ox, oy) => {
     g.clearRect(ox, oy, TILE, TILE);
     for (let i = 0; i < TILE; i++) {
@@ -268,100 +248,75 @@ export function buildAtlas(): THREE.CanvasTexture {
       px(ox, oy, i, TILE - 1 - i, 2, 2, '#a67c4a');
     }
   });
-  // torch item: shaft + glowing flame
   tile(T.TORCH, (ox, oy) => {
     g.clearRect(ox, oy, TILE, TILE);
-    // shaft
     px(ox, oy, 13, 12, 6, 18, '#8a643a');
     px(ox, oy, 13, 12, 2, 18, '#a67c4a');
     px(ox, oy, 17, 12, 2, 18, '#6b4c2c');
-    // ember base
     px(ox, oy, 12, 8, 8, 5, '#2a2020');
-    // flame
     px(ox, oy, 13, 2, 6, 8, '#f0821e');
     px(ox, oy, 14, 1, 4, 8, '#ffc846');
     px(ox, oy, 15, 3, 2, 5, '#fff6c8');
   });
 
-  // conveyor belt: dark metal slab with roller grooves and chevron arrows
   tile(T.CONVEYOR, (ox, oy) => {
     noisyTile(g, ox, oy, '#484854', 10, 501);
-    // rim
     px(ox, oy, 0, 0, TILE, 2, '#3a3a42');
     px(ox, oy, 0, TILE - 2, TILE, 2, '#3a3a42');
     px(ox, oy, 0, 0, 2, TILE, '#3a3a42');
     px(ox, oy, TILE - 2, 0, 2, TILE, '#3a3a42');
-    // roller grooves
     for (let y = 4; y < TILE - 4; y += 4) {
       px(ox, oy, 3, y, TILE - 6, 1, '#3e3e46');
     }
-    // chevron arrows (orange) pointing right
     const arrowColor = '#dc8c1e';
-    // arrow 1 centered at (10, 10)
     px(ox, oy, 8, 10, 3, 2, arrowColor);
     px(ox, oy, 10, 8, 2, 2, arrowColor);
     px(ox, oy, 10, 12, 2, 2, arrowColor);
     px(ox, oy, 12, 10, 2, 2, arrowColor);
-    // arrow 2 centered at (20, 10)
     px(ox, oy, 18, 10, 3, 2, arrowColor);
     px(ox, oy, 20, 8, 2, 2, arrowColor);
     px(ox, oy, 20, 12, 2, 2, arrowColor);
     px(ox, oy, 22, 10, 2, 2, arrowColor);
   });
 
-  // inserter: armored base plate + raised pillar + swung arm with claw
   tile(T.INSERTER, (ox, oy) => {
     noisyTile(g, ox, oy, '#484852', 9, 601);
-    // rim
     px(ox, oy, 0, 0, TILE, 1, '#2c2c34');
     px(ox, oy, 0, TILE - 1, TILE, 1, '#2c2c34');
     px(ox, oy, 0, 0, 1, TILE, '#2c2c34');
     px(ox, oy, TILE - 1, 0, 1, TILE, '#2c2c34');
-    // base plate rivets
     px(ox, oy, 3, 3, 2, 2, '#6e6e78');
     px(ox, oy, TILE - 5, 3, 2, 2, '#6e6e78');
     px(ox, oy, 3, TILE - 5, 2, 2, '#6e6e78');
     px(ox, oy, TILE - 5, TILE - 5, 2, 2, '#6e6e78');
-    // vertical pillar (left of center)
     px(ox, oy, 8, 10, 5, 15, '#5a5a64');
     px(ox, oy, 8, 10, 1, 15, '#787884');
     px(ox, oy, 12, 10, 1, 15, '#3c3c44');
-    // hinge cap
     px(ox, oy, 7, 8, 7, 4, '#8a8a94');
-    // arm reaching right (toward the drop side)
     px(ox, oy, 12, 9, 11, 3, '#565660');
     px(ox, oy, 12, 9, 11, 1, '#7c7c88');
-    // claw
     px(ox, oy, 22, 6, 4, 8, '#dc8c1e');
     px(ox, oy, 22, 6, 2, 2, '#f4b455');
     px(ox, oy, 22, 12, 2, 2, '#a36418');
-    // grip hint below claw
     px(ox, oy, 23, 15, 2, 3, '#909098');
   });
 
-  // laser miner: a stone pedestal with a grey turret gun aimed to the right
   tile(T.LASER_MINER, (ox, oy) => {
     noisyTile(g, ox, oy, '#3a3d42', 8, 733);
-    // stone pedestal base
     px(ox, oy, 9, 22, 14, 9, '#6c6f75');
     px(ox, oy, 9, 22, 14, 1, '#888b91');
     px(ox, oy, 11, 25, 3, 3, '#54575c');
     px(ox, oy, 17, 25, 3, 3, '#54575c');
-    // pivot yoke
     px(ox, oy, 13, 18, 7, 5, '#4c4f55');
-    // gun body (light steel) tilted
     px(ox, oy, 8, 11, 13, 7, '#9aa0a8');
     px(ox, oy, 8, 11, 13, 1, '#c2c8d0');
     px(ox, oy, 8, 17, 13, 1, '#6a6f77');
-    // dark vented top rail
     px(ox, oy, 15, 8, 8, 4, '#2c2f34');
     px(ox, oy, 17, 9, 1, 2, '#5c6068');
     px(ox, oy, 19, 9, 1, 2, '#5c6068');
     px(ox, oy, 21, 9, 1, 2, '#5c6068');
-    // dark barrel to the left (muzzle)
     px(ox, oy, 1, 13, 8, 4, '#1c1e22');
     px(ox, oy, 1, 13, 2, 4, '#0e0f12');
-    // emitter glow at the muzzle tip
     px(ox, oy, 1, 14, 2, 2, '#ff5a1e');
   });
 
@@ -375,7 +330,6 @@ export function buildAtlas(): THREE.CanvasTexture {
 
 export const ATLAS_SIZE = ATLAS_COLS;
 
-/** UV rect (with inset) for a given tile index. */
 export function tileUV(idx: number): [number, number, number, number] {
   const col = idx % ATLAS_COLS, row = Math.floor(idx / ATLAS_COLS);
   const inset = 0.6 / (ATLAS_COLS * TILE);
@@ -386,7 +340,6 @@ export function tileUV(idx: number): [number, number, number, number] {
   return [u0, v0, u1, v1];
 }
 
-/** Noisy pixel texture for weapon parts / skin. */
 export function pixelTexture(base: string, variance = 22, size = 24, seed = 7): THREE.CanvasTexture {
   const key = `${base}|${variance}|${size}|${seed}`;
   const cached = pixelTextureCache.get(key);
@@ -405,12 +358,8 @@ export function pixelTexture(base: string, variance = 22, size = 24, seed = 7): 
   return tex;
 }
 
-/** Enemy waves and effects reuse a small fixed palette; painting a fresh
- * canvas and uploading an identical texture for every spawn caused GC and GPU
- * upload spikes. Textures are immutable, so sharing is safe. */
 const pixelTextureCache = new Map<string, THREE.CanvasTexture>();
 
-/** Star-burst muzzle flash sprite. */
 export function muzzleTexture(): THREE.CanvasTexture {
   const { c, g } = mkCanvas(64, 64);
   g.translate(32, 32);
@@ -434,21 +383,11 @@ export function muzzleTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/**
- * Bullet-hole decal. `seed` picks one of several procedural variants so a wall
- * peppered with shots does not look like the same stamp repeated.
- *
- * The sprite is built as: a near-black punched core, a crunchy crater ring of
- * pulverised material, a few radial cracks, and a faint bright dust rim so the
- * hole still reads against dark *and* light blocks. Everything is drawn on a
- * 32px grid and sampled with NearestFilter to stay in the voxel art style.
- */
 export function holeTexture(seed = 9): THREE.CanvasTexture {
   const S = 32, R = S / 2;
   const { c, g } = mkCanvas(S, S);
   const rand = mulberry32(seed * 2654435761 % 2147483647 || 9);
 
-  // Per-variant shape: slightly elliptical + wobbly so no two holes match.
   const squash = 0.82 + rand() * 0.36;
   const tilt = rand() * Math.PI;
   const cosT = Math.cos(tilt), sinT = Math.sin(tilt);
@@ -456,7 +395,6 @@ export function holeTexture(seed = 9): THREE.CanvasTexture {
   const craterR = coreR + 2.2 + rand() * 1.4;
   const dustR = craterR + 2.6 + rand() * 1.8;
 
-  // wobble the outline with a couple of low-frequency harmonics
   const h1 = rand() * Math.PI * 2, h2 = rand() * Math.PI * 2;
   const wob = (a: number) => 1 + Math.sin(a * 3 + h1) * 0.12 + Math.sin(a * 5 + h2) * 0.07;
 
@@ -465,7 +403,6 @@ export function holeTexture(seed = 9): THREE.CanvasTexture {
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       const dx = x - R + 0.5, dy = y - R + 0.5;
-      // rotate + squash into the ellipse frame
       const rx = dx * cosT + dy * sinT;
       const ry = (-dx * sinT + dy * cosT) / squash;
       const d = Math.sqrt(rx * rx + ry * ry);
@@ -473,19 +410,16 @@ export function holeTexture(seed = 9): THREE.CanvasTexture {
       const w = wob(a);
 
       if (d < coreR * w) {
-        // punched-through core, darkest dead centre
         const k = d / (coreR * w);
         const v = Math.round(4 + k * 14);
         px(x, y, `rgba(${v},${v - 1},${v - 2},${(0.99 - k * 0.12).toFixed(3)})`);
       } else if (d < craterR * w) {
-        // fractured crater lip — dithered so it keeps the pixel look
         const k = (d - coreR * w) / (craterR * w - coreR * w);
         if (rand() > 0.12 + k * 0.55) {
           const v = Math.round(26 + k * 34);
           px(x, y, `rgba(${v},${v - 3},${v - 6},${(0.85 - k * 0.35).toFixed(3)})`);
         }
       } else if (d < dustR * w) {
-        // pale dust halo (multiplied by the block tint at runtime)
         const k = (d - craterR * w) / (dustR * w - craterR * w);
         if (rand() > 0.55 + k * 0.4) {
           const v = Math.round(150 - k * 60);
@@ -495,7 +429,6 @@ export function holeTexture(seed = 9): THREE.CanvasTexture {
     }
   }
 
-  // radial cracks spidering out of the crater
   const cracks = 2 + Math.floor(rand() * 3);
   for (let i = 0; i < cracks; i++) {
     let a = rand() * Math.PI * 2;
@@ -520,7 +453,6 @@ export function holeTexture(seed = 9): THREE.CanvasTexture {
   return tex;
 }
 
-/** Archery-style target rings for the practice range. */
 export function targetTexture(): THREE.CanvasTexture {
   const { c, g } = mkCanvas(64, 64);
   g.fillStyle = '#e8e6df'; g.fillRect(0, 0, 64, 64);
@@ -538,7 +470,6 @@ export function targetTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/** Minecraft-style character face (eyes + mouth) on a noisy skin base. */
 export function faceTexture(skin = '#c98f5f', seed = 77): THREE.CanvasTexture {
   const { c, g } = mkCanvas(16, 16);
   const rand = mulberry32(seed);
@@ -546,18 +477,15 @@ export function faceTexture(skin = '#c98f5f', seed = 77): THREE.CanvasTexture {
     g.fillStyle = shade(skin, Math.floor((rand() - 0.5) * 16));
     g.fillRect(x, y, 1, 1);
   }
-  // hair fringe
   g.fillStyle = shade('#2a1d12', 0);
   g.fillRect(0, 0, 16, 3);
   for (let x = 0; x < 16; x++) if (rand() > 0.6) g.fillRect(x, 3, 1, 1);
-  // eyes (white + pupil)
   g.fillStyle = '#ffffff';
   g.fillRect(3, 7, 3, 2); g.fillRect(10, 7, 3, 2);
   g.fillStyle = '#3a4a8a';
   g.fillRect(5, 7, 1, 2); g.fillRect(10, 7, 1, 2);
   g.fillStyle = '#101014';
   g.fillRect(5, 8, 1, 1); g.fillRect(10, 8, 1, 1);
-  // nose + mouth
   g.fillStyle = shade(skin, -28);
   g.fillRect(7, 10, 2, 1);
   g.fillStyle = '#5a3a2a';
@@ -569,10 +497,9 @@ export function faceTexture(skin = '#c98f5f', seed = 77): THREE.CanvasTexture {
   return tex;
 }
 
-/** Tile index for a block face given its vertical direction (+1 top, -1 bottom, 0 side). */
 export function blockFaceTile(blockId: number, dy: number): number {
   switch (blockId) {
-    case 1: return dy === 1 ? T.GRASS_TOP : dy === -1 ? T.DIRT : T.GRASS_SIDE; // GRASS
+    case 1: return dy === 1 ? T.GRASS_TOP : dy === -1 ? T.DIRT : T.GRASS_SIDE;
     case 2: return T.DIRT;
     case 3: return T.STONE;
     case 4: return T.SAND;
@@ -584,11 +511,10 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 10: return T.ORE;
     case 11: return T.COBBLE;
     case 12: return T.TARGET_WOOL;
-    case 13: return T.COBBLE; // BEDROCK
+    case 13: return T.COBBLE;
     case 14: return T.CRAFT_TOP;
     case 15: return T.GLASS;
     case 16: return T.FURNACE;
-    // gemstone ores (world blocks mapped into fps inventory ids 50-57)
     case 50: return T.ORE_RUBY;
     case 51: return T.ORE_AMBER;
     case 52: return T.ORE_LUMI;
@@ -600,23 +526,17 @@ export function blockFaceTile(blockId: number, dy: number): number {
     case 58: return T.COAL;
     case 59: return T.STICK;
     case 60: return T.TORCH;
-    case 61: return T.CONVEYOR; // CONVEYOR
-    case 62: return T.INSERTER; // INSERTER
-    case 63: return T.LASER_MINER; // LASER MINER
+    case 61: return T.CONVEYOR;
+    case 62: return T.INSERTER;
+    case 63: return T.LASER_MINER;
     default: return T.STONE;
   }
 }
 
-/**
- * Build a cube geometry whose UVs point at the correct atlas tiles for the
- * given block, so held/dropped items look exactly like world voxels.
- */
 export function blockCubeGeometry(blockId: number, size = 0.22): THREE.BufferGeometry {
   const geo = new THREE.BoxGeometry(size, size, size);
   const uv = geo.attributes.uv as THREE.BufferAttribute;
-  // BoxGeometry face order: +x, -x, +y, -y, +z, -z
   const faceDy = [0, 0, 1, -1, 0, 0];
-  // Per-face vertex order is: top-left, top-right, bottom-left, bottom-right
   const corners: [number, number][] = [[0, 1], [1, 1], [0, 0], [1, 0]];
   for (let f = 0; f < 6; f++) {
     const [u0, v0, u1, v1] = tileUV(blockFaceTile(blockId, faceDy[f]));
@@ -629,11 +549,6 @@ export function blockCubeGeometry(blockId: number, size = 0.22): THREE.BufferGeo
   return geo;
 }
 
-/**
- * Minecraft cooked-chicken item texture (16×16).
- * Returns both a CanvasTexture (for HUD icons) and the raw pixel data used
- * to build the extruded first-person 3D item model.
- */
 export function drumstickTexture(): THREE.CanvasTexture {
   const { c } = mkCanvas(16, 16);
   paintDrumstick(c.getContext('2d')!);
@@ -644,53 +559,38 @@ export function drumstickTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/** Paint the classic Minecraft cooked-chicken silhouette onto a 16×16 canvas. */
 export function paintDrumstick(g: CanvasRenderingContext2D): void {
-  // transparent background
   g.clearRect(0, 0, 16, 16);
   const px = (x: number, y: number, col: string) => {
     g.fillStyle = col;
     g.fillRect(x, y, 1, 1);
   };
 
-  // Palette matching Minecraft's cooked_chicken.png closely
-  const M  = '#a05a28'; // main meat
-  const Md = '#7a4018'; // dark meat / shade
-  const Mc = '#c87838'; // crisp highlight
-  const Mh = '#d89850'; // bright highlight
-  const B  = '#e8e0c8'; // bone
-  const Bd = '#c8c0a8'; // bone shade
-  const Bo = '#f5f0dc'; // bone highlight
+  const M  = '#a05a28';
+  const Md = '#7a4018';
+  const Mc = '#c87838';
+  const Mh = '#d89850';
+  const B  = '#e8e0c8';
+  const Bd = '#c8c0a8';
+  const Bo = '#f5f0dc';
 
-  // Meat body (top-left blob) — classic MC chicken silhouette
-  // Row by row for exact pixel control
   const meat: [number, number, string][] = [
-    // y=1
     [5,1,Mc],[6,1,Mc],[7,1,M],
-    // y=2
     [4,2,Mc],[5,2,Mh],[6,2,Mc],[7,2,M],[8,2,M],
-    // y=3
     [3,3,Mc],[4,3,Mh],[5,3,M],[6,3,M],[7,3,M],[8,3,Md],
-    // y=4
     [3,4,M],[4,4,M],[5,4,M],[6,4,M],[7,4,Md],[8,4,Md],[9,4,Md],
-    // y=5
     [3,5,M],[4,5,M],[5,5,M],[6,5,Md],[7,5,Md],[8,5,Md],[9,5,Md],
-    // y=6
     [4,6,M],[5,6,Md],[6,6,Md],[7,6,Md],[8,6,Md],
-    // y=7
     [4,7,Md],[5,7,Md],[6,7,Md],[7,7,Md],
-    // y=8 (transition to bone)
     [5,8,Md],[6,8,Md],[7,8,B],
   ];
   for (const [x, y, c] of meat) px(x, y, c);
 
-  // Bone shaft (diagonal down-right) + knobby tip
   const bone: [number, number, string][] = [
     [7,8,B],[8,8,B],
     [8,9,B],[9,9,Bd],
     [9,10,B],[10,10,Bd],
     [10,11,B],[11,11,Bd],
-    // knobby tip
     [10,12,Bo],[11,12,B],[12,12,Bd],
     [11,13,B],[12,13,Bd],
     [12,11,Bo],
@@ -705,50 +605,30 @@ export function paintTorch(g: CanvasRenderingContext2D): void {
     g.fillRect(x, y, 1, 1);
   };
 
-  // Minecraft torch palette — matches the block's atlas painter colours
-  // wood
-  const Wh = '#c49a5a'; // highlight
-  const Wm = '#8a643a'; // mid
-  const Wd = '#5a3a1e'; // dark
-  const Wc = '#3a2a18'; // charred ember base
-  // flame inner -> outer
-  const Fw = '#ffffd0'; // white core
-  const Fy = '#ffe86a'; // bright yellow
-  const Fo = '#ffb62a'; // orange mid
-  const Fr = '#e85a10'; // red-orange outer
-  const Fd = '#a03008'; // dark ember
+  const Wh = '#c49a5a';
+  const Wm = '#8a643a';
+  const Wd = '#5a3a1e';
+  const Wc = '#3a2a18';
+  const Fw = '#ffffd0';
+  const Fy = '#ffe86a';
+  const Fo = '#ffb62a';
+  const Fr = '#e85a10';
+  const Fd = '#a03008';
 
-  // ---- Minecraft-style item: 2px wide handle, 6px tall flame ----
-  // Flame (centered top)
-  // y=1
   px(7, 1, Fw); px(8, 1, Fw);
-  // y=2
   px(6, 2, Fo); px(7, 2, Fy); px(8, 2, Fw); px(9, 2, Fo);
-  // y=3
   px(6, 3, Fr); px(7, 3, Fo); px(8, 3, Fy); px(9, 3, Fr);
-  // y=4
   px(5, 4, Fd); px(6, 4, Fr); px(7, 4, Fo); px(8, 4, Fo); px(9, 4, Fr); px(10, 4, Fd);
-  // y=5 - ember base (charred)
   px(6, 5, Fd); px(7, 5, Wc); px(8, 5, Wc); px(9, 5, Fd);
 
-  // Handle — 2px wide, with left highlight / right shade like MC sticks
-  // y=6..13
   for (let y = 6; y <= 13; y++) {
-    // slight checker for MC shading
     px(7, y, y % 2 === 0 ? Wh : Wm);
     px(8, y, Wd);
   }
-  // charred top under flame
   px(7, 6, Wc); px(8, 6, Wc);
-  // bottom tip darker
   px(7, 13, Wd); px(8, 13, Wc);
 }
 
-/**
- * Build a Minecraft-style extruded item model from a 16×16 pixel canvas.
- * Each opaque pixel becomes a 1×1×depth voxel cube — this is exactly how
- * Minecraft renders flat items (tools, food, etc.) in first person.
- */
 export function buildExtrudedItem(
   paint: (g: CanvasRenderingContext2D) => void,
   pixelSize = 0.018,
@@ -759,7 +639,6 @@ export function buildExtrudedItem(
   const data = g.getImageData(0, 0, 16, 16).data;
 
   const group = new THREE.Group();
-  // Shared materials keyed by colour hex
   const matCache = new Map<string, THREE.MeshLambertMaterial>();
   const getMat = (r: number, g: number, b: number) => {
     const key = `${r},${g},${b}`;
@@ -771,13 +650,12 @@ export function buildExtrudedItem(
     return m;
   };
 
-  // Center the 16×16 grid around origin; Y is flipped (canvas Y-down → 3D Y-up)
   const half = 8 * pixelSize;
   for (let py = 0; py < 16; py++) {
     for (let px = 0; px < 16; px++) {
       const i = (py * 16 + px) * 4;
       const a = data[i + 3];
-      if (a < 128) continue; // skip transparent
+      if (a < 128) continue;
       const r = data[i], gv = data[i + 1], b = data[i + 2];
       const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(pixelSize, pixelSize, depth),
@@ -795,7 +673,6 @@ export function buildExtrudedItem(
   return group;
 }
 
-/** Round soft smoke puff. */
 export function smokeTexture(): THREE.CanvasTexture {
   const { c, g } = mkCanvas(32, 32);
   const grad = g.createRadialGradient(16, 16, 2, 16, 16, 15);

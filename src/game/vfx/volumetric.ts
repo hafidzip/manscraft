@@ -1,28 +1,10 @@
-/**
- * Volumetric lighting — screen-space "god rays" (crepuscular rays).
- *
- * Technique (classic Crytek / NVIDIA GPU Gems 3 radial-blur approach):
- *   1. Render the whole scene into a small offscreen buffer using a flat
- *      black override material -> a pure silhouette of every occluder.
- *   2. Draw a bright sun disc on top of that same buffer, depth-tested
- *      against the silhouette pass, so mountains/trees correctly block it.
- *   3. Radially blur that buffer from every pixel toward the sun's
- *      screen-space position, accumulating decayed samples -> light shafts.
- *   4. Additively combine the shafts onto the main scene.
- *
- * This never touches the renderer's real depth/color buffers and needs no
- * external render-target plumbing, so it drops into any post-process pipeline
- * as a single self-contained stage.
- */
 
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
-// More samples = smoother, longer rays but slightly more expensive.
-// 52 samples gives visible rays even at moderate density without banding.
 const GOD_RAY_SAMPLES = 52;
 
-const QUAD_VERT = /* glsl */ `
+const QUAD_VERT = `
   varying vec2 vUv;
   void main() {
     vUv = uv;
@@ -30,7 +12,7 @@ const QUAD_VERT = /* glsl */ `
   }
 `;
 
-const GENERATE_FRAG = /* glsl */ `
+const GENERATE_FRAG = `
   uniform sampler2D tOcclusion;
   uniform vec2 uSunPos;
   uniform float uExposure;
@@ -61,7 +43,7 @@ const GENERATE_FRAG = /* glsl */ `
   }
 `;
 
-const COMBINE_FRAG = /* glsl */ `
+const COMBINE_FRAG = `
   uniform sampler2D tDiffuse;
   uniform sampler2D tGodRays;
   uniform vec3 uTint;
@@ -93,40 +75,19 @@ function makeSunDiscTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/**
- * Standalone post-process stage. Owner sets `lightWorldPosition` and
- * `intensity` once per frame (e.g. from the sky's sun position and its
- * day/night factor); the pass handles everything else internally.
- */
 export class VolumetricLightPass {
-  /** world-space position to treat as the light source (the sun billboard). */
   readonly lightWorldPosition = new THREE.Vector3();
-  /** 0 = off, ~0.4-0.8 = a believable shaft intensity. */
   intensity = 0;
-  /** additive colour multiplier for the rays (warm near sunrise/sunset). */
   readonly tint = new THREE.Color(0xfff2d0);
-  /**
-   * World-space size of the emitter disc used to seed the shafts. The sun
-   * wants a big disc; the moon needs a much smaller one, otherwise the
-   * additive sprite reads as a giant white blob filling half the sky.
-   */
   set discScale(v: number) {
     this.sunSprite.scale.setScalar(v);
   }
 
-  // God ray parameters tuned for visibility with Reinhard tone mapping:
-  // - exposure: how bright the accumulated rays are before blending
-  // - decay: how fast rays fade along their length (0.94 = long visible shafts)
-  // - density: step size toward the sun (0.88 = good balance of quality/speed)
-  // - weight: per-sample contribution (0.52 = rays accumulate visibly)
   exposure = 0.52;
   decay = 0.94;
   density = 0.88;
   weight = 0.52;
 
-  /** internal buffer resolution as a fraction of the screen (perf knob). */
-  // 0.55 = 55% screen resolution — high enough to see ray detail, low enough
-  // to keep the radial blur affordable. The original 0.4 was too coarse.
   private scale = 0.55;
 
   private scene: THREE.Scene;
@@ -158,8 +119,6 @@ export class VolumetricLightPass {
         blending: THREE.AdditiveBlending, fog: false, toneMapped: false,
       })
     );
-    // Sun sprite scale: large enough to cast clear shadows for the occlusion
-    // pass, but not so large it looks fake. 85 works well at typical view distances.
     this.sunSprite.scale.setScalar(85);
     this.sunScene.add(this.sunSprite);
 
@@ -201,7 +160,6 @@ export class VolumetricLightPass {
     this.godRayRT.setSize(w, h);
   }
 
-  /** projects lightWorldPosition to screen UV; returns false if behind the camera */
   private projectLight(): boolean {
     this.ndc.copy(this.lightWorldPosition).project(this.camera);
     this.uv.set(this.ndc.x * 0.5 + 0.5, this.ndc.y * 0.5 + 0.5);
@@ -224,7 +182,6 @@ export class VolumetricLightPass {
       const prevFog = this.scene.fog;
       const prevOverride = this.scene.overrideMaterial;
 
-      // 1. black silhouette of every occluder in the scene
       this.scene.overrideMaterial = this.blackMat;
       this.scene.fog = null;
       this.scene.background = null;
@@ -237,12 +194,10 @@ export class VolumetricLightPass {
       this.scene.fog = prevFog;
       this.scene.background = prevBackground;
 
-      // 2. bright sun disc, depth-tested against the silhouette above
       renderer.autoClear = false;
       renderer.render(this.sunScene, this.camera);
       renderer.autoClear = prevAutoClear;
 
-      // 3. radial blur toward the sun's screen position -> light shafts
       const u = this.generateMat.uniforms;
       u.tOcclusion.value = this.occlusionRT.texture;
       (u.uSunPos.value as THREE.Vector2).copy(this.uv);
@@ -256,7 +211,6 @@ export class VolumetricLightPass {
       this.fsQuad.render(renderer);
     }
 
-    // 4. additively combine onto the scene (or pass through untouched)
     const c = this.combineMat.uniforms;
     c.tDiffuse.value = readBuffer.texture;
     c.tGodRays.value = this.godRayRT.texture;
