@@ -1,0 +1,35 @@
+
+**8. Chunk worker.** Only worth it for `TerrainGenerator.populateChunk` +
+`buildChunkGeometry`, in that order of value. Requirements: `Chunk.data` allocated from a
+`SharedArrayBuffer` pool when available so no transfer is needed, otherwise transfer
+ownership out and back with an explicit `state: 'owned' | 'inflight'` on the chunk and a
+hard rule that `getBlockRaw`/`peekBlock` never touch an `inflight` buffer (return `-1`,
+which every caller already handles); results tagged with the `ChangeBus.version` and the
+chunk's own mutation counter and **dropped** if either moved; a synchronous fallback that
+is the current code path, selected by one flag, so the worker can be disabled at runtime;
+geometry returned as transferable `Float32Array`/`Uint32Array` buckets, not
+`BufferGeometry`. Note that `MachineRegistry.onChunkData` must fire on the main thread
+*after* the buffer is adopted, not inside the worker.
+
+**9. Remaining instrumentation.** Chunk generation time, meshing time, queue depth and
+queue age (oldest enqueue timestamp), all sampled per frame into a ring buffer with p50/p99.
+The machine/item half is already done (§5.9). `meshCost`/`loadCost` already exist as
+EWMAs and should be exposed rather than recomputed.
+
+**10. Complexity appendix for chunks.** Items and machines are analysed in §4.2 and
+§5.8; the chunk-side before/after table (per-chunk generation, meshing, eviction scan,
+padded-shell memory of `PAD`/`NONAIR`/`CUBEMASK`/`OCC`, and the generator's 1.25 MB
+column cache) still needs writing.
+
+**11. Staged migration for the chunk systems.** Proposed continuation of the §0 table:
+**S6** load-queue re-scoring (no API change), **S7** `peekBlock` borders + `UNKNOWN`
+propagation, **S8** instrumentation and the sampler, **S9** worker behind a flag with the
+synchronous path as default. Each is independently shippable and independently revertible.
+
+**12. Full regression suite.** §5.10 covers machines and items. Still needed: torus-seam
+rendering at the 512 boundary (min-image offsets `kx`/`kz` for every visible chunk at
+eight camera positions around the seam), chunk border faces after a neighbour arrives
+late, no visual holes with `UNKNOWN` borders, AO parity screenshots before/after, water
+corner heights across chunk borders, and eviction-then-return correctness now that the
+memo bug in §2.2 (C) is fixed.
+```

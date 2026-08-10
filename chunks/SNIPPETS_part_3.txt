@@ -1,0 +1,199 @@
+  bucket: number;   // index into buckets[]
+  slot: number;     // index into bucket.recs
+  seen: boolean;    // rescan reconcile flag
+}
+
+export interface MachineListener {
+  onAdd?(rec: MachineRecord): void;
+  onIdChanged?(rec: MachineRecord, oldId: number): void;
+  onLive?(rec: MachineRecord, live: boolean): void;
+  /** Fires before the record returns to the pool. Do not retain `rec`. */
+  onRemove?(rec: MachineRecord): void;
+}
+
+interface Bucket {
+  recs: MachineRecord[];
+  mask: number;     // OR of kinds present; lets a query skip a chunk in one test
+  loaded: boolean;
+}
+
+export interface MachineRegistryOptions {
+  /** Kinds to index. Conveyors are excluded by default: they are numerous and are
+   *  always queried by direct voxel lookup under an item, never by radius. */
+  indexedKinds?: number;
+  /** True when TerrainGenerator can never emit a machine block, which is the case
+   *  for the generator in §1.6 (bedrock/stone/sub/surface/water/ore/plants/trees).
+   *  When true, a freshly generated chunk skips the 20 480-voxel rescan entirely. */
+  trustGenerator?: boolean;
+}
+
+/* --------------------------------------------------------------- registry */
+
+export class MachineRegistry {
+  /** Bumped on every structural change. Agents can use it as a cache epoch. */
+  version = 1;
+
+  readonly stats = {
+    records: 0, dormant: 0,
+    adds: 0, removes: 0, idChanges: 0,
+    rescans: 0, rescanVoxels: 0, rescansSkipped: 0,
+    queries: 0, bucketsVisited: 0, recordsVisited: 0,
+    /** Voxel reads the old three scans would have performed, and did not. */
+    voxelReadsAvoided: 0,
+  };
+
+  private readonly indexedKinds: number;
+  private readonly trustGenerator: boolean;
+  private readonly buckets: (Bucket | null)[] = new Array(CHUNK_BUCKETS).fill(null);
+  private readonly byKey = new Map<number, MachineRecord>();
+  private readonly listeners: MachineListener[] = [];
+  private readonly pool: MachineRecord[] = [];
+  private nowSec = 0;
+
+  constructor(opts: MachineRegistryOptions = {}) {
+    this.indexedKinds = opts.indexedKinds ?? MK_GHOST;
+    this.trustGenerator = opts.trustGenerator ?? true;
+  }
+
+  /* -------------------------------------------------------- wiring */
+
+  attach(bus: ChangeBus): () => void {
+    return bus.add({
+      onBlock: (x, y, z, oldId, newId) => this.onBlock(x, y, z, oldId, newId),
+      onChunkData: (cx, cz, data, fromGenerator) => {
+        if (fromGenerator && this.trustGenerator) {
+          // Generated chunks contain no machines. Anything still indexed for this
+          // chunk belonged to the previous, now-discarded incarnation: drop it.
+          this.clearChunk(cx, cz);
+          this.setChunkLive(cx, cz, true);
+          this.stats.rescansSkipped++;
+          return;
+        }
+        this.rescanChunk(cx, cz, data);
+      },
+      onChunkGone: (cx, cz) => this.setChunkLive(cx, cz, false),
+    });
+  }
+
+  /** Index chunks that already existed when the registry was constructed. */
+  bootstrap(world: { forEachLoadedChunk(cb: (cx: number, cz: number, d: Uint8Array) => void): void }): void {
+    world.forEachLoadedChunk((cx, cz, data) => this.rescanChunk(cx, cz, data));
+  }
+
+  addListener(l: MachineListener): () => void {
+    this.listeners.push(l);
+    return () => {
+      const i = this.listeners.indexOf(l);
+      if (i >= 0) this.listeners.splice(i, 1);
+    };
+  }
+
+  /* --------------------------------------------------------- lookup */
+
+  get(key: number): MachineRecord | undefined { return this.byKey.get(key); }
+
+  getAt(x: number, y: number, z: number): MachineRecord | undefined {
+    return this.byKey.get(packCell(x, y, z));
+  }
+
+  get size(): number { return this.byKey.size; }
+
+  /**
+   * Iterate indexed machines near (px, pz) within `radius` blocks (torus/min-image)
+   * and within absolute Y range [yLo, yHi].
+   *
+   * Cost: (2r+1)^2 bucket probes with r = chunkRadiusFor(radius) — 25 probes at
+   * radius 26 — plus one distance test per record in those chunks. Zero voxel reads,
+   * zero allocation.
+   */
+  forEachNear(
+    px: number, pz: number, radius: number,
+    yLo: number, yHi: number, kindMask: number,
+    cb: (rec: MachineRecord, ix: number, iz: number, d2: number) => void,
+  ): void {
+    this.stats.queries++;
+    const r2 = radius * radius;
+    const cr = chunkRadiusFor(radius);
+    const span = 2 * cr + 1;
+
+    if (span >= WORLD_CHUNKS) {          // radius covers the torus: visit each once
+      for (let b = 0; b < CHUNK_BUCKETS; b++) {
+        this.visitBucket(this.buckets[b], px, pz, r2, yLo, yHi, kindMask, cb);
+      }
+      return;
+    }
+
+    const ccx = chunkOfBlock(Math.floor(px));
+    const ccz = chunkOfBlock(Math.floor(pz));
+    for (let dx = -cr; dx <= cr; dx++) {
+      for (let dz = -cr; dz <= cr; dz++) {
+        this.visitBucket(
+          this.buckets[packChunk(ccx + dx, ccz + dz)],
+          px, pz, r2, yLo, yHi, kindMask, cb,
+        );
+      }
+    }
+  }
+
+  private visitBucket(
+    b: Bucket | null, px: number, pz: number, r2: number,
+    yLo: number, yHi: number, kindMask: number,
+    cb: (rec: MachineRecord, ix: number, iz: number, d2: number) => void,
+  ): void {
+    if (b === null) return;
+    const recs = b.recs;
+    if (recs.length === 0 || (b.mask & kindMask) === 0) return;
+    this.stats.bucketsVisited++;
+    for (let i = 0; i < recs.length; i++) {
+      const rec = recs[i];
+      if ((rec.kind & kindMask) === 0) continue;
+      if (rec.y < yLo || rec.y > yHi) continue;
+      const dx = minImageF(rec.x - px);
+      const dz = minImageF(rec.z - pz);
+      const d2 = dx * dx + dz * dz;
+      if (d2 > r2) continue;
+      this.stats.recordsVisited++;
+      cb(rec, px + dx, pz + dz, d2);
+    }
+  }
+
+  /* --------------------------------------------------- mutation paths */
+
+  private onBlock(x: number, y: number, z: number, oldId: number, newId: number): void {
+    const oldKind = kindOf(oldId) & this.indexedKinds;
+    const newKind = kindOf(newId) & this.indexedKinds;
+    if (oldKind === 0 && newKind === 0) return;
+
+    const key = packCell(x, y, z);
+    const existing = this.byKey.get(key);
+
+    if (newKind !== 0) {
+      if (existing && existing.kind === newKind) {
+        const prev = existing.id;
+        if (prev !== newId) {                       // rotation / variant swap
+          existing.id = newId;
+          existing.dx = DIR_X[newId];
+          existing.dz = DIR_Z[newId];
+          this.stats.idChanges++;
+          for (const l of this.listeners) l.onIdChanged?.(existing, prev);
+        }
+        if (!existing.live) this.markLive(existing, true);
+      } else {
+        if (existing) this.removeRec(existing);     // kind changed: remove + add
+        this.addRec(key, newId, newKind);
+      }
+    } else if (existing) {
+      this.removeRec(existing);
+    }
+    this.version++;
+  }
+
+  private bucketFor(x: number, z: number, create: boolean): Bucket | null {
+    const bi = packChunk(chunkOfBlock(x), chunkOfBlock(z));
+    let b = this.buckets[bi];
+    if (!b && create) {
+      b = { recs: [], mask: 0, loaded: true };
+      this.buckets[bi] = b;
+    }
+    return b;
+  }

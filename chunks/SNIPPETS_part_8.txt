@@ -1,0 +1,200 @@
+    } else {
+      for (const t of this.hooks.targets()) this.collect(t);   // exact old fallback
+    }
+
+    const n = candD.length;
+    let rays = 0;
+    let best: TurretTarget | null = null;
+
+    // Selection instead of sort: at most MAX_RAYS_PER_ACQUIRE passes of O(n) integer
+    // compares. No sort, no comparator closure, no allocation.
+    while (rays < MAX_RAYS_PER_ACQUIRE) {
+      let m = -1;
+      let md = Infinity;
+      for (let i = 0; i < n; i++) {
+        const d = candD[i];
+        if (d < md) { md = d; m = i; }
+      }
+      if (m < 0) break;                              // all candidates consumed
+      candD[m] = Infinity;                           // mark tried
+      const t = cand[m];
+      if (!t.alive) continue;
+
+      const ex = this.cx0 + minImageF(t.pos.x - this.cx0);
+      const ez = this.cz0 + minImageF(t.pos.z - this.cz0);
+      tmpDir.set(ex - eye.x, t.pos.y + 1.0 - eye.y, ez - eye.z)
+        .divideScalar(md || 1);
+
+      rays++; this.stats.rays++;
+      const hit = this.hooks.raycast(eye, tmpDir, md);
+      if (hit && hit.dist < md - 0.4) continue;      // occluded: identical predicate
+      best = t;
+      break;
+    }
+
+    g.target = best;
+  }
+}
+
+/** Module scratch, unchanged in spirit: one eye vector and one direction vector. */
+const tmpEye = new THREE.Vector3();
+const tmpDir = new THREE.Vector3();
+```
+
+**Two required edits inside the otherwise UNCHANGED `Turret.ts` internals:**
+
+```ts
+// (a) interface Gun — add one field:
+  acqT: number;          // seconds until the next acquire is allowed
+
+// (b) buildGun(): initialise it so the first think() fires immediately:
+  g.acqT = 0;
+
+// (c) tickGun(): DELETE the internal acquire timer/call.
+//     Before:
+//        g.acqT -= dt;
+//        if (g.acqT <= 0) { g.acqT = ACQUIRE_INTERVAL; this.acquire(g, ix, iz); }
+//     After: nothing. The scheduler's think phase owns acquisition, and
+//     MachineScheduler already decrements g.acqT in tick(). Aim, rotate, charge,
+//     muzzle, tracer, impact, damage and the 360-degree yaw are untouched.
+```
+
+**`TargetIndex` gets one optional member** so `prepare()` never needs `instanceof`
+(and so `enemyGrid.ts` can be swapped for a real enemy spatial grid later):
+
+```ts
+// src/game/fps/enemyGrid.ts  — amend the interface from §3.3
+export interface TargetIndex {
+  forEachNear(x: number, z: number, radius: number,
+              cb: (t: TurretTarget) => void): void;
+  /** Optional: called at most once per frame while at least one gun is live. */
+  rebuild?(list: Iterable<TurretTarget>): void;
+}
+```
+
+```ts
+// src/game/fps/Turret.ts — replace prepare() from §3.3 with the instanceof-free form
+  prepare(_dt: number, _px: number, _py: number, _pz: number,
+          anyLive: boolean): void {
+    if (!anyLive) return;                 // no live gun -> no enemy index work at all
+    const idx = this.index;
+    if (!idx || !idx.rebuild) return;     // fallback path needs no rebuild
+    idx.rebuild(this.hooks.targets());
+    this.stats.gridRebuilds++;
+  }
+```
+
+**Behavior deltas, stated precisely.**
+
+| Aspect | Old | New |
+|---|---|---|
+| Target chosen | nearest alive non-peaceful enemy within 22 with a clear ray | identical, unless the 4 nearest in-range enemies are *all* occluded |
+| Raycasts per acquire | up to (enemies within range) | ≤ `MAX_RAYS_PER_ACQUIRE` (4) |
+| Enemy list walks | guns × enemies, every 0.18 s | enemies once per frame (rebuild) + enemies-near-gun per acquire |
+| Cadence | 0.18 s | 0.18 s |
+| 360° rotation, fire, damage, fx | — | untouched |
+
+Set `MAX_RAYS_PER_ACQUIRE = Number.POSITIVE_INFINITY` for bit-exact parity; the index
+change alone removes the O(guns × all enemies) term, which is the actual spike source.
+The bound only matters in a pile-up of ≥4 occluded enemies closer than a visible one,
+where the gun idles for one extra 0.18 s slice.
+
+### 3.4 Agent contract addendum
+
+Add one optional member to `MachineAgent` in §3.0. The scheduler uses it to avoid
+destroying an entity that holds transient gameplay state:
+
+```ts
+// src/game/fps/machineScheduler.ts  (part 1, types) — ADD to interface MachineAgent
+  /** Return true to veto distance-based reclamation this frame (e.g. mid-carry). */
+  retain?(key: number): boolean;
+```
+
+```ts
+// src/game/fps/Inserter.ts — ADD to InserterManager
+  retain(key: number): boolean {
+    const arm = this.arms.get(key);
+    return !!arm && arm.state !== 'idle';   // never reclaim an arm carrying an item
+  }
+```
+
+`LaserMinerManager` and `TurretManager` do not implement `retain`: all of their state
+(`target`, `charge`, `acqT`) is re-derivable from the record and the world, so a
+rebuild on approach is indistinguishable from a retained entity.
+
+**Y band semantics.** `yLo`/`yHi` are *relative to* `Math.floor(player.y)`, exactly
+reproducing the historic loops: inserters `cy-2 .. cy+3`, laser miners and turrets
+`cy-4 .. cy+4`. The scheduler converts them to absolute bounds once per frame and
+clamps to `[0, WORLD_HEIGHT-1]`.
+
+---
+
+## 4. Shared, bounded machine scheduler
+
+### 4.1 New file: `src/game/fps/machineScheduler.ts` (part 2 of 2, implementation)
+
+```ts
+// src/game/fps/machineScheduler.ts   (NEW FILE — part 2 of 2)
+import type * as THREE from 'three';
+import { WORLD_HEIGHT, minImageF } from '../core/constants';
+import { cellX, cellY, cellZ } from '../core/cellKey';
+import type { MachineRecord, MachineRegistry } from '../world/machineRegistry';
+import type { MachineAgent, MachineView } from './machineScheduler';
+
+/** Entity construction builds THREE groups/materials: hard-cap it per frame. */
+const CREATE_BUDGET_PER_FRAME = 3;
+/** Distance-based reclamation checks per agent per frame (rotating cursor). */
+const PRUNE_CHECKS_PER_FRAME = 8;
+/** How often the registry is asked to drop long-dormant records. */
+const DORMANT_PRUNE_SEC = 4;
+
+/** Voxel reads the three legacy scans performed. Used only for instrumentation. */
+const discCells = (r: number): number => {
+  let n = 0;
+  const r2 = r * r;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) if (dx * dx + dz * dz <= r2) n++;
+  }
+  return n;
+};
+
+interface Slot {
+  agent: MachineAgent;
+  kind: number;
+  /** Nearest-K active set for this frame, sorted ascending by d2. */
+  keys: Int32Array;
+  d2: Float64Array;
+  ix: Float64Array;
+  iz: Float64Array;
+  recs: (MachineRecord | null)[];
+  n: number;
+  /** Previous frame's active keys, for a minimal setActive() diff. */
+  prevKeys: Int32Array;
+  prevN: number;
+  /** Every key this scheduler created an entity for, for amortized reclamation. */
+  ownedKeys: number[];
+  ownedIdx: Map<number, number>;
+  pruneCursor: number;
+  thinkCursor: number;
+  /** Per-frame derived. */
+  absYLo: number;
+  absYHi: number;
+  r2: number;
+  pruneR2: number;
+  /** Legacy scan cost this agent no longer pays, per 0.5 s interval. */
+  legacyReadsPerScan: number;
+}
+
+export class MachineScheduler {
+  readonly stats = {
+    frames: 0,
+    activeTotal: 0,
+    created: 0,
+    destroyed: 0,
+    createDeferred: 0,
+    ticks: 0,
+    thinks: 0,
+    pruneChecks: 0,
+    reclaimed: 0,
+    /** Voxel reads the three legacy 0.5 s scans would have performed. */
+    voxelReadsAvoided: 0,

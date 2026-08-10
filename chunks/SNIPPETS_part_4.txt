@@ -1,0 +1,200 @@
+  private addRec(key: number, id: number, kind: number): MachineRecord {
+    const x = cellX(key), y = cellY(key), z = cellZ(key);
+    const bi = packChunk(chunkOfBlock(x), chunkOfBlock(z));
+    let b = this.buckets[bi];
+    if (!b) { b = { recs: [], mask: 0, loaded: true }; this.buckets[bi] = b; }
+
+    const rec = this.pool.pop() ?? ({
+      key: 0, x: 0, y: 0, z: 0, id: 0, kind: 0, dx: 0, dz: 0,
+      live: true, dormantAt: 0, bucket: 0, slot: 0, seen: true,
+    } as MachineRecord);
+
+    rec.key = key; rec.x = x; rec.y = y; rec.z = z;
+    rec.id = id; rec.kind = kind;
+    rec.dx = DIR_X[id]; rec.dz = DIR_Z[id];
+    rec.live = true; rec.dormantAt = 0; rec.seen = true;
+    rec.bucket = bi; rec.slot = b.recs.length;
+
+    b.recs.push(rec);
+    b.mask |= kind;
+    this.byKey.set(key, rec);
+    this.stats.records++; this.stats.adds++;
+    for (const l of this.listeners) l.onAdd?.(rec);
+    return rec;
+  }
+
+  private removeRec(rec: MachineRecord): void {
+    const b = this.buckets[rec.bucket];
+    if (b) {
+      const last = b.recs.pop()!;
+      if (last !== rec) { b.recs[rec.slot] = last; last.slot = rec.slot; }
+      let m = 0;
+      for (let i = 0; i < b.recs.length; i++) m |= b.recs[i].kind;
+      b.mask = m;
+    }
+    this.byKey.delete(rec.key);
+    if (!rec.live) this.stats.dormant--;
+    this.stats.records--; this.stats.removes++;
+
+    for (const l of this.listeners) l.onRemove?.(rec);
+
+    rec.slot = -1; rec.bucket = -1;
+    if (this.pool.length < 512) this.pool.push(rec);
+  }
+
+  private markLive(rec: MachineRecord, live: boolean): void {
+    if (rec.live === live) return;
+    rec.live = live;
+    rec.dormantAt = live ? 0 : this.nowSec;
+    this.stats.dormant += live ? -1 : 1;
+    for (const l of this.listeners) l.onLive?.(rec, live);
+  }
+
+  private setChunkLive(cx: number, cz: number, live: boolean): void {
+    const b = this.buckets[packChunk(cx, cz)];
+    if (!b) return;
+    b.loaded = live;
+    for (let i = 0; i < b.recs.length; i++) this.markLive(b.recs[i], live);
+    this.version++;
+  }
+
+  private clearChunk(cx: number, cz: number): void {
+    const b = this.buckets[packChunk(cx, cz)];
+    if (!b || b.recs.length === 0) return;
+    for (let i = b.recs.length - 1; i >= 0; i--) this.removeRec(b.recs[i]);
+    b.mask = 0;
+    this.version++;
+  }
+
+  /**
+   * Reconcile one chunk against its voxel data. Record identity is preserved for
+   * machines that are still present, so an agent's visuals survive a chunk reload.
+   *
+   * The scan is a single linear pass over the Uint8Array with a table lookup and
+   * NO index arithmetic: the layout is (y*16 + z)*16 + x, so
+   *   x = i & 15,  z = (i >> 4) & 15,  y = i >> 8.
+   * 20 480 byte reads, ~10-20 us, once per chunk data creation.
+   */
+  rescanChunk(cx: number, cz: number, data: Uint8Array): void {
+    if (CHUNK_SIZE !== 16) throw new Error('rescanChunk assumes CHUNK_SIZE === 16');
+    this.stats.rescans++;
+    this.stats.rescanVoxels += data.length;
+
+    const bi = packChunk(cx, cz);
+    let b = this.buckets[bi];
+    if (b) for (let i = 0; i < b.recs.length; i++) b.recs[i].seen = false;
+
+    const baseX = (cx & 31) * CHUNK_SIZE;
+    const baseZ = (cz & 31) * CHUNK_SIZE;
+    const n = data.length;
+    const mask = this.indexedKinds;
+
+    for (let i = 0; i < n; i++) {
+      const kind = KIND_OF[data[i]] & mask;
+      if (kind === 0) continue;
+      const id = data[i];
+      const x = (baseX + (i & 15)) & 511;
+      const z = (baseZ + ((i >> 4) & 15)) & 511;
+      const y = i >> 8;
+      const key = packCell(x, y, z);
+      const ex = this.byKey.get(key);
+      if (ex && ex.kind === kind) {
+        ex.seen = true;
+        if (ex.id !== id) {
+          const prev = ex.id;
+          ex.id = id; ex.dx = DIR_X[id]; ex.dz = DIR_Z[id];
+          this.stats.idChanges++;
+          for (const l of this.listeners) l.onIdChanged?.(ex, prev);
+        }
+        this.markLive(ex, true);
+      } else {
+        if (ex) this.removeRec(ex);
+        this.addRec(key, id, kind).seen = true;
+      }
+    }
+
+    b = this.buckets[bi];
+    if (b) {
+      for (let i = b.recs.length - 1; i >= 0; i--) {
+        if (!b.recs[i].seen) this.removeRec(b.recs[i]);
+      }
+      b.loaded = true;
+    }
+    this.version++;
+  }
+
+  /* ------------------------------------------------------ housekeeping */
+
+  /** Called once per frame by the scheduler. */
+  tickClock(dtSec: number): void { this.nowSec += dtSec; }
+
+  /**
+   * Drop records whose chunk data has been gone for a long time. In the shipped
+   * eviction policy a chunk carrying player-placed machines is `dirty` and its data
+   * is never deleted, so this normally does nothing. It exists so a future
+   * persistence/eviction policy cannot leak the index.
+   */
+  pruneDormant(maxAgeSec = 120, maxPerCall = 32): number {
+    if (this.stats.dormant === 0) return 0;
+    let removed = 0;
+    const cutoff = this.nowSec - maxAgeSec;
+    for (const rec of this.byKey.values()) {
+      if (rec.live || rec.dormantAt > cutoff) continue;
+      this.removeRec(rec);
+      if (++removed >= maxPerCall) break;
+    }
+    if (removed) this.version++;
+    return removed;
+  }
+
+  snapshot() { return { ...this.stats, version: this.version, size: this.byKey.size }; }
+}
+```
+
+**Why per-chunk buckets and not a uniform grid.** Chunk buckets are already the world's
+natural partition, the bucket array is a flat `Array(1024)` indexed by the same key
+`World.key()` uses (no hashing), and chunk load/unload maps one-to-one onto bucket
+lifecycle, which is exactly what the dormancy rule needs.
+
+---
+
+## 3. Coordinated discovery replacements
+
+All three managers now implement one interface and never read voxels for discovery.
+
+### 3.0 The agent contract — `src/game/fps/machineScheduler.ts` (types only here)
+
+```ts
+// src/game/fps/machineScheduler.ts   (NEW FILE — part 1 of 2, types)
+import type { MachineRecord } from '../world/machineRegistry';
+
+/** Reused scratch. Never retained, never allocated per machine. */
+export interface MachineView {
+  ix: number; iz: number;      // min-image instance position of the machine
+  d2: number;                  // squared XZ distance to the player
+  px: number; py: number; pz: number;
+}
+
+export interface MachineAgent {
+  readonly kind: number;         // MK_INSERTER | MK_LASER | MK_TURRET
+  readonly maxLive: number;      // visual/simulation cap (nearest-K wins)
+  readonly scanRadius: number;
+  readonly pruneRadius: number;
+  readonly yLo: number;          // discovery band, RELATIVE to floor(player.y)
+  readonly yHi: number;
+  readonly thinkPerFrame: number; // 0 disables the think phase
+
+  has(key: number): boolean;
+  create(rec: MachineRecord): void;
+  destroy(key: number): void;
+  setActive(key: number, active: boolean): void;
+  tick(rec: MachineRecord, v: MachineView, dt: number): void;
+
+  prepare?(dt: number, px: number, py: number, pz: number, anyLive: boolean): void;
+  onIdChanged?(rec: MachineRecord, oldId: number): void;
+  wantsThink?(rec: MachineRecord, v: MachineView): boolean;
+  think?(rec: MachineRecord, v: MachineView): void;
+}
+```
+
+### 3.1 `src/game/fps/Inserter.ts`

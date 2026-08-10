@@ -1,0 +1,200 @@
+  private evictOne(): void {
+    let victim: DroppedItem | null = null;
+    let bestD2 = -1;
+    for (let i = 0; i < this.sleepers.length; i++) {
+      const it = this.sleepers[i];
+      const dx = minImageF(it.pos.x - this.lastPx);
+      const dz = minImageF(it.pos.z - this.lastPz);
+      const d2 = dx * dx + dz * dz;
+      if (d2 > bestD2) { bestD2 = d2; victim = it; }
+    }
+    if (!victim) {
+      let bestTime = -1;
+      for (let i = 0; i < this.items.length; i++) {
+        const it = this.items[i];
+        const dx = minImageF(it.pos.x - this.lastPx);
+        const dz = minImageF(it.pos.z - this.lastPz);
+        if (dx * dx + dz * dz <= EVICT_KEEP_DIST2) continue;
+        if (it.time > bestTime) { bestTime = it.time; victim = it; }
+      }
+    }
+    if (!victim) {
+      let bestTime = -1;
+      for (let i = 0; i < this.items.length; i++) {
+        if (this.items[i].time > bestTime) {
+          bestTime = this.items[i].time; victim = this.items[i];
+        }
+      }
+    }
+    if (victim) { this.despawn(victim); this.stats.evicted++; }
+  }
+```
+
+### 5.4 Collision: one probe instead of eight, no array literals, no `world.get`
+
+```ts
+// src/game/fps/ItemDrop.ts   (REPLACES §3.4 solidAt/blocksItemAt/blocked)
+
+  /**
+   * Single non-generating voxel classification with a one-entry memo.
+   *
+   * Old path per sample: world.solid() -> peekBlock(), and if not solid a SECOND
+   * lookup through world.get() -> getBlockRaw(), which could synchronously generate
+   * a chunk from inside item physics. Both facts are gone; the predicate is
+   * identical because world.solid() already returned true for the -1 case before
+   * world.get() was ever reached.
+   */
+  private probe(bx: number, by: number, bz: number): boolean {
+    this.stats.probes++;
+    const epoch = this.bus ? this.bus.version : 0;
+    if (epoch !== this.pEpoch) { this.pEpoch = epoch; this.pKey = -1; }
+    const key = packCell(bx, by, bz);
+    if (key === this.pKey) { this.stats.probeHits++; return this.pVal; }
+
+    const id = this.world.peekBlock(bx, by, bz);
+    const blocked = id < 0
+      ? true                                            // missing data == solid
+      : (DEFS[id].solid || (kindOf(id) & MK_GHOST) !== 0);  // ghost machines block
+
+    this.pKey = key;
+    this.pVal = blocked;
+    return blocked;
+  }
+
+  private solidAt(x: number, y: number, z: number): boolean {
+    const id = this.world.peekBlock(Math.floor(x), Math.floor(y), Math.floor(z));
+    return id < 0 ? true : DEFS[id].solid;              // == world.solid()
+  }
+
+  /**
+   * Same 8 sample points as the original: (x +/- HALF, y + {0, 2*HALF}, z +/- HALF).
+   * The samples are floored before use, so distinct sample points that fall in the
+   * same voxel are the same test; `blocked()` is a pure OR over them, so deduping
+   * to distinct voxels is provably identical.
+   *
+   * HALF = 0.13 and belt centering keeps items near cell centers, so the common
+   * case is 1 probe, a straddled axis is 2, and a corner straddle is 8.
+   */
+  private blocked(x: number, y: number, z: number): boolean {
+    const x0 = Math.floor(x - HALF), x1 = Math.floor(x + HALF);
+    const z0 = Math.floor(z - HALF), z1 = Math.floor(z + HALF);
+    const y0 = Math.floor(y),        y1 = Math.floor(y + HALF * 2);
+    const nx = x1 !== x0 ? 2 : 1;
+    const nz = z1 !== z0 ? 2 : 1;
+    const ny = y1 !== y0 ? 2 : 1;
+
+    for (let iy = 0; iy < ny; iy++) {
+      const by = iy === 0 ? y0 : y1;
+      for (let iz = 0; iz < nz; iz++) {
+        const bz = iz === 0 ? z0 : z1;
+        for (let ix = 0; ix < nx; ix++) {
+          if (this.probe(ix === 0 ? x0 : x1, by, bz)) return true;
+        }
+      }
+    }
+    return false;
+  }
+```
+
+### 5.5 `takeAt()` — bucket query, torus-correct, pool-managed
+
+```ts
+// src/game/fps/ItemDrop.ts   (REPLACES §3.3 takeAt())
+
+  private takeX = 0; private takeY = 0; private takeZ = 0;
+  private takeR2 = 0; private takeBest: DroppedItem | null = null;
+  private takeBestD2 = 0;
+
+  private takeVisit = (it: DroppedItem): void => {
+    this.stats.takeCandidates++;
+    if (!it.grounded || it.time < POP_TIME) return;      // unchanged filter
+    const dy = it.pos.y - this.takeY;
+    if (dy > 0.6 || dy < -0.6) return;                   // unchanged |dy| gate
+    // BUG FIX: X/Z are now minimum-image corrected, so an inserter standing on the
+    // 512-block seam can pick up items across the wrap, like every other system.
+    const dx = minImageF(it.pos.x - this.takeX);
+    const dz = minImageF(it.pos.z - this.takeZ);
+    const d2 = dx * dx + dz * dz;
+    if (d2 > this.takeR2) return;
+    if (this.takeBest !== null && d2 >= this.takeBestD2) return;
+    this.takeBest = it;
+    this.takeBestD2 = d2;
+  };
+
+  /**
+   * Signature unchanged. Complexity: O(items in the ~2x2x2 cells overlapping the
+   * query sphere) instead of O(all live items) per idle inserter per frame.
+   *
+   * OWNERSHIP: the returned record is detached from every index and is the caller's
+   * until it calls `drops.recycle(item)`.
+   */
+  takeAt(x: number, y: number, z: number, radius = 0.55): DroppedItem | null {
+    this.stats.takeQueries++;
+    if (this.items.length === 0) return null;
+    this.takeX = x; this.takeY = y; this.takeZ = z;
+    this.takeR2 = radius * radius;
+    this.takeBest = null;
+    this.takeBestD2 = Infinity;
+
+    this.grid.forEachBox(
+      x - radius, y - 0.6, z - radius,
+      x + radius, y + 0.6, z + radius,
+      this.takeVisit,
+    );
+
+    const it = this.takeBest;
+    this.takeBest = null;
+    if (it === null) return null;
+    this.unlink(it);                 // leaves it.alive === false, indices cleared
+    this.stats.takeHits++;
+    return it;
+  }
+```
+
+### 5.6 `update()` — bounded simulation, cached belt lookup, grid-based pickup
+
+```ts
+// src/game/fps/ItemDrop.ts   (REPLACES §3.5 update())
+
+  private lastPx = 0; private lastPz = 0;
+
+  update(dt: number, playerPos: THREE.Vector3): void {
+    const step = Math.min(dt, 1 / 30);
+    const px = playerPos.x, py = playerPos.y, pz = playerPos.z;
+    this.lastPx = px; this.lastPz = pz;
+
+    // Iterate backwards: sleep() and despawn() swap-remove from awake[].
+    for (let ai = this.awake.length - 1; ai >= 0; ai--) {
+      const item = this.awake[ai];
+      if (ai >= this.awake.length) continue;      // defensive after a swap
+      item.time += dt;
+      const p = item.pos;
+
+      /* ---- vertical physics: unchanged predicates ---- */
+      item.vel.y -= GRAVITY * step;
+      if (item.vel.y < -30) item.vel.y = -30;
+      const ny = p.y + item.vel.y * step;
+
+      if (item.vel.y < 0 && this.blocked(p.x, ny, p.z)) {
+        p.y = Math.floor(ny) + 1;
+        item.vel.y = 0;
+        item.grounded = true;
+      } else if (item.vel.y > 0 && this.blocked(p.x, ny + HALF * 2, p.z)) {
+        item.vel.y = 0;
+      } else {
+        p.y = ny;
+        if (!this.solidAt(p.x, p.y - 0.06, p.z)) item.grounded = false;
+      }
+
+      /* ---- conveyor: one table lookup, no Map, no allocated dir tuple ---- */
+      let onBelt = false;
+      if (item.grounded) {
+        const bx = Math.floor(p.x);
+        const by = Math.floor(p.y - 0.06);
+        const bz = Math.floor(p.z);
+        const bid = this.world.peekBlock(bx, by, bz);
+        if (bid >= 0 && (kindOf(bid) & MK_CONVEYOR) !== 0) {
+          const dX = dirXOf(bid), dZ = dirZOf(bid);
+          onBelt = true;
+          this.stats.beltTicks++;
+          const k = Math.min(1, 10 * step);

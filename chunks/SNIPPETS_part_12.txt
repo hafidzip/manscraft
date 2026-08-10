@@ -1,0 +1,200 @@
+  blockId: number;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  time: number;
+  grounded: boolean;
+  spin: number;
+  /* --- NEW bookkeeping, all owned by ItemDropManager/ItemGrid --- */
+  cell: number;        // ItemGrid cell key, -1 when unlinked
+  slot: number;        // index inside the ItemGrid bucket
+  index: number;       // index inside ItemDropManager.items
+  awakeSlot: number;   // index inside awake[] or sleepers[]
+  sleeping: boolean;
+  inst: number;        // ItemInstancer slot, -1 when not instanced
+  alive: boolean;      // false once removed; guards double-recycle
+}
+
+export interface ItemDropOptions {
+  bus?: ChangeBus;
+  /** S5c. Default false: one THREE.Mesh per item, exactly as today. */
+  instanced?: boolean;
+  maxItems?: number;
+  /** S5b. Default true. */
+  sleep?: boolean;
+}
+
+export class ItemDropManager {
+  /** PUBLIC, unchanged shape: dense array of live drops. */
+  items: DroppedItem[] = [];
+
+  readonly stats = {
+    spawned: 0, despawned: 0, evicted: 0,
+    live: 0, awake: 0, sleeping: 0,
+    probes: 0, probeHits: 0,
+    takeQueries: 0, takeCandidates: 0, takeHits: 0,
+    pickupQueries: 0, pickupCandidates: 0, pickups: 0,
+    wakeChecks: 0, wakes: 0, beltTicks: 0,
+  };
+
+  private readonly grid = new ItemGrid();
+  private readonly awake: DroppedItem[] = [];
+  private readonly sleepers: DroppedItem[] = [];
+  private readonly recPool: DroppedItem[] = [];
+  private meshPool: THREE.Mesh[] = [];
+  private geoCache = new Map<number, THREE.BufferGeometry>();
+  private mat: THREE.MeshLambertMaterial | null = null;
+
+  private bus: ChangeBus | null = null;
+  private instancer: ItemInstancer | null = null;
+  private maxItems = MAX_ITEMS_DEFAULT;
+  private sleepEnabled = true;
+  private wakeCursor = 0;
+
+  /** One-entry voxel memo for collision probes, invalidated by the bus epoch. */
+  private pKey = -1;
+  private pVal = false;
+  private pEpoch = 0;
+
+  // constructor(scene, world, inv, audio, onPickup, opts: ItemDropOptions = {})
+  //   this.bus = opts.bus ?? null;
+  //   this.maxItems = opts.maxItems ?? MAX_ITEMS_DEFAULT;
+  //   this.sleepEnabled = opts.sleep ?? true;
+  //   if (opts.instanced) this.instancer = new ItemInstancer(scene, (id) => this.getGeometry(id), () => this.getMaterial());
+  //   this.bus?.add({ onBlock: (x, y, z) => this.onBlockChanged(x, y, z) });
+```
+
+### 5.3 Spawn, recycle, and removal (no `splice`, no per-spawn allocation)
+
+```ts
+// src/game/fps/ItemDrop.ts   (REPLACES §3.2 spawn())
+
+  spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+    if (blockId === B.AIR || blockId === B.BEDROCK) return;
+    if (this.items.length >= this.maxItems) this.evictOne();
+
+    const it = this.recPool.pop() ?? ({
+      mesh: null, blockId: 0,
+      pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+      time: 0, grounded: false, spin: 0,
+      cell: -1, slot: -1, index: -1, awakeSlot: -1,
+      sleeping: false, inst: -1, alive: false,
+    } as DroppedItem);
+
+    it.blockId  = blockId;
+    it.pos.copy(pos);                            // copy: caller keeps ownership
+    if (velocity) {
+      it.vel.copy(velocity);
+    } else {
+      it.vel.set(
+        (Math.random() - 0.5) * 2.6,
+        2.4 + Math.random() * 1.4,
+        (Math.random() - 0.5) * 2.6,
+      );                                          // was: new THREE.Vector3(...)
+    }
+    it.time = 0;
+    it.grounded = false;
+    it.spin = Math.random() * Math.PI * 2;
+    it.sleeping = false;
+    it.alive = true;
+    it.inst = -1;
+
+    if (this.instancer) {
+      it.mesh = null;
+      it.inst = this.instancer.acquire(it);
+    } else {
+      const mesh = this.meshPool.pop()
+        ?? new THREE.Mesh(this.getGeometry(blockId), this.getMaterial());
+      mesh.geometry = this.getGeometry(blockId);
+      mesh.material = this.getMaterial();
+      mesh.position.copy(it.pos);
+      mesh.visible = true;
+      mesh.castShadow = true;
+      mesh.receiveShadow = false;
+      this.scene.add(mesh);
+      it.mesh = mesh;
+    }
+
+    it.index = this.items.length;
+    this.items.push(it);
+    this.grid.insert(it);
+    this.pushAwake(it);
+    this.stats.spawned++;
+    this.stats.live = this.items.length;
+  }
+
+  /* ---------------------------- list plumbing (all O(1)) ---------------------- */
+
+  private pushAwake(it: DroppedItem): void {
+    it.sleeping = false;
+    it.awakeSlot = this.awake.length;
+    this.awake.push(it);
+  }
+
+  private popList(list: DroppedItem[], it: DroppedItem): void {
+    const last = list.pop()!;
+    if (last !== it) { list[it.awakeSlot] = last; last.awakeSlot = it.awakeSlot; }
+    it.awakeSlot = -1;
+  }
+
+  private sleep(it: DroppedItem): void {
+    this.popList(this.awake, it);
+    it.sleeping = true;
+    it.awakeSlot = this.sleepers.length;
+    this.sleepers.push(it);
+    this.stats.sleeping = this.sleepers.length;
+    this.stats.awake = this.awake.length;
+  }
+
+  private wake(it: DroppedItem): void {
+    if (!it.sleeping || !it.alive) return;
+    this.popList(this.sleepers, it);
+    this.pushAwake(it);
+    this.stats.wakes++;
+    this.stats.sleeping = this.sleepers.length;
+    this.stats.awake = this.awake.length;
+  }
+
+  /** Detach from every index. The record itself is NOT pooled here. */
+  private unlink(it: DroppedItem): void {
+    this.grid.remove(it);
+    this.popList(it.sleeping ? this.sleepers : this.awake, it);
+    const last = this.items.pop()!;              // swap-remove, was splice()
+    if (last !== it) { this.items[it.index] = last; last.index = it.index; }
+    it.index = -1;
+    it.alive = false;
+    if (this.instancer && it.inst >= 0) { this.instancer.release(it); it.inst = -1; }
+    else if (it.mesh) {
+      this.scene.remove(it.mesh);
+      it.mesh.visible = false;
+      this.meshPool.push(it.mesh);
+      it.mesh = null;
+    }
+    this.stats.live = this.items.length;
+    this.stats.awake = this.awake.length;
+    this.stats.sleeping = this.sleepers.length;
+  }
+
+  /**
+   * NEW public API. `takeAt()` hands the caller a pooled record; call this when the
+   * caller is done reading `blockId`. Forgetting it leaks the record to the GC —
+   * the pre-change behavior — never a correctness bug.
+   */
+  recycle(it: DroppedItem): void {
+    if (it.alive) return;                         // still owned by the manager
+    if (it.index !== -1 || it.cell !== -1) return;
+    if (this.recPool.length < 256) this.recPool.push(it);
+  }
+
+  private despawn(it: DroppedItem): void {
+    this.unlink(it);
+    this.recycle(it);
+    this.stats.despawned++;
+  }
+
+  /**
+   * Cap policy, documented gameplay semantics:
+   *   1. the sleeping item farthest from the player, else
+   *   2. the oldest item farther than 8 blocks from the player, else
+   *   3. the oldest item overall.
+   * Spawning NEVER fails, so a mined block always yields a drop.
+   */

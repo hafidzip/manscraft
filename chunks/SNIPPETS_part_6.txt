@@ -1,0 +1,200 @@
+    for (let i = 0; i < n; i++) { ox[i] = list[i].ox; oy[i] = list[i].oy; oz[i] = list[i].oz; }
+    CAND_OX.push(ox); CAND_OY.push(oy); CAND_OZ.push(oz);
+  }
+})();
+
+const facingIndex = (dx: number, dz: number): number =>
+  dx === 1 ? 0 : dx === -1 ? 1 : dz === 1 ? 2 : 3;
+
+/* ------------------------------------------------------------------ manager */
+
+interface Turret {
+  wx: number; y: number; wz: number;
+  dx: number; dz: number;
+  group: THREE.Group; beam: Beam;
+  target: { ox: number; oy: number; oz: number } | null;
+  charge: number;
+  // NEW acquisition state
+  acqCursor: number;     // resume position in the candidate table
+  acqEpoch: number;      // ChangeBus.version the current search/result is valid for
+  acqCooldown: number;   // seconds until a failed search may restart
+  // ... existing visual fields UNCHANGED
+}
+
+export class LaserMinerManager implements MachineAgent {
+  readonly kind = MK_LASER;
+  readonly maxLive = MAX_TURRETS;
+  readonly scanRadius = SCAN_RADIUS;
+  readonly pruneRadius = PRUNE_RADIUS;
+  readonly yLo = Y_LO;
+  readonly yHi = Y_HI;
+  readonly thinkPerFrame = 2;
+
+  readonly stats = { miners: 0, acquires: 0, losCalls: 0, losSamples: 0, cacheHits: 0 };
+
+  private turrets = new Map<number, Turret>();
+  private bus: ChangeBus | null = null;
+
+  // constructor(scene, world, hooks, opts?: { bus?: ChangeBus })  — opts is NEW+optional
+  //   this.bus = opts?.bus ?? null;
+
+  /** Non-generating voxel read with the exact -1 semantics the old code handled. */
+  private vox(x: number, y: number, z: number): number {
+    return this.world.peekBlock(x, y, z);
+  }
+
+  has(key: number) { return this.turrets.has(key); }
+
+  create(rec: MachineRecord): void {
+    if (this.turrets.has(rec.key)) return;
+    const t = this.buildTurret(rec.x, rec.y, rec.z, rec.id) as Turret;  // UNCHANGED
+    t.dx = rec.dx; t.dz = rec.dz;
+    t.acqCursor = 0; t.acqEpoch = 0; t.acqCooldown = 0;
+    t.group.visible = false;
+    t.beam.setVisible(false);
+    this.turrets.set(rec.key, t);
+    this.stats.miners = this.turrets.size;
+  }
+
+  destroy(key: number): void {
+    const t = this.turrets.get(key);
+    if (!t) return;
+    this.destroyTurret(t);                                              // UNCHANGED
+    this.turrets.delete(key);
+    this.stats.miners = this.turrets.size;
+  }
+
+  onIdChanged(rec: MachineRecord): void {
+    const t = this.turrets.get(rec.key);
+    if (!t) return;
+    t.dx = rec.dx; t.dz = rec.dz;
+    t.target = null; t.charge = 0; t.acqCursor = 0; t.acqEpoch = 0;      // rotation invalidates
+  }
+
+  setActive(key: number, active: boolean): void {
+    const t = this.turrets.get(key);
+    if (!t) return;
+    t.group.visible = active;
+    if (!active) t.beam.setVisible(false);
+  }
+
+  tick(rec: MachineRecord, v: MachineView, dt: number): void {
+    const t = this.turrets.get(rec.key);
+    if (!t) return;
+    if (t.acqCooldown > 0) t.acqCooldown -= dt;
+    // Cheap validity check: one non-generating read of the target cell.
+    if (t.target) {
+      const id = this.vox(
+        wrapI(t.wx + t.target.ox), t.y + t.target.oy, wrapI(t.wz + t.target.oz),
+      );
+      if (id < 0 || !this.hooks.mineable(id)) {
+        t.target = null; t.charge = 0; t.acqCursor = 0; t.acqEpoch = 0;
+      }
+    }
+    this.tickTurret(t, v.ix, v.iz, dt);                                  // UNCHANGED
+  }
+
+  wantsThink(rec: MachineRecord): boolean {
+    const t = this.turrets.get(rec.key);
+    if (!t) return false;
+    if (t.target) return false;                    // has a target: nothing to search
+    if (t.acqCooldown > 0) return false;
+    const epoch = this.bus ? this.bus.version : 0;
+    if (t.acqCursor === 0 && t.acqEpoch === epoch) {
+      this.stats.cacheHits++;                      // exhausted, terrain unchanged
+      return false;
+    }
+    return true;
+  }
+
+  think(rec: MachineRecord): void {
+    const t = this.turrets.get(rec.key);
+    if (t) this.acquire(t);
+  }
+
+  /**
+   * Resumable best-first acquisition.
+   *
+   * Original: 102 candidates x (1 voxel read + up to 9 sampled rays), every acquire.
+   * Now: candidates are pre-sorted by the original score, so the FIRST candidate that
+   * passes mineable+reachable IS the original winner; we stop there. LOS work is capped
+   * per slice and resumes at acqCursor, which is exact because LOS is static until the
+   * ChangeBus epoch moves (checked in wantsThink / invalidated in onBlock).
+   */
+  private acquire(t: Turret): void {
+    this.stats.acquires++;
+    const epoch = this.bus ? this.bus.version : 0;
+    if (t.acqEpoch !== epoch) { t.acqCursor = 0; t.acqEpoch = epoch; }
+
+    const f  = facingIndex(t.dx, t.dz);
+    const OX = CAND_OX[f], OY = CAND_OY[f], OZ = CAND_OZ[f];
+    const n  = OX.length;
+    const lx = -t.dz, lz = t.dx;
+    let budget = LOS_BUDGET_PER_THINK;
+
+    let i = t.acqCursor;
+    for (; i < n; i++) {
+      const ox = OX[i], oy = OY[i], oz = OZ[i];
+      const id = this.vox(wrapI(t.wx + ox), t.y + oy, wrapI(t.wz + oz));
+      if (id < 0 || !this.hooks.mineable(id)) continue;
+      if (budget <= 0) { t.acqCursor = i; return; }      // resume next slice
+      budget--;
+      if (!this.reachable(t, ox, oy, oz, lx, lz)) continue;
+      t.target = { ox, oy, oz };
+      t.charge = 0;
+      t.acqCursor = 0;
+      return;
+    }
+    // Exhausted with no target: remember the epoch so we do not rescan until the
+    // world changes, and add a cooldown so a moving world cannot spin the search.
+    t.target = null;
+    t.charge = 0;
+    t.acqCursor = 0;
+    t.acqEpoch = epoch;
+    t.acqCooldown = ACQUIRE_RETRY_SEC;
+  }
+
+  /** reachable() unchanged apart from vox() and instrumentation. */
+  private reachable(t: Turret, ox: number, oy: number, oz: number,
+                    lx: number, lz: number): boolean {
+    this.stats.losCalls++;
+    const gx = wrapI(t.wx + ox), gy = t.y + oy, gz = wrapI(t.wz + oz);
+    const tgtX = t.wx + ox + 0.5, tgtY = t.y + oy + 0.5, tgtZ = t.wz + oz + 0.5;
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        const sx = t.wx + 0.5 + lx * a * 0.45;
+        const sy = t.y + 0.24 + b * 0.2;
+        const sz = t.wz + 0.5 + lz * a * 0.45;
+        if (this.clearPath(sx, sy, sz, tgtX, tgtY, tgtZ, gx, gy, gz)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Same sampling positions and same predicates as the original. Two changes:
+   *  - peekBlock instead of get (never generates a chunk mid-frame)
+   *  - consecutive duplicate voxels are skipped; the sample set is unchanged, so the
+   *    result is identical, but ~40-60% of the lookups disappear at 4 samples/block.
+   */
+  private clearPath(sx: number, sy: number, sz: number,
+                    tx: number, ty: number, tz: number,
+                    gx: number, gy: number, gz: number): boolean {
+    const dx = tx - sx, dy = ty - sy, dz = tz - sz;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const steps = Math.ceil(dist * 4);
+    const inv = 1 / steps;
+    let px = 0x7fffffff, py = 0x7fffffff, pz = 0x7fffffff;
+
+    for (let i = 1; i < steps; i++) {
+      const frac = i * inv;
+      const bx = Math.floor(sx + dx * frac) & 511;
+      const by = Math.floor(sy + dy * frac);
+      const bz = Math.floor(sz + dz * frac) & 511;
+      if (bx === px && by === py && bz === pz) continue;
+      px = bx; py = by; pz = bz;
+      if (bx === gx && by === gy && bz === gz) continue;
+      this.stats.losSamples++;
+      const id = this.vox(bx, by, bz);
+      if (id < 0 || id === B.AIR || isWaterId(id)) continue;
+      if (!DEFS[id]?.solid) continue;

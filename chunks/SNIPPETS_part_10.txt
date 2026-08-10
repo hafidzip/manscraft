@@ -1,0 +1,200 @@
+          const i = (sl.thinkCursor + a) % sl.n;
+          const rec = sl.recs[i];
+          if (rec === null) continue;
+          view.ix = sl.ix[i]; view.iz = sl.iz[i]; view.d2 = sl.d2[i];
+          if (agent.wantsThink && !agent.wantsThink(rec, view)) continue;
+          agent.think(rec, view);
+          this.stats.thinks++;
+          done++;
+        }
+        sl.thinkCursor = sl.n > 0 ? (sl.thinkCursor + budget) % sl.n : 0;
+      }
+
+      // ---- amortized distance reclamation ------------------------------------
+      this.pruneFar(sl);
+
+      // ---- rotate the active set --------------------------------------------
+      let w = 0;
+      for (let i = 0; i < sl.n; i++) {
+        if (sl.recs[i] !== null) sl.prevKeys[w++] = sl.keys[i];
+      }
+      sl.prevN = w;
+      activeTotal += w;
+      for (let i = 0; i < sl.n; i++) sl.recs[i] = null;   // never retain a pooled rec
+    }
+
+    this.stats.activeTotal = activeTotal;
+
+    this.dormantClock += dt;
+    if (this.dormantClock >= DORMANT_PRUNE_SEC) {
+      this.dormantClock = 0;
+      this.registry.pruneDormant();
+    }
+  }
+
+  /* ------------------------------------------------------------ ownership */
+
+  private remember(sl: Slot, key: number): void {
+    if (sl.ownedIdx.has(key)) return;
+    sl.ownedIdx.set(key, sl.ownedKeys.length);
+    sl.ownedKeys.push(key);
+  }
+
+  private forget(key: number, kind: number): void {
+    const sl = this.byKind[kind];
+    if (!sl) return;
+    if (sl.agent.has(key)) {
+      sl.agent.destroy(key);
+      this.stats.destroyed++;
+    }
+    const idx = sl.ownedIdx.get(key);
+    if (idx !== undefined) {
+      const last = sl.ownedKeys.pop()!;
+      if (last !== key) { sl.ownedKeys[idx] = last; sl.ownedIdx.set(last, idx); }
+      sl.ownedIdx.delete(key);
+    }
+    for (let j = 0; j < sl.prevN; j++) {
+      if (sl.prevKeys[j] === key) {
+        sl.prevKeys[j] = sl.prevKeys[--sl.prevN];
+        break;
+      }
+    }
+  }
+
+  /**
+   * Rotating, bounded reclamation of entities the player has left behind.
+   * Replaces the old `pruneT -= dt * arms.size` heuristic, which only ever
+   * considered machines whose chunk data had ALSO been discarded, so entities for
+   * loaded-but-distant machines accumulated for the whole session.
+   */
+  private pruneFar(sl: Slot): void {
+    const keys = sl.ownedKeys;
+    const n = keys.length;
+    if (n === 0) return;
+    const checks = Math.min(PRUNE_CHECKS_PER_FRAME, n);
+    for (let c = 0; c < checks; c++) {
+      if (sl.pruneCursor >= keys.length) sl.pruneCursor = 0;
+      const i = sl.pruneCursor++;
+      const key = keys[i];
+      this.stats.pruneChecks++;
+
+      const dx = minImageF(cellX(key) - this.px);
+      const dz = minImageF(cellZ(key) - this.pz);
+      if (dx * dx + dz * dz <= sl.pruneR2) continue;
+      if (sl.agent.retain?.(key)) continue;
+
+      this.forget(key, sl.kind);
+      this.stats.reclaimed++;
+      sl.pruneCursor = i;            // a swap moved a new key into this slot
+      break;                         // at most one reclamation per agent per frame
+    }
+  }
+
+  /* ------------------------------------------------------- instrumentation */
+
+  snapshot() {
+    return {
+      scheduler: { ...this.stats },
+      registry: this.registry.snapshot(),
+      agents: this.slots.map((sl) => ({
+        kind: sl.kind,
+        active: sl.prevN,
+        owned: sl.ownedKeys.length,
+        cap: sl.keys.length,
+        stats: (sl.agent as unknown as { stats?: object }).stats ?? null,
+      })),
+    };
+  }
+}
+```
+
+### 4.2 Cost model
+
+Per frame, independent of how many machines exist in the world:
+
+| Phase | Work | Allocations |
+|---|---|---|
+| shared proximity pass | 25 bucket probes + 1 distance test per record inside those 5×5 chunks | 0 |
+| top-K selection | ≤ 24 shifts per insert, ≤ 48 inserts total | 0 |
+| creation | ≤ 3 `buildArm`/`buildTurret`/`buildGun` calls | THREE objects only |
+| activation diff | ≤ K² integer compares per agent (≤ 576) | 0 |
+| tick | ≤ 24 + 12 + 12 = 48 `tick()` calls | 0 |
+| think | ≤ 0 + 2 + 3 = 5 slices | 0 |
+| reclamation | ≤ 8 distance tests, ≤ 1 destroy per agent | 0 |
+| voxel reads | **0** | — |
+
+Legacy equivalent: ~50 900 `world.get()` calls per 0.5 s (≈102 k/s), one string
+allocation per discovered machine per scan, and unbounded entity construction inside a
+radius-26 disc. Registry upkeep replaces that with 20 480 byte reads per *chunk data
+creation* (skipped entirely when `trustGenerator` is on) and O(1) per block change.
+
+### 4.3 Frame phases and preserved ordering
+
+```
+frame:
+  world.update(px, pz, budgetMs)          // unchanged
+  itemDrops.update(dt, player.pos)        // unchanged position in the frame
+  machines.update(dt, player.pos)
+      registry.tickClock
+      ONE forEachNear pass -> top-K per agent
+      per agent, in registration order  [inserter, laser, turret]:
+          prepare -> create -> setActive diff -> tick -> think -> prune
+      registry.pruneDormant (every 4 s)
+```
+
+`itemDrops.update` still runs **before** any inserter tick, so an item released by an
+inserter is simulated on the following frame exactly as before. Inserters still tick
+before laser miners, which still tick before turrets.
+
+**Why creation is proximity-gated.** The old scan built a full visual entity for every
+machine inside radius 26, then showed only the nearest `MAX_*`. On a dense factory floor
+that is hundreds of `THREE.Group`s that are never visible. The scheduler builds only the
+nearest-K, budgeted at 3 per frame, which removes a real spike source (entity
+construction) as well as the scan.
+
+### 4.4 `src/game/engine.ts` integration
+
+```ts
+// src/game/engine.ts   (REPLACES the block shown in §2.5)
+import { ChangeBus } from './world/changeBus';
+import { MachineRegistry, MK_GHOST } from './world/machineRegistry';
+import { MachineScheduler } from './fps/machineScheduler';
+import { EnemyGrid } from './fps/enemyGrid';
+
+// --- fields ---
+private changeBus!: ChangeBus;
+private machineRegistry!: MachineRegistry;
+private machines!: MachineScheduler;
+private enemyGrid!: EnemyGrid;
+
+// --- construction, in this exact order ---
+
+// 1. IMPORTANT: attach the bus AFTER every existing `this.world.onChanged = ...`
+//    assignment in engine setup. attach() chains the previous handler; assigning
+//    world.onChanged afterwards would overwrite the bus and silently disable it.
+this.changeBus = new ChangeBus();
+this.changeBus.attach(this.world);
+
+// 2. Registry: index the three ghost machines only (conveyors stay voxel-queried).
+this.machineRegistry = new MachineRegistry({
+  indexedKinds: MK_GHOST,
+  trustGenerator: true,          // TerrainGenerator (§1.6) never emits machine ids
+});
+this.machineRegistry.attach(this.changeBus);
+this.machineRegistry.bootstrap(this.world);   // idempotent with the attach above
+
+// 3. Managers. Only additive optional options; all existing arguments unchanged.
+this.itemDrops = new ItemDropManager(
+  this.scene,
+  this.world,
+  this.inventory,
+  this.fpsAudio,
+  () => this.syncHotbarMode(),
+  { bus: this.changeBus },                    // NEW optional 6th argument (§5)
+);
+
+this.inserters = new InserterManager(
+  this.scene, this.world, this.itemDrops, this.fpsAudio,
+);
+
+this.laserMiners = new LaserMinerManager(

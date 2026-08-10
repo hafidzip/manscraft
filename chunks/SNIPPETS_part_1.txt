@@ -1,0 +1,199 @@
+````markdown
+# Manscraft Optimization Handoff — v2
+
+**Scope of this revision: Deliverable items 1–5 only.**
+Items 6–12 (chunk streaming, mesher border reads, worker design, full instrumentation
+matrix, complexity appendix for chunks, staged migration for chunk systems, and the
+full regression suite) are **not** included here and remain open. A short "what's still
+open" section is at the end so this document can be merged forward without loss.
+
+Everything below is implementation-ready TypeScript against the APIs and invariants in
+v1 of this document. No generic advice; every file path, symbol, and call site is named.
+
+---
+
+## 0. How to apply this document
+
+| Stage | Files | Behavior change | Ships alone? |
+|---|---|---|---|
+| **S1** | `core/cellKey.ts` (new) | none (pure functions) | yes |
+| **S2** | `world/changeBus.ts` (new) + 4 small edits in `world/world.ts` | none (additive hooks) + 1 latent memo bug fixed | yes |
+| **S3** | `world/machineRegistry.ts` (new) | none until S4 consumes it | yes |
+| **S4** | `fps/machineScheduler.ts` (new), `fps/Inserter.ts`, `fps/LaserMiner.ts`, `fps/Turret.ts`, `engine.ts` | discovery source changes; visuals/targeting preserved | yes |
+| **S5a** | `fps/ItemGrid.ts` (new) + `fps/ItemDrop.ts` index/collision/pickup | none observable | yes |
+| **S5b** | `fps/ItemDrop.ts` sleep + cap | bounded, documented | yes |
+| **S5c** | `fps/ItemInstancer.ts` (new), opt-in flag | draw-call reduction only | yes |
+
+Each stage compiles and runs on its own. S4 requires S1–S3. S5b requires S5a. S5c is
+behind `opts.instanced` and defaults **off**.
+
+### API changes (complete list, with every affected call site)
+
+1. `World.onChunkData` / `World.onChunkGone` — **new optional fields**, default `null`.
+   Call sites: `World.ensureData()` and the eviction branch of `World.update()`, both in
+   `src/game/world/world.ts`, both shown in §2.2.
+2. `World.forEachLoadedChunk()` — **new public method**, additive. Call site:
+   `MachineRegistry.bootstrap()`.
+3. `InserterManager.update()`, `LaserMinerManager.update()`, `TurretManager.update()` —
+   **removed**; these classes now implement `MachineAgent`. Only call sites are the four
+   lines in `src/game/engine.ts` shown in §4.4, replaced with one
+   `this.machines.update(dt, this.player.pos)`.
+4. `ItemDropManager` constructor gains an **optional 6th parameter** `opts`. Existing call
+   site in `engine.ts` keeps working unchanged.
+5. `DroppedItem.mesh` becomes `THREE.Mesh | null` (null only in instanced mode, S5c).
+   All reads of `.mesh` live inside `src/game/fps/ItemDrop.ts` and are updated in §5.
+6. `ItemDropManager.takeAt()` return value is now **pool-managed**: the caller must call
+   `drops.recycle(item)` when finished. Only call site is `InserterManager.tickArm()`,
+   updated in §4.1. Not calling `recycle` leaks the record to the GC — same as today,
+   never a correctness bug.
+
+Everything else — `world.peekBlock`, `world.solid`, `ItemDropManager.spawn`,
+`ItemDropManager.takeAt` signature, `ItemDropManager.items`, all manager constructors,
+`buildArm`/`destroyArm`/`buildTurret`/`buildGun`/`tickTurret` internals, all block
+predicates — is unchanged.
+
+### One global assumption, stated explicitly
+
+The machine managers call `world.get()` and every call site already handles a `-1`
+return. This document replaces all of them with `world.peekBlock()`, which is the
+non-generating lookup with identical `-1` semantics. If `world.get` was
+`getBlockRaw`, this **removes synchronous chunk generation from machine code paths**,
+which is a required goal; the `-1` branches are preserved verbatim so behavior in the
+missing-chunk case is unchanged either way.
+
+---
+
+## 1. Architecture
+
+### 1.1 Text diagram
+
+```
+                    ┌───────────────────────────────────────────┐
+                    │ World                                     │
+                    │  chunks: Map<key, Chunk>                  │
+                    │  peekBlock()  (never generates)           │
+                    │  getBlockRaw() (may generate)             │
+                    └───┬──────────────┬────────────────┬───────┘
+        onChanged(x,y,z,old,new)  onChunkData(cx,cz,data,fromGen)
+                        │              │  onChunkGone(cx,cz)
+                        │              │        (both NEW, additive, default null)
+                    ┌───▼──────────────▼────────────────────────┐
+                    │ ChangeBus                                 │
+                    │  version++  (epoch for every cache)       │
+                    │  fan-out to N sinks                       │
+                    └───┬──────────────────────┬────────────────┘
+                        │                      │
+      ┌─────────────────▼──────────┐   ┌───────▼─────────────────────────┐
+      │ MachineRegistry            │   │ ItemDropManager                 │
+      │  buckets[1024]  (per chunk)│   │  voxel memo invalidation        │
+      │  byKey: Map<cell,Record>   │   │  wakeNear(x,y,z) on block change│
+      │  add/remove/rescan/dormant │   │                                 │
+      │  forEachNear(...)          │   │  ItemGrid  (1×1×1 voxel cells)  │
+      └───┬────────────────────────┘   │   Map<cell, DroppedItem[]>      │
+          │  ONE proximity pass/frame  │   O(1) swap-remove buckets      │
+          │  (25 buckets, 0 voxels)    └───────▲───────────▲─────────────┘
+      ┌───▼──────────────────────────┐         │           │
+      │ MachineScheduler             │  takeAt(cellbox)    │ sweepPickup(cellbox)
+      │  create budget / frame       │─────────┘           │
+      │  nearest-K activation        │                     │
+      │  tick all active             │              player position
+      │  think round-robin budget    │
+      │  bounded dormant prune       │
+      └──┬───────────┬───────────┬───┘
+         │           │           │      (registration order == old update order)
+   ┌─────▼────┐ ┌────▼──────┐ ┌──▼─────────┐
+   │Inserter  │ │LaserMiner │ │Turret      │
+   │Manager   │ │Manager    │ │Manager     │
+   │arms:     │ │turrets:   │ │guns:       │
+   │Map<int,> │ │Map<int,>  │ │Map<int,>   │
+   └──────────┘ └─────┬─────┘ └──┬─────────┘
+                      │          │
+             resumable LOS   ┌───▼──────────────┐
+             cursor + epoch  │ EnemyGrid        │ rebuilt once per frame,
+             cache           │ 16-block cells   │ only when a gun is live
+                             └──────────────────┘
+```
+
+### 1.2 Ownership rules
+
+| Data | Owner | Mutators | Readers |
+|---|---|---|---|
+| Voxel data | `World` | `World` only | everyone via `peekBlock` |
+| Machine index | `MachineRegistry` | `ChangeBus` events only | scheduler, agents |
+| `MachineRecord` lifetime | registry (pooled) | registry | agents **must not retain past `onRemove`** — retain `rec.key` |
+| Visual entities (`Arm`/`Turret`/`Gun`) | the agent | agent, driven by scheduler | agent |
+| `DroppedItem` records | `ItemDropManager` (pooled) | manager | `takeAt` caller until `recycle()` |
+| Item cell membership | `ItemGrid` | manager after movement | `takeAt`, pickup sweep |
+| Enemy index | `TurretManager` | rebuilt from `hooks.targets()` once/frame | gun acquire |
+
+### 1.3 Invariants this architecture must not break
+
+* `WORLD_SIZE = 512`, `CHUNK_SIZE = 16`, `WORLD_CHUNKS = 32`, X/Z wrap.
+* Chunk layout `(y*16 + z)*16 + x` — relied on by the registry's linear rescan (§2.3).
+* `peekBlock` missing → `-1`; collision treats missing as solid.
+* Ghost machines occupy a cell, are non-solid, and **block item drops**.
+* Inserter picks from `-dir`, releases to `+dir`.
+* Laser never targets or beams through a blocking solid.
+* Turret rotates 360° and targets non-peaceful, alive enemies.
+* Items must stop *outside* a machine cell and stay inside the inserter's 0.52 pickup
+  radius (conveyor backpressure).
+
+---
+
+## 2. Shared machine registry
+
+### 2.1 New file: `src/game/core/cellKey.ts`
+
+```ts
+// src/game/core/cellKey.ts   (NEW FILE)
+import {
+  CHUNK_LOG2, CHUNK_MASK, WORLD_CHUNKS_MASK, WORLD_HEIGHT,
+} from './constants';
+
+/**
+ * Packed voxel cell key.
+ *   bits  0..8  : x (0..511)
+ *   bits  9..17 : z (0..511)
+ *   bits 18..24 : y (0..127)   WORLD_HEIGHT is 80 -> fits
+ *
+ * 25 bits total, so the value is always a tagged small integer: never boxed,
+ * never a double, and a fast Map key.
+ *
+ * WORLD_SIZE is a power of two, so `& 511` *is* the torus wrap and works for
+ * negative integers (-1 & 511 === 511). Callers may pass unwrapped integers.
+ * Callers must NOT pass fractional values; floor first.
+ */
+export const packCell = (x: number, y: number, z: number): number =>
+  ((((y & 127) << 18) | ((z & 511) << 9) | (x & 511)) | 0);
+
+export const cellX = (k: number): number => k & 511;
+export const cellZ = (k: number): number => (k >>> 9) & 511;
+export const cellY = (k: number): number => (k >>> 18) & 127;
+
+/** Integer torus wrap. Equivalent to wrapBlock() for integer inputs, no modulo. */
+export const wrapI = (v: number): number => v & 511;
+
+/** Identical layout to World.key(): (cx << 5) | cz. Range 0..1023. */
+export const packChunk = (cx: number, cz: number): number =>
+  ((((cx & WORLD_CHUNKS_MASK) << 5) | (cz & WORLD_CHUNKS_MASK)) | 0);
+
+export const CHUNK_BUCKETS = 1024;
+
+/** Chunk coordinate of a (possibly negative / unwrapped) block coordinate. */
+export const chunkOfBlock = (v: number): number =>
+  ((v >> CHUNK_LOG2) & WORLD_CHUNKS_MASK);
+
+/** Chunk-radius that fully covers a block radius from any position in a chunk. */
+export const chunkRadiusFor = (blockRadius: number): number =>
+  ((Math.ceil(blockRadius) + CHUNK_MASK) >> CHUNK_LOG2);
+
+// Guard rails — these are cheap and only run once at module init.
+if (WORLD_HEIGHT > 128) {
+  throw new Error('cellKey: WORLD_HEIGHT > 128 needs more Y bits in packCell');
+}
+```
+
+**Why not strings.** `` `${wx},${y},${wz}` `` allocated one string per discovered machine
+per scan, forever, at 2 Hz. `packCell` allocates nothing and compares in one instruction.
+
+### 2.2 New file: `src/game/world/changeBus.ts` + four edits to `world.ts`

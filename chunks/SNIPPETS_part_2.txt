@@ -1,0 +1,200 @@
+```ts
+// src/game/world/changeBus.ts   (NEW FILE)
+
+export type BlockChangeFn =
+  (x: number, y: number, z: number, oldId: number, newId: number) => void;
+export type ChunkDataFn =
+  (cx: number, cz: number, data: Uint8Array, fromGenerator: boolean) => void;
+export type ChunkGoneFn = (cx: number, cz: number) => void;
+
+export interface ChangeSink {
+  onBlock?: BlockChangeFn;
+  onChunkData?: ChunkDataFn;
+  onChunkGone?: ChunkGoneFn;
+}
+
+/** Minimal shape needed from World; avoids an import cycle. */
+export interface ChangeSource {
+  onChanged: BlockChangeFn | null;
+  onChunkData?: ChunkDataFn | null;
+  onChunkGone?: ChunkGoneFn | null;
+}
+
+const ATTACHED = Symbol('manscraft.changeBus');
+
+/**
+ * Fans World's single-slot callbacks out to many sinks WITHOUT changing the
+ * existing public API: whatever was already assigned to world.onChanged keeps
+ * firing, first, with identical arguments.
+ */
+export class ChangeBus {
+  /** Monotonic epoch. Bump on every voxel mutation. Cheap cache invalidation. */
+  version = 1;
+
+  readonly stats = { blocks: 0, chunkData: 0, chunkGone: 0 };
+
+  private sinks: ChangeSink[] = [];
+
+  add(sink: ChangeSink): () => void {
+    this.sinks.push(sink);
+    return () => {
+      const i = this.sinks.indexOf(sink);
+      if (i >= 0) this.sinks.splice(i, 1);
+    };
+  }
+
+  attach(world: ChangeSource): void {
+    const w = world as ChangeSource & { [ATTACHED]?: boolean };
+    if (w[ATTACHED]) return;          // idempotent: safe on hot reload
+    w[ATTACHED] = true;
+
+    const prevBlock = world.onChanged;
+    world.onChanged = (x, y, z, oldId, newId) => {
+      prevBlock?.(x, y, z, oldId, newId);
+      this.version++;
+      this.stats.blocks++;
+      const s = this.sinks;
+      for (let i = 0; i < s.length; i++) s[i].onBlock?.(x, y, z, oldId, newId);
+    };
+
+    const prevData = world.onChunkData ?? null;
+    world.onChunkData = (cx, cz, data, fromGenerator) => {
+      prevData?.(cx, cz, data, fromGenerator);
+      this.stats.chunkData++;
+      const s = this.sinks;
+      for (let i = 0; i < s.length; i++) s[i].onChunkData?.(cx, cz, data, fromGenerator);
+    };
+
+    const prevGone = world.onChunkGone ?? null;
+    world.onChunkGone = (cx, cz) => {
+      prevGone?.(cx, cz);
+      this.stats.chunkGone++;
+      const s = this.sinks;
+      for (let i = 0; i < s.length; i++) s[i].onChunkGone?.(cx, cz);
+    };
+  }
+}
+```
+
+**Edits to `src/game/world/world.ts`** — four small, additive changes.
+
+```ts
+// (A) In class World, next to the existing `onChanged` field:
+
+  onChunkData:
+    ((cx: number, cz: number, data: Uint8Array, fromGenerator: boolean) => void) | null = null;
+  onChunkGone: ((cx: number, cz: number) => void) | null = null;
+```
+
+```ts
+// (B) In ensureData(), inside the `if (!c) { ... }` branch, AFTER
+//     `this.buildColumnCache(c);` and BEFORE the markNeighborBorders call:
+
+      this.buildColumnCache(c);
+      this.onChunkData?.(cx, cz, c.data, true);   // <-- ADD
+      if (!this.bulkPreparing) this.markNeighborBorders(cx, cz);
+```
+
+> `fromGenerator` is `true` here because `ensureData` always fills the chunk from
+> `this.gen.populateChunk`. If a save/restore layer later writes persisted voxels into
+> `c.data`, it must call `world.onChunkData?.(cx, cz, c.data, false)` afterwards, or the
+> registry will not see those machines. This is the single integration point for
+> persistence.
+
+```ts
+// (C) In update(), amortized eviction, replace the data-delete branch:
+
+      } else if (!this.fullyPrepared && !c.dirty) {
+        this.chunks.delete(key);
+        // --- ADD: the memo can still point at the deleted chunk. Without this,
+        // peekChunk()/ensureData() return a chunk that is no longer in the map,
+        // so markDirty() can never find it again and its mesh state diverges.
+        if (this.memoChunk === c) { this.memoKey = -1; this.memoChunk = null; }
+        this.onChunkGone?.(c.cx, c.cz);           // <-- ADD
+        retired++;
+      }
+```
+
+```ts
+// (D) New public method on World (used only by MachineRegistry.bootstrap):
+
+  forEachLoadedChunk(
+    cb: (cx: number, cz: number, data: Uint8Array) => void,
+  ): void {
+    for (const c of this.chunks.values()) cb(c.cx, c.cz, c.data);
+  }
+```
+
+**Correctness note (C) is a real latent bug fix**, independent of this work: eviction
+deleted a chunk from `this.chunks` while `memoKey/memoChunk` could still reference it.
+Any subsequent `getBlockRaw` on that chunk returned the orphan instead of regenerating
+and re-registering it, and `markDirty(cx,cz)` could no longer reach it, which is one
+plausible source of "stale border faces" reports.
+
+### 2.3 New file: `src/game/world/machineRegistry.ts`
+
+```ts
+// src/game/world/machineRegistry.ts   (NEW FILE)
+import { CHUNK_SIZE, WORLD_CHUNKS, WORLD_HEIGHT, minImageF } from '../core/constants';
+import {
+  CHUNK_BUCKETS, cellX, cellY, cellZ, chunkOfBlock, chunkRadiusFor,
+  packCell, packChunk,
+} from '../core/cellKey';
+import {
+  DEFS, conveyorDir, inserterDir, isConveyor, isInserter, isLaserMiner, isTurret,
+  laserMinerDir,
+} from './blocks';
+import type { ChangeBus } from './changeBus';
+
+/* ------------------------------------------------------------------ kinds */
+
+export const MK_NONE     = 0;
+export const MK_INSERTER = 1;
+export const MK_LASER    = 2;
+export const MK_TURRET   = 4;
+export const MK_CONVEYOR = 8;
+/** The three ghost machines: no cube, non-solid, occupy a cell, block items. */
+export const MK_GHOST    = MK_INSERTER | MK_LASER | MK_TURRET;
+export const MK_ANY      = MK_GHOST | MK_CONVEYOR;
+
+/* Flat id tables replace every Map lookup (CONV_DIR/INS_DIR/LM_DIR) in hot paths. */
+const KIND_OF = new Uint8Array(256);
+const DIR_X   = new Int8Array(256);
+const DIR_Z   = new Int8Array(256);
+
+for (let id = 0; id < 256; id++) {
+  if (!DEFS[id]) continue;
+  let kind = MK_NONE;
+  let dir: readonly [number, number] | null = null;
+  if (isInserter(id))        { kind = MK_INSERTER; dir = inserterDir(id); }
+  else if (isLaserMiner(id)) { kind = MK_LASER;    dir = laserMinerDir(id); }
+  else if (isTurret(id))     { kind = MK_TURRET; }
+  else if (isConveyor(id))   { kind = MK_CONVEYOR; dir = conveyorDir(id); }
+  KIND_OF[id] = kind;
+  if (dir) { DIR_X[id] = dir[0]; DIR_Z[id] = dir[1]; }
+}
+
+export const kindOf = (id: number): number => (id >= 0 ? KIND_OF[id] : MK_NONE);
+export const dirXOf = (id: number): number => (id >= 0 ? DIR_X[id] : 0);
+export const dirZOf = (id: number): number => (id >= 0 ? DIR_Z[id] : 0);
+
+/* ----------------------------------------------------------------- record */
+
+/**
+ * Records are POOLED. Agents may use a record freely inside the callback or
+ * inside create/tick/think, but must never store the object across frames.
+ * Store `rec.key` instead and re-resolve with registry.get(key).
+ */
+export interface MachineRecord {
+  key: number;      // packCell(x, y, z)
+  x: number;        // wrapped 0..511
+  y: number;        // 0..WORLD_HEIGHT-1
+  z: number;        // wrapped 0..511
+  id: number;       // current block id (encodes rotation)
+  kind: number;     // MK_*
+  dx: number;       // facing, from DIR_X
+  dz: number;       // facing, from DIR_Z
+  /** false when the owning chunk's voxel data was discarded.
+   *  Mirrors exactly the old `world.get(...) < 0` state. */
+  live: boolean;
+  dormantAt: number;

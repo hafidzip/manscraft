@@ -1,0 +1,200 @@
+  this.scene,
+  this.world,
+  {
+    mineable: (id) => this.laserMinerCanMine(id),
+    mine: (x, y, z, dropPos) => this.laserMinerMine(x, y, z, dropPos),
+  },
+  { bus: this.changeBus },                    // NEW optional 4th argument
+);
+
+this.enemyGrid = new EnemyGrid();
+this.turrets = new TurretManager(
+  this.scene,
+  this.world,
+  {
+    targets: () => this.enemies.enemies,      // still the authoritative source
+    damage: (target, amount, point) => {
+      const e = target as Enemy;
+      e.takeDamage(amount, point, false);
+      this.enemies.alertSquadOf(e);
+    },
+    muzzle: (pos) => this.fx.muzzleFlash(pos, 0.42),
+    tracer: (from, to) => this.fx.tracer(from, to),
+    impact: (point, normal, block) => this.fx.impact(point, normal, block),
+    raycast: (origin, dir, maxDist) => this.world.raycast(origin, dir, maxDist),
+    shot: (dist) => { /* audio */ },
+  },
+  { index: this.enemyGrid },                  // NEW optional 4th argument
+);
+
+// 4. One scheduler. Registration order == the historic update order.
+this.machines = new MachineScheduler(this.machineRegistry, [
+  this.inserters,
+  this.laserMiners,
+  this.turrets,
+]);
+
+// --- per gameplay frame: four calls become two ---
+this.itemDrops.update(dt, this.player.pos);
+this.machines.update(dt, this.player.pos);
+// REMOVED: this.inserters.update(...)
+// REMOVED: this.laserMiners.update(...)
+// REMOVED: this.turrets.update(...)
+
+// --- teardown ---
+this.machines.dispose();
+```
+
+> Addendum to the stage table in §0: the **S4** row also creates
+> `src/game/fps/enemyGrid.ts`.
+
+---
+
+## 5. Item drops: spatial index, bounded simulation, optional instancing
+
+### 5.1 New file: `src/game/fps/ItemGrid.ts` (stage S5a)
+
+```ts
+// src/game/fps/ItemGrid.ts   (NEW FILE)
+import { packCell } from '../core/cellKey';
+import { WORLD_HEIGHT } from '../core/constants';
+import type { DroppedItem } from './ItemDrop';
+
+/** One bucket per voxel cell. HALF = 0.13, so an item spans at most 2 cells/axis. */
+const clampY = (y: number): number => {
+  const iy = Math.floor(y);
+  return iy < 0 ? 0 : iy > WORLD_HEIGHT - 1 ? WORLD_HEIGHT - 1 : iy;
+};
+
+export const itemCellOf = (x: number, y: number, z: number): number =>
+  packCell(Math.floor(x), clampY(y), Math.floor(z));
+
+export class ItemGrid {
+  readonly stats = {
+    cells: 0, inserts: 0, moves: 0, removes: 0,
+    queries: 0, cellsVisited: 0, candidates: 0,
+  };
+
+  private cells = new Map<number, DroppedItem[]>();
+  private bucketPool: DroppedItem[][] = [];
+
+  insert(it: DroppedItem): void {
+    this.link(it, itemCellOf(it.pos.x, it.pos.y, it.pos.z));
+    this.stats.inserts++;
+  }
+
+  remove(it: DroppedItem): void {
+    if (it.cell === -1) return;
+    const b = this.cells.get(it.cell);
+    if (b !== undefined) {
+      const last = b.pop()!;                       // O(1) swap-remove
+      if (last !== it) { b[it.slot] = last; last.slot = it.slot; }
+      if (b.length === 0) {
+        this.cells.delete(it.cell);
+        if (this.bucketPool.length < 256) this.bucketPool.push(b);
+        this.stats.cells = this.cells.size;
+      }
+    }
+    it.cell = -1;
+    it.slot = -1;
+    this.stats.removes++;
+  }
+
+  /** Call once per moved item per frame, AFTER position integration. O(1). */
+  move(it: DroppedItem): void {
+    const cell = itemCellOf(it.pos.x, it.pos.y, it.pos.z);
+    if (cell === it.cell) return;
+    this.remove(it);
+    this.link(it, cell);
+    this.stats.moves++;
+  }
+
+  private link(it: DroppedItem, cell: number): void {
+    let b = this.cells.get(cell);
+    if (b === undefined) {
+      b = this.bucketPool.pop() ?? [];
+      this.cells.set(cell, b);
+      this.stats.cells = this.cells.size;
+    }
+    it.cell = cell;
+    it.slot = b.length;
+    b.push(it);
+  }
+
+  /**
+   * Visit every item whose cell intersects the given inclusive world-space box.
+   * X/Z wrap on the torus (packCell masks with 511), Y is clamped.
+   * Spans are clamped to 32 cells/axis so a bad caller cannot walk the torus.
+   */
+  forEachBox(
+    x0: number, y0: number, z0: number,
+    x1: number, y1: number, z1: number,
+    cb: (it: DroppedItem) => void,
+  ): void {
+    this.stats.queries++;
+    if (this.cells.size === 0) return;
+    const cx0 = Math.floor(x0), cx1 = Math.min(Math.floor(x1), cx0 + 31);
+    const cy0 = clampY(y0),     cy1 = Math.max(cy0, clampY(y1));
+    const cz0 = Math.floor(z0), cz1 = Math.min(Math.floor(z1), cz0 + 31);
+
+    for (let y = cy0; y <= cy1; y++) {
+      for (let z = cz0; z <= cz1; z++) {
+        for (let x = cx0; x <= cx1; x++) {
+          const b = this.cells.get(packCell(x, y, z));
+          if (b === undefined || b.length === 0) continue;
+          this.stats.cellsVisited++;
+          // Iterate backwards: cb may remove the visited item (takeAt/pickup).
+          for (let i = b.length - 1; i >= 0; i--) {
+            this.stats.candidates++;
+            cb(b[i]);
+          }
+        }
+      }
+    }
+  }
+
+  clear(): void {
+    this.cells.clear();
+    this.bucketPool.length = 0;
+    this.stats.cells = 0;
+  }
+}
+```
+
+### 5.2 `src/game/fps/ItemDrop.ts` — record, pools, and grid membership
+
+```ts
+// src/game/fps/ItemDrop.ts   (REPLACES §3.1 interfaces/constants)
+import * as THREE from 'three';
+import { packCell } from '../core/cellKey';
+import { minImageF } from '../core/constants';
+import { DEFS, B } from '../world/blocks';
+import { MK_CONVEYOR, MK_GHOST, dirXOf, dirZOf, kindOf }
+  from '../world/machineRegistry';
+import { ItemGrid } from './ItemGrid';
+import type { ChangeBus } from '../world/changeBus';
+import type { ItemInstancer } from './ItemInstancer';
+
+const POP_TIME       = 0.28;
+const PICKUP_DIST    = 1.25;
+const HALF           = 0.13;
+const GRAVITY        = 20;
+const BELT_SPEED     = 2.6;
+const BELT_CENTERING = 6;
+
+/* ---- S5b: bounded simulation ------------------------------------------------ */
+/** Beyond this XZ distance a fully settled item stops simulating. */
+const SLEEP_DIST  = 24;
+const SLEEP_DIST2 = SLEEP_DIST * SLEEP_DIST;
+/** Squared speed under which an item counts as settled. */
+const SLEEP_VEL2  = 1e-4;
+/** Sleeping items rechecked per frame (round-robin). 512 items -> ~0.27 s cycle. */
+const WAKE_CHECKS_PER_FRAME = 32;
+/** Hard ceiling on live drops. */
+const MAX_ITEMS_DEFAULT = 512;
+/** Never evict an item this close to the player. */
+const EVICT_KEEP_DIST2 = 8 * 8;
+
+export interface DroppedItem {
+  /** null only in instanced mode (S5c). */
+  mesh: THREE.Mesh | null;
