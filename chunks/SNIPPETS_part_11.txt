@@ -1,0 +1,179 @@
+      m[o     ] = yc * bx;      m[o +  1] = 0;         m[o +  2] = -ys * bx;      m[o +  3] = 0;
+      m[o +  4] = ys * sf * by; m[o +  5] = cf * by;   m[o +  6] =  yc * sf * by; m[o +  7] = 0;
+      m[o +  8] = ys * cf * bz; m[o +  9] = -sf * bz;  m[o + 10] =  yc * cf * bz; m[o + 11] = 0;
+
+      const lx = ax, ly = ay - off * cf, lz = az - off * sf;
+      m[o + 12] = rx + yc * lx + ys * lz;
+      m[o + 13] = ry + ly;
+      m[o + 14] = rz - ys * lx + yc * lz;
+      m[o + 15] = 1;
+      o += 16;
+
+      const t = pbase + p.tint * 3;
+      const pr = PALETTE[t], pg = PALETTE[t + 1], pb = PALETTE[t + 2];
+      c[co    ] = pr + (1 - pr) * flash;
+      c[co + 1] = pg + (1 - pg) * flash;
+      c[co + 2] = pb + (1 - pb) * flash;
+      co += 3;
+    }
+
+    this.live += need;
+    return true;
+  }
+
+  end() {
+    this.mesh.count = this.live;                 // tail is never read — no need to zero it
+    if (this.live > 0) {
+      markRange(this.mesh.instanceMatrix, this.live * 16);
+      markRange(this.mesh.instanceColor!, this.live * 3);
+    }
+  }
+
+  dispose() {
+    this.mesh.geometry.dispose();
+    (this.mesh.material as THREE.Material).dispose();
+    this.mesh.dispose();
+  }
+}
+```
+
+### 6.3 — Wiring into `EnemyManager`
+
+```ts
+// src/game/fps/EnemyManager.ts — top of file
+import { EnemyInstancer } from './EnemyInstancer';
+
+export const INSTANCED_ENEMIES = true;   // one-line rollback for A/B bisecting
+
+// LOD bands with 4 m / 6 m hysteresis so agents don't flicker on the boundary.
+const L0_IN = 24 * 24, L0_OUT = 28 * 28;
+const L1_IN = 52 * 52, L1_OUT = 58 * 58;
+
+function pickLod(cur: 0 | 1 | 2, tier: number, d2: number): 0 | 1 | 2 {
+  if (tier >= 2) return 2;                                  // count-capped by phase 2
+  if (cur === 0) return d2 > L0_OUT ? (d2 > L1_OUT ? 2 : 1) : 0;
+  if (cur === 1) return d2 < L0_IN ? 0 : (d2 > L1_OUT ? 2 : 1);
+  return d2 < L1_IN ? (d2 < L0_IN ? 0 : 1) : 2;
+}
+```
+
+```ts
+// In the class body, alongside `private sceneRef`:
+private instancer: EnemyInstancer | null = null;
+syncMs = 0;                                  // dev overlay
+
+addScene(scene: THREE.Scene) {
+  this.sceneRef = scene;
+  if (INSTANCED_ENEMIES) {
+    this.instancer = new EnemyInstancer();
+    scene.add(this.instancer.mesh);          // the only enemy Object3D in the world
+  }
+  // Legacy path stays alive for the handful of agents that aren't plain boxes.
+  for (const e of this.enemies) {
+    if (!INSTANCED_ENEMIES || e.detailed) e.attachToScene(scene);
+  }
+}
+
+/** Rebuild the whole instance buffer. Call ONCE at the end of update(). */
+private syncInstances() {
+  const inst = this.instancer;
+  if (!inst) return;
+  const t0 = performance.now();
+
+  const px = this.player.pos.x, py = this.player.pos.y, pz = this.player.pos.z;
+  inst.begin();
+
+  for (let i = 0; i < this.enemies.length; i++) {
+    const e = this.enemies[i];
+    if (!e.alive || e.detailed) continue;
+
+    // Minimum image: render position, not world position (bug #4).
+    const dx = wrapDelta(e.pos.x - px, WORLD_SIZE);
+    const dz = wrapDelta(e.pos.z - pz, WORLD_SIZE);
+    const d2 = dx * dx + dz * dz;
+    if (d2 > this.RENDER_RADIUS_SQ) { e.rendered = false; continue; }
+
+    e.rendered = true;
+    e.lod = pickLod(e.lod, e.tier, d2);
+    if (!inst.push(e, px + dx, e.pos.y, pz + dz)) break;   // clamp, never overflow
+  }
+
+  inst.end();
+  this.syncMs = performance.now() - t0;
+}
+```
+
+```ts
+// Last line of update(), after respawnTick / wildTick:
+if (INSTANCED_ENEMIES) this.syncInstances();
+```
+
+```ts
+// clearAll():
+this.enemies.length = 0;
+if (this.instancer) { this.instancer.begin(); this.instancer.end(); }   // count -> 0
+this.gridStale = true;
+```
+
+Note the ordering: `syncInstances` runs **after** the tier pass, so `e.tier` is fresh, and after movement, so there is no one-frame position lag. It is also the only place that decides visibility — phase 1's `evictCold` is deleted.
+
+### 6.4 — Stripping the scene graph out of `Enemy`
+
+```ts
+// src/game/fps/Enemy.ts — new instance state, replacing the part meshes.
+group: THREE.Group | null = null;      // null unless `detailed`
+detailed = false;                      // merchants, boss, anything not box-shaped
+presetIdx = 0;                         // PRESET_INDEX[preset]
+lod: 0 | 1 | 2 = 2;
+rendered = false;
+yaw = 0;
+gait = 0;
+gaitGain = 0;
+hitFlash = 0;
+```
+
+```ts
+// In Enemy.update(): DELETE every write to this.head.rotation, this.legL.position,
+// this.group.position/rotation, etc. Keep only the scalars the animation drove.
+// Cold tiers call this with the substepped sdt, so the gait stays consistent.
+const sp = Math.hypot(this.vel.x, this.vel.z);
+this.gaitGain = Math.min(1, sp / 4.5);
+this.gait += dt * (6 + sp * 1.4);
+if (this.gait > 6.2831853) this.gait -= 6.2831853;   // keep float precision sane
+if (this.hitFlash > 0) this.hitFlash -= dt;
+if (sp > 0.05) this.yaw = Math.atan2(this.vel.x, this.vel.z);
+```
+
+```ts
+// Wherever damage is applied:
+this.hitFlash = 0.12;
+```
+
+If you leave the old per-part `Object3D` writes in place you pay **both** costs and measure no win. Grep for `this.group.` in `Enemy.ts` and confirm the only survivors are inside `attachToScene` / `detachFromScene` / `disposeVisual`.
+
+**Health bars, nameplates, hit particles.** Each `Sprite` is a draw call and will quietly re-import the tax you just deleted. Cap them to the nearest 8 agents, or instance them the same way.
+
+### 6.5 — Optional: textured enemies (per-instance atlas rect)
+
+Skip this entirely for flat-coloured boxes. If enemies are textured, all parts share one atlas and each instance needs its own UV rect — an instanced attribute on the **geometry**, plus a small shader patch.
+
+```ts
+// After constructing the instancer:
+const uvRect = new THREE.InstancedBufferAttribute(new Float32Array(MAX_INSTANCES * 4), 4);
+uvRect.setUsage(THREE.DynamicDrawUsage);
+this.mesh.geometry.setAttribute('aUvRect', uvRect);   // fill (u0,v0,du,dv) in push()
+
+mat.onBeforeCompile = (shader) => {
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute vec4 aUvRect;\nvarying vec4 vUvRect;')
+    .replace('#include <uv_vertex>', '#include <uv_vertex>\n\tvUvRect = aUvRect;');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec4 vUvRect;')
+    .replace('#include <map_fragment>', `
+      #ifdef USE_MAP
+        diffuseColor *= texture2D( map, vUvRect.xy + fract( vMapUv ) * vUvRect.zw );
+      #endif
+    `);
+};
+mat.customProgramCacheKey = () => 'enemyAtlas';
+```

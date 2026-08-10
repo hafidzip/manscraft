@@ -1,0 +1,180 @@
+  ## Phase 1 — Render LOD (≈60 lines)
+
+  **File:** `src/game/fps/Enemy.ts`, `src/game/fps/EnemyManager.ts`
+
+  ```ts
+  // ── src/game/fps/Enemy.ts ────────────────────────────────────────────────
+  // Requires three.js >= r147 for matrixWorldAutoUpdate.
+
+  export class Enemy {
+    group!: THREE.Group;
+
+    /** Min-image distance to the player, refreshed once per frame by
+     *  EnemyManager.assignTiers(). Read it; never recompute it. (v1 computed
+     *  the same distance three times per frame in three different loops.) */
+    distToPlayer = Infinity;
+
+    tier: Tier = TIER_HOT;
+    /** Unconsumed real time, banked while this enemy is skipped. */
+    tickAccum = 0;
+    /** True while the render LOD has this agent parked. Read-only outside. */
+    asleep = false;
+
+    private inScene = false;
+
+    constructor(/* ...existing args..., */ id: number) {
+      // ...existing body...
+      // Deterministic stagger so tier ticks spread evenly across frames.
+      const h = (Math.imul(id, 0x9e3779b1) >>> 8) / 0x1000000;   // 0..1
+      this.tickAccum = h * TIER_PERIOD_S[TIER_COLD];
+    }
+
+    attachTo(parent: THREE.Object3D) {
+      if (this.inScene) return;
+      parent.add(this.group);
+      this.inScene = true;
+      this.asleep = false;
+      this.setAsleep(false);
+    }
+
+    /** Only on despawn / pool return. O(siblings) — do not call per frame. */
+    detach() {
+      if (!this.inScene) return;
+      this.group.parent?.remove(this.group);
+      this.inScene = false;
+    }
+
+    /**
+     * Park or wake the whole subtree.
+     *   visible = false            -> projectObject returns early: no frustum
+     *                                 test, no draw, children skipped too.
+     *   matrixWorldAutoUpdate=false -> the parent's updateMatrixWorld loop skips
+     *                                 this node and everything under it.
+     * You need BOTH: the renderer's matrix pass ignores `visible`, and the
+     * cull pass ignores the matrix flags.
+     */
+    setAsleep(sleep: boolean) {
+      if (sleep === this.asleep) return;
+      this.asleep = sleep;
+      this.group.visible = !sleep;
+      this.group.matrixAutoUpdate = !sleep;
+      this.group.matrixWorldAutoUpdate = !sleep;
+      if (!sleep) this.group.matrixWorldNeedsUpdate = true;   // refresh on wake
+    }
+  }
+  ```
+
+  ```ts
+  // ── src/game/fps/EnemyManager.ts ─────────────────────────────────────────
+  private root = new THREE.Group();          // one container for every enemy
+  private sceneRef: THREE.Scene | null = null;
+
+  addScene(scene: THREE.Scene) {
+    this.sceneRef = scene;
+    this.root.name = 'enemies';
+    this.root.matrixAutoUpdate = false;      // static identity container
+    this.root.updateMatrix();
+    scene.add(this.root);
+    for (const e of this.enemies) e.attachTo(this.root);
+  }
+  ```
+
+  **Expected result:** the per-frame matrix tax collapses from *nodes-in-world* to *nodes-within-the-render-cutoff*. Verify with §8.1 — the claim is that `renderer.render` CPU time stops tracking population, not a specific millisecond count.
+
+  ## 3. Phase 2 — Tier Scheduler with a Real Nearest-K Cap
+
+  **File:** `src/game/fps/EnemyManager.ts`, `src/game/fps/Enemy.ts`
+
+  ```ts
+  // ── src/game/fps/tiers.ts (module scope — NOT inside a class) ────────────
+  // Plain constants rather than `const enum`: exported const enums trip
+  // isolatedModules under Vite/esbuild.
+  export type Tier = 0 | 1 | 2 | 3;
+  export const TIER_HOT = 0, TIER_WARM = 1, TIER_COLD = 2, TIER_DORMANT = 3;
+
+  /** Seconds between ticks. 0 = every frame. Time-based, not frame-based, so
+   *  cadence survives a frame-rate drop. */
+  export const TIER_PERIOD_S = [0, 1 / 15, 1 / 4, 1 / 1.3];
+
+  /** Largest dt one Enemy.update() may receive; guards tunnelling. */
+  export const MAX_TICK_DT = 1 / 15;
+  export const MAX_SUBSTEPS = 4;            // 4 x 66 ms = 266 ms of catch-up
+
+  /** Nearest-K budgets. Cutoffs are min(budget radius, hard radius). */
+  export const RENDER_BUDGET = 140;
+  export const HOT_BUDGET    = 96;
+  export const WARM_BUDGET   = 320;
+  export const COLD_BUDGET   = 900;
+
+  /** Hard radii, metres. COLD_R must be <= SIM_RADIUS or the tier is dead. */
+  export const RENDER_R = 80, HOT_R = 40, WARM_R = 72;
+  export const COLD_R = SIM_RADIUS;         // 112
+
+  export const TIER_HYST = 1.12;            // 12 % overlap stops boundary flap
+  export const DORMANT_SPEED_SCALE = 0.6;
+
+  /** Positive modulo — many codebases only ship the signed min-image helper. */
+  export function wrapCoord(v: number, size: number) {
+    const m = v % size;
+    return m < 0 ? m + size : m;
+  }
+  ```
+
+  The cap is a **counting sort on distance**: one 4 m histogram, one prefix sum, and the cutoff radius falls out. O(N) with no allocation, genuinely nearest-K, and the cutoff moves smoothly instead of flickering. (Amusingly, this is the counting sort v1's Phase 3 title advertised and its code did not contain.)
+
+  ```ts
+  // ── src/game/fps/EnemyManager.ts ─────────────────────────────────────────
+  const BAND = 4;                                     // histogram width, metres
+  const INV_BAND = 1 / BAND;
+  const N_BANDS = Math.ceil(MAX_POP_R / BAND) + 2;    // MAX_POP_R from Phase 5
+
+  private bands = new Int32Array(N_BANDS);
+  private renderCutoff = Infinity;
+  private hotCutoff = 0; private warmCutoff = 0; private coldCutoff = 0;
+
+  readonly stats = {
+    hot: 0, warm: 0, cold: 0, dormant: 0, rendered: 0,
+    ticks: 0, sepTests: 0, dtDropped: 0, flowMiss: 0, recycled: 0,
+  };
+
+  /**
+   * The only place a player distance is computed. Fills distToPlayer, derives
+   * every cutoff by counting sort, then commits tier + render LOD.
+   */
+  private assignTiers(ppx: number, ppz: number) {
+    const list = this.enemies;
+    const bands = this.bands;
+    bands.fill(0);
+
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!e.alive) { e.distToPlayer = Infinity; continue; }
+      const dx = minImageF(e.pos.x - ppx, WORLD_SIZE);
+      const dz = minImageF(e.pos.z - ppz, WORLD_SIZE);
+      const d = Math.sqrt(dx * dx + dz * dz);   // ~15 ns; buys readable compares
+      e.distToPlayer = d;
+      if (e.cfg.peaceful) continue;             // merchants bypass the budgets
+      bands[Math.min(N_BANDS - 1, (d * INV_BAND) | 0)]++;
+    }
+
+    // Prefix sum: the band where each cumulative budget runs out becomes that
+    // tier's cutoff radius.
+    const rCap = RENDER_BUDGET, hCap = HOT_BUDGET;
+    const wCap = hCap + WARM_BUDGET, cCap = wCap + COLD_BUDGET;
+    let acc = 0, rB = N_BANDS, hB = N_BANDS, wB = N_BANDS, cB = N_BANDS;
+    for (let b = 0; b < N_BANDS; b++) {
+      acc += bands[b];
+      if (rB === N_BANDS && acc >= rCap) rB = b;
+      if (hB === N_BANDS && acc >= hCap) hB = b;
+      if (wB === N_BANDS && acc >= wCap) wB = b;
+      if (cB === N_BANDS && acc >= cCap) cB = b;
+    }
+    this.renderCutoff = Math.min((rB + 1) * BAND, RENDER_R);
+    this.hotCutoff    = Math.min((hB + 1) * BAND, HOT_R);
+    this.warmCutoff   = Math.min((wB + 1) * BAND, WARM_R);
+    this.coldCutoff   = Math.min((cB + 1) * BAND, COLD_R);
+
+    const s = this.stats;
+    s.hot = s.warm = s.cold = s.dormant = s.rendered = 0;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];

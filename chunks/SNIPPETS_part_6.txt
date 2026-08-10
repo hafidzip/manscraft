@@ -1,0 +1,180 @@
+        touched++;
+      }
+      if (touched > 0) this.rebuildRequested = true;  // terrain moved, field stale
+    }
+  
+    /**
+     * Walkability for one column. Deliberately the same predicate `wildTick`
+     * uses to validate a spawn, so pathing and spawning agree on "standable".
+     */
+    private deriveColumn(i: number, world: FlowWorld) {
+      const x = i & MASK, z = i >>> SHIFT;
+      this.surfY[i] = NO_SURFACE;
+      this.extra[i] = BLOCKED;
+  
+      const h = world.highestY(x, z);
+      if (h < 1 || h >= WORLD_HEIGHT - HEADROOM) return;
+  
+      for (let k = 0; k < HEADROOM; k++) if (world.solid(x, h + k, z)) return;
+  
+      const floor = world.get(x, h - 1, z);
+      if (floor <= 0) return;                // AIR (0) or not loaded (< 0)
+  
+      let extra = 0;
+      if (isWaterId(floor)) extra = C_WATER;
+      else if (floor === B.LEAVES) extra = C_LEAVES;
+      if (extra > C_EXTRA_MAX) extra = C_EXTRA_MAX;
+  
+      this.surfY[i] = h;
+      this.extra[i] = extra;
+    }
+  
+    /* --------------------------------------------------------------- build */
+  
+    private beginBuild(px: number, py: number, pz: number): boolean {
+      const seed = this.findSeed(px, py, pz);
+      if (seed < 0) return false;
+  
+      this.back.fill(UNREACHABLE);          // ~256 KB memset, ~20 us, once a build
+      this.state.fill(NEW);
+      this.bHead.fill(-1);
+      this.open = 0;
+      this.curCost = 0;
+      this.nodesThisBuild = 0;
+      this.buildStartMs = performance.now();
+  
+      this.back[seed] = 0;
+      this.state[seed] = OPEN;
+      this.link(seed, 0);
+      return true;
+    }
+  
+    /**
+     * The player is often not standing on the column they occupy — mid-jump,
+     * swimming, on a ladder. Hunt a nearby column on the same storey.
+     */
+    private findSeed(px: number, py: number, pz: number): number {
+      const bx = Math.floor(px) & MASK, bz = Math.floor(pz) & MASK;
+      let best = -1, bestD = Infinity;
+      for (let dz = -SEED_SEARCH; dz <= SEED_SEARCH; dz++) {
+        for (let dx = -SEED_SEARCH; dx <= SEED_SEARCH; dx++) {
+          const i = ((bx + dx) & MASK) + ((((bz + dz) & MASK)) << SHIFT);
+          const y = this.surfY[i];
+          if (y === NO_SURFACE || this.extra[i] === BLOCKED) continue;
+          const dy = y - py;
+          if (dy > 3 || dy < -6) continue;   // wrong storey: bridge above, cave below
+          const d = dx * dx + dz * dz + dy * dy * 4;
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+      return best;
+    }
+  
+    /** Drains the queue within budget. Returns true when the field is complete. */
+    private expand(): boolean {
+      const dist = this.back, surf = this.surfY, extra = this.extra;
+      const tEnd = performance.now() + TIME_GUARD_MS;
+      let budget = EXPAND_BUDGET;
+  
+      while (this.open > 0) {
+        if (--budget < 0) return false;
+        if ((budget & 1023) === 0 && performance.now() > tEnd) return false;
+  
+        // Every live entry sits in [curCost, curCost + MAX_EDGE] and RING >
+        // MAX_EDGE, so the first non-empty bucket at or after curCost holds the
+        // true minimum, and this scan is bounded by MAX_EDGE steps.
+        let b = this.curCost & (RING - 1);
+        while (this.bHead[b] === -1) {
+          this.curCost++;
+          b = this.curCost & (RING - 1);
+        }
+  
+        const idx = this.bHead[b];
+        this.unlink(idx, b);
+        this.state[idx] = SETTLED;
+        this.nodesThisBuild++;
+  
+        const cost = dist[idx];
+        const cx = idx & MASK, cz = idx >>> SHIFT;
+        const fromY = surf[idx];
+  
+        for (let d = 0; d < 8; d++) {
+          const dx = DX[d], dz = DZ[d];
+          const nx = (cx + dx) & MASK, nz = (cz + dz) & MASK;
+          const nidx = nx + (nz << SHIFT);
+          if (this.state[nidx] === SETTLED) continue;
+  
+          const toY = surf[nidx];
+          if (toY === NO_SURFACE) continue;
+          const e = extra[nidx];
+          if (e === BLOCKED) continue;
+  
+          const dy = toY - fromY;
+          if (dy > MAX_STEP || dy < -MAX_DROP) continue;   // MAX_DROP now enforced
+  
+          let step: number;
+          if (dx !== 0 && dz !== 0) {
+            // No corner cutting: an AABB agent cannot pass a zero-width diagonal
+            // slit, so both orthogonal companions must also be steppable.
+            const ax = surf[((cx + dx) & MASK) + (cz << SHIFT)];
+            const az = surf[cx + (((cz + dz) & MASK) << SHIFT)];
+            if (ax === NO_SURFACE || az === NO_SURFACE) continue;
+            if (ax - fromY > MAX_STEP || fromY - ax > MAX_DROP) continue;
+            if (az - fromY > MAX_STEP || fromY - az > MAX_DROP) continue;
+            step = C_DIAG;
+          } else {
+            step = C_STRAIGHT;
+          }
+          step += dy > 0 ? C_CLIMB * dy : dy < 0 ? C_DROP * -dy : 0;
+          step += e;
+  
+          const nc = cost + step;
+          if (nc > MAX_COST || nc >= dist[nidx]) continue;
+  
+          // Decrease-key: unlink from the old bucket first. Doubly linked, so
+          // this is O(1) and leaves no stale entry to skip later.
+          if (this.state[nidx] === OPEN) this.unlink(nidx, dist[nidx] & (RING - 1));
+          dist[nidx] = nc;
+          this.state[nidx] = OPEN;
+          this.link(nidx, nc & (RING - 1));
+        }
+      }
+      return true;
+    }
+  
+    private link(idx: number, b: number) {
+      const h = this.bHead[b];
+      this.bPrev[idx] = -1;
+      this.bNext[idx] = h;
+      if (h !== -1) this.bPrev[h] = idx;
+      this.bHead[b] = idx;
+      this.open++;
+    }
+  
+    private unlink(idx: number, b: number) {
+      const p = this.bPrev[idx], n = this.bNext[idx];
+      if (p === -1) this.bHead[b] = n; else this.bNext[p] = n;
+      if (n !== -1) this.bPrev[n] = p;
+      this.open--;
+    }
+  
+    /* -------------------------------------------------------------- sample */
+  
+    private gx = 0;
+    private gz = 0;
+  
+    /**
+     * Unit vector toward the player. Returns false when the caller must fall
+     * back to A* or wander: no field yet, unreachable, wrong storey, already
+     * on top of the player, or standing on a plateau.
+     */
+    sample(wx: number, wy: number, wz: number, out: FlowSample): boolean {
+      if (!this.ready) return false;
+  
+      const bx = Math.floor(wx), bz = Math.floor(wz);
+      const i = (bx & MASK) + ((bz & MASK) << SHIFT);
+      const c = this.front[i];
+      if (c >= UNREACHABLE) return false;
+  
+      const sy = this.surfY[i];
+      if (sy === NO_SURFACE) return false;

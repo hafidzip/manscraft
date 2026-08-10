@@ -1,0 +1,180 @@
+  get ready() { return this.built; }
+
+  /**
+   * Rebuild from scratch. O(agents + CELLS), no allocation.
+   *
+   * CONTRACT: qIdx values index `agents`. They stay valid only while `agents`
+   * is not mutated. Never splice/push between build() and the frame's last
+   * query — see the deferred-removal note in §3.2.
+   */
+  build(agents: GridAgent[], centreX: number, centreZ: number) {
+    const n = Math.min(agents.length, MAX_AGENTS);
+    this.originX = centreX;
+    this.originZ = centreZ;
+    this.cnt.fill(0);
+
+    const cellOf = this.cellOf, lx = this.lx, ly = this.ly, lz = this.lz, cnt = this.cnt;
+
+    // pass 1: classify + count (one object touch per agent, per frame)
+    for (let i = 0; i < n; i++) {
+      const a = agents[i];
+      if (a === undefined || !a.alive) { cellOf[i] = -1; continue; }
+      const dx = wrapDelta(a.pos.x - centreX, WORLD_SIZE);
+      const dz = wrapDelta(a.pos.z - centreZ, WORLD_SIZE);
+      if (dx < -HALF || dx >= HALF || dz < -HALF || dz >= HALF) { cellOf[i] = -1; continue; }
+      const gx = ((dx + HALF) * INV_CELL) | 0;   // operand >= 0, so |0 == floor
+      const gz = ((dz + HALF) * INV_CELL) | 0;
+      cellOf[i] = gz * W + gx;
+      lx[i] = dx; ly[i] = a.pos.y; lz[i] = dz;
+      cnt[gz * W + gx]++;
+    }
+
+    // pass 2: prefix sum
+    const start = this.start;
+    let sum = 0;
+    for (let c = 0; c < CELLS; c++) { start[c] = sum; sum += cnt[c]; }
+    start[CELLS] = sum;
+    this.cursor.set(start.subarray(0, CELLS));   // memcpy, not a loop
+
+    // pass 3: scatter into cell-major order
+    const cur = this.cursor, sIdx = this.sIdx, sX = this.sX, sY = this.sY, sZ = this.sZ;
+    for (let i = 0; i < n; i++) {
+      const c = cellOf[i];
+      if (c < 0) continue;
+      const d = cur[c]++;
+      sIdx[d] = i; sX[d] = lx[i]; sY[d] = ly[i]; sZ[d] = lz[i];
+    }
+
+    this.built = true;
+  }
+
+  /**
+   * Candidates whose cell overlaps the square of half-width `radius` around
+   * (x, z). Guaranteed to include every agent within `radius`, because
+   * ceil(radius/CELL)*CELL >= radius. NOT distance-filtered — the caller still
+   * runs the exact test. Deltas are relative to (x, y, z).
+   */
+  query(x: number, y: number, z: number, radius: number): number {
+    this.qCount = 0;
+    const qx = wrapDelta(x - this.originX, WORLD_SIZE);
+    const qz = wrapDelta(z - this.originZ, WORLD_SIZE);
+    if (qx < -HALF || qx >= HALF || qz < -HALF || qz >= HALF) return 0;
+
+    const span = Math.max(1, Math.ceil(radius * INV_CELL));
+    const gx0 = ((qx + HALF) * INV_CELL) | 0;
+    const gz0 = ((qz + HALF) * INV_CELL) | 0;
+    const xLo = gx0 - span < 0 ? 0 : gx0 - span;
+    const xHi = gx0 + span > W - 1 ? W - 1 : gx0 + span;
+    const zLo = gz0 - span < 0 ? 0 : gz0 - span;
+    const zHi = gz0 + span > W - 1 ? W - 1 : gz0 + span;
+
+    const start = this.start, sIdx = this.sIdx, sX = this.sX, sY = this.sY, sZ = this.sZ;
+    const qIdx = this.qIdx, qDX = this.qDX, qDY = this.qDY, qDZ = this.qDZ;
+    let k = 0;
+
+    // A row of cells is contiguous in cell-major order, so each row of the
+    // query box is ONE sequential slice. This is the whole point of the
+    // counting sort: 3 linear scans instead of 9 linked-list walks.
+    for (let gz = zLo; gz <= zHi; gz++) {
+      const row = gz * W;
+      const e = start[row + xHi + 1];
+      for (let d = start[row + xLo]; d < e; d++) {
+        if (k >= MAX_HITS) { this.qCount = k; return k; }
+        qIdx[k] = sIdx[d];
+        qDX[k] = sX[d] - qx;
+        qDY[k] = sY[d] - y;
+        qDZ[k] = sZ[d] - qz;
+        k++;
+      }
+    }
+    this.qCount = k;
+    return k;
+  }
+
+  /**
+   * Candidates near the segment starting at (x, z) running `len` metres along
+   * the XZ-normalised direction (dirX, dirZ). Marches in half-cell steps with
+   * a 3x3 dilation, so it covers every cell the segment touches plus a 2–4 m
+   * skirt for agent radius. A generation stamp guarantees each cell is emitted
+   * once, so no candidate appears twice. Deltas are relative to the origin.
+   */
+  queryRay(x: number, y: number, z: number, dirX: number, dirZ: number, len: number): number {
+    this.qCount = 0;
+    const gen = ++this.gen;
+    const stamp = this.stampArr;
+    if (gen === 0x7fffffff) { stamp.fill(0); this.gen = 1; }   // once per ~24 days
+
+    const steps = Math.ceil(len * INV_CELL * 2) + 1;
+    const stepLen = len / Math.max(1, steps - 1);
+    const start = this.start, sIdx = this.sIdx, sX = this.sX, sY = this.sY, sZ = this.sZ;
+    const qIdx = this.qIdx, qDX = this.qDX, qDY = this.qDY, qDZ = this.qDZ;
+    let k = 0;
+
+    for (let s = 0; s < steps; s++) {
+      const t = s * stepLen;
+      const px = wrapDelta(x + dirX * t - this.originX, WORLD_SIZE);
+      const pz = wrapDelta(z + dirZ * t - this.originZ, WORLD_SIZE);
+      if (px < -HALF || px >= HALF || pz < -HALF || pz >= HALF) continue;  // may re-enter
+      const gx0 = ((px + HALF) * INV_CELL) | 0;
+      const gz0 = ((pz + HALF) * INV_CELL) | 0;
+      const xLo = gx0 > 0 ? gx0 - 1 : 0, xHi = gx0 < W - 1 ? gx0 + 1 : W - 1;
+      const zLo = gz0 > 0 ? gz0 - 1 : 0, zHi = gz0 < W - 1 ? gz0 + 1 : W - 1;
+
+      for (let gz = zLo; gz <= zHi; gz++) {
+        const row = gz * W;
+        for (let gx = xLo; gx <= xHi; gx++) {
+          const c = row + gx;
+          if (stamp[c] === gen) continue;
+          stamp[c] = gen;
+          const e = start[c + 1];
+          for (let d = start[c]; d < e; d++) {
+            if (k >= MAX_HITS) { this.qCount = k; return k; }
+            qIdx[k] = sIdx[d];
+            qDX[k] = sX[d] - wrapDelta(x - this.originX, WORLD_SIZE);
+            qDY[k] = sY[d] - y;
+            qDZ[k] = sZ[d] - wrapDelta(z - this.originZ, WORLD_SIZE);
+            k++;
+          }
+        }
+      }
+    }
+    this.qCount = k;
+    return k;
+  }
+}
+```
+
+> Micro-note: hoist the two `wrapDelta(x - originX…)` calls in `queryRay`'s innermost loop into locals before the march. Left inline above only so the delta convention is obvious.
+
+---
+
+### 3.2 Prerequisite: stop splicing mid-frame
+
+The grid hands out **indices into `this.enemies`**. Phase 2's tick loop splices that array while iterating, which invalidates them. Switch to mark-and-sweep — this is required, not optional.
+
+```ts
+// Enemy.ts — two new transient fields:
+pendingRemove = false;
+simFrame = -1;          // set to the manager's frameId on frames this enemy ticks
+
+// EnemyManager.update(), Phase 2 pass 2 — replace BOTH `!keep` branches:
+if (!keep) { e.pendingRemove = true; continue; }   // was: splice(i, 1)
+e.simFrame = this.frameId;
+this.activeIdx[this.activeCount++] = i;            // index, not object reference
+
+// EnemyManager, new fields:
+private frameId = 0;
+private activeIdx = new Int32Array(4096);
+private activeCount = 0;
+
+// end of update(), AFTER separation and every other grid query:
+private compact() {
+  let w = 0;
+  for (let i = 0; i < this.enemies.length; i++) {
+    const e = this.enemies[i];
+    if (e.pendingRemove) { e.detachFromScene(); e.dispose?.(); continue; }
+    this.enemies[w++] = e;
+  }
+  this.enemies.length = w;
+}
+```

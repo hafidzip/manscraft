@@ -1,0 +1,180 @@
+  hang: 0 | 1;                          // 1 = box hangs below the pivot
+  tint: 0 | 1 | 2;                      // palette slot: head / body / legs
+}
+
+// LOD0 — 6 parts, full gait. Granted only to tier 0, which phase 2 caps at 96.
+const LOD0: PartDef[] = [
+  { ax:  0.00, ay: 1.50, az: 0, sx: 0.50, sy: 0.50, sz: 0.50, swing:  0, hang: 0, tint: 0 },
+  { ax:  0.00, ay: 0.85, az: 0, sx: 0.60, sy: 0.75, sz: 0.35, swing:  0, hang: 0, tint: 1 },
+  { ax: -0.42, ay: 1.20, az: 0, sx: 0.22, sy: 0.70, sz: 0.22, swing:  2, hang: 1, tint: 1 },
+  { ax:  0.42, ay: 1.20, az: 0, sx: 0.22, sy: 0.70, sz: 0.22, swing: -2, hang: 1, tint: 1 },
+  { ax: -0.16, ay: 0.75, az: 0, sx: 0.24, sy: 0.75, sz: 0.24, swing: -1, hang: 1, tint: 2 },
+  { ax:  0.16, ay: 0.75, az: 0, sx: 0.24, sy: 0.75, sz: 0.24, swing:  1, hang: 1, tint: 2 },
+];
+
+// LOD1 — 3 parts: head, torso+arms merged, legs merged with a gentle sway.
+const LOD1: PartDef[] = [
+  { ax: 0, ay: 1.50, az: 0, sx: 0.50, sy: 0.50, sz: 0.50, swing: 0, hang: 0, tint: 0 },
+  { ax: 0, ay: 1.05, az: 0, sx: 0.62, sy: 0.95, sz: 0.38, swing: 0, hang: 0, tint: 1 },
+  { ax: 0, ay: 0.75, az: 0, sx: 0.52, sy: 0.75, sz: 0.26, swing: 1, hang: 1, tint: 2 },
+];
+
+// LOD2 — 1 box. At >52 m a 1.75 m agent is ~2% of screen height.
+// If the head tint is your main readability cue at range, make this two parts
+// and re-run the capacity numbers below.
+const LOD2: PartDef[] = [
+  { ax: 0, ay: 0.88, az: 0, sx: 0.56, sy: 1.75, sz: 0.40, swing: 0, hang: 0, tint: 1 },
+];
+
+export const LOD_PARTS: PartDef[][] = [LOD0, LOD1, LOD2];
+
+export const PRESET_SCALE = [1.00, 0.88, 1.28];          // grunt, runner, heavy
+export const PRESET_INDEX: Record<string, number> = { grunt: 0, runner: 1, heavy: 2 };
+
+const HEX = [
+  [0x8fbf6a, 0x3f6b4a, 0x2c3f4c],   // grunt
+  [0xd9a05b, 0x6b3f3f, 0x33262a],   // runner
+  [0x9a8fb5, 0x4a3f6b, 0x2a2436],   // heavy
+];
+
+// Packed once at module init: [preset][tint][rgb], already in three's working
+// colour space, so tints match materials built with `new THREE.Color(hex)`.
+export const PALETTE = new Float32Array(HEX.length * 9);
+{
+  const c = new THREE.Color();
+  for (let p = 0; p < HEX.length; p++) {
+    for (let t = 0; t < 3; t++) {
+      c.setHex(HEX[p][t]);
+      const o = p * 9 + t * 3;
+      PALETTE[o] = c.r; PALETTE[o + 1] = c.g; PALETTE[o + 2] = c.b;
+    }
+  }
+}
+```
+
+**Capacity proof.** Phase 2 already caps the tiers by count, and LOD is granted by tier, so the instance count is bounded by construction:
+
+```
+96 hot   × 6 parts =   576
+400 warm × 3 parts = 1,200
+2,004 cold × 1 part = 2,004
+                      -----
+                      3,780  worst case at 2,500 rendered
+```
+
+`MAX_INSTANCES = 6144` gives 60% headroom and stays a power of two. Buffers: 393 KB matrices + 74 KB colours. This coupling is the reason phase 2 is a hard prerequisite — without the count cap, a crowd that all closes to 24 m demands 15,000 instances.
+
+### 6.2 — The instancer
+
+```ts
+// src/game/fps/EnemyInstancer.ts
+import * as THREE from 'three';
+import { LOD_PARTS, PALETTE, PRESET_SCALE } from './EnemyRig';
+
+export const MAX_INSTANCES = 6144;   // see the capacity proof in 6.1
+
+export interface InstancedAgent {
+  presetIdx: number;
+  lod: 0 | 1 | 2;
+  yaw: number;        // radians
+  gait: number;       // radians, advanced by the existing walk animation
+  gaitGain: number;   // 0..1, scales with horizontal speed
+  hitFlash: number;   // seconds remaining
+}
+
+/** r159+ uses addUpdateRange(); older builds use updateRange. Units are ARRAY
+ *  ELEMENTS, not bytes and not instances. */
+function markRange(attr: THREE.BufferAttribute, count: number) {
+  const a = attr as any;
+  if (typeof a.addUpdateRange === 'function') {
+    a.clearUpdateRanges();
+    a.addUpdateRange(0, count);
+  } else if (a.updateRange) {
+    a.updateRange.offset = 0;
+    a.updateRange.count = count;
+  }
+  attr.needsUpdate = true;
+}
+
+export class EnemyInstancer {
+  readonly mesh: THREE.InstancedMesh;
+  private readonly mat: Float32Array;
+  private readonly col: Float32Array;
+  private live = 0;
+  private dropped = 0;
+
+  constructor(material?: THREE.Material) {
+    const geo = new THREE.BoxGeometry(1, 1, 1);              // 24 verts, 12 tris
+    const m = material ?? new THREE.MeshLambertMaterial({ color: 0xffffff });
+    this.mesh = new THREE.InstancedMesh(geo, m, MAX_INSTANCES);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.instanceColor = new THREE.InstancedBufferAttribute(
+      new Float32Array(MAX_INSTANCES * 3).fill(1), 3,
+    );
+    this.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+    this.mesh.count = 0;
+    this.mesh.frustumCulled = false;      // bug #2
+    this.mesh.matrixAutoUpdate = false;   // the container never moves
+    this.mesh.updateMatrix();
+    this.mesh.castShadow = true;
+    this.mesh.receiveShadow = true;
+    this.mesh.raycast = () => {};         // bug #6 — hit-testing goes via phase 3's grid
+
+    this.mat = this.mesh.instanceMatrix.array as Float32Array;
+    this.col = this.mesh.instanceColor.array as Float32Array;
+  }
+
+  get liveCount() { return this.live; }
+  get droppedCount() { return this.dropped; }
+
+  begin() { this.live = 0; this.dropped = 0; }
+
+  /**
+   * Append one agent's parts. (rx, ry, rz) is the MINIMUM-IMAGE render position
+   * (bug #4), not the raw world position. Returns false when the buffer is full.
+   *
+   * There is no slot map and no swap-remove: the whole prefix is rebuilt every
+   * frame. At ~30 ns per instance that is cheaper than dirty-tracking, and it
+   * makes death, spawning, phase 5 recycling, tier flips and LOD flips free —
+   * an entire class of stale-slot bugs simply cannot occur.
+   */
+  push(e: InstancedAgent, rx: number, ry: number, rz: number): boolean {
+    const rig = LOD_PARTS[e.lod];
+    const need = rig.length;
+    if (this.live + need > MAX_INSTANCES) { this.dropped++; return false; }   // bug #3
+
+    const k = PRESET_SCALE[e.presetIdx];
+    const yc = Math.cos(e.yaw), ys = Math.sin(e.yaw);
+
+    // Two sin/cos pairs at LOD0, one at LOD1, none at LOD2 — trig cost falls
+    // off with distance exactly like everything else.
+    let c1 = 1, s1 = 0, c2 = 1, s2 = 0;
+    if (e.lod < 2) {
+      const amp = (e.lod === 0 ? 0.90 : 0.35) * e.gaitGain;
+      const phi = Math.sin(e.gait) * amp;
+      c1 = Math.cos(phi); s1 = Math.sin(phi);
+      if (e.lod === 0) { const a = phi * 0.7; c2 = Math.cos(a); s2 = Math.sin(a); }
+    }
+
+    const flash = e.hitFlash > 0 ? Math.min(1, e.hitFlash * 5) : 0;
+    const pbase = e.presetIdx * 9;
+    const m = this.mat, c = this.col;
+    let o = this.live * 16, co = this.live * 3;
+
+    for (let i = 0; i < need; i++) {
+      const p = rig[i];
+
+      let cf = 1, sf = 0;
+      const sw = p.swing;
+      if (sw ===  1) { cf = c1; sf =  s1; }
+      else if (sw === -1) { cf = c1; sf = -s1; }
+      else if (sw ===  2) { cf = c2; sf =  s2; }
+      else if (sw === -2) { cf = c2; sf = -s2; }
+
+      const bx = p.sx * k, by = p.sy * k, bz = p.sz * k;
+      const ax = p.ax * k, ay = p.ay * k, az = p.az * k;
+      const off = p.hang ? by * 0.5 : 0;
+
+      // M = T(render) · Ry(yaw) · T(pivot) · Rx(swing) · T(0,-off,0) · S(box)
+      // written straight into the buffer, column-major, no Matrix4 churn.

@@ -1,0 +1,180 @@
+
+Then **delete `gridStale` and every "mark the grid dirty" call site.** Agents move every frame; the grid is rebuilt every frame. There is nothing to invalidate.
+
+### 3.3 Separation loop
+
+Build the grid **after** the tick pass (so positions are current and removals are already marked), immediately before separation.
+
+```ts
+// EnemyManager, one field:
+private grid = new EnemyGrid();
+
+// In update(), replacing the `for (let i = 0; i < active.length; i++)` block (~line 129):
+
+this.grid.build(this.enemies, ppx, ppz);
+
+const SEP_R = 0.95;                  // MUST equal the falloff constant below
+const SEP_R2 = SEP_R * SEP_R;
+const SEP_K = 2.4;
+const g = this.grid;
+
+for (let ai = 0; ai < this.activeCount; ai++) {
+  const i = this.activeIdx[ai];
+  const a = this.enemies[i];
+  if (!a.alive) continue;
+
+  const n = g.query(a.pos.x, a.pos.y, a.pos.z, SEP_R);
+  for (let k = 0; k < n; k++) {
+    const j = g.qIdx[k];
+    if (j === i) continue;
+
+    const b = this.enemies[j];
+    const bActive = b.simFrame === this.frameId;
+    if (bActive && j < i) continue;              // each active pair exactly once
+
+    const dy = g.qDY[k];
+    if (dy > 2 || dy < -2) continue;             // different floor
+
+    const dx = -g.qDX[k], dz = -g.qDZ[k];        // b -> a
+    const r2 = dx * dx + dz * dz;
+    if (r2 >= SEP_R2) continue;                  // falloff must not go negative
+    if (r2 < 1e-6) {                             // exactly coincident: deterministic split
+      const s = ((i ^ j) & 1) ? 0.02 : -0.02;
+      a.nudge(s, s); continue;
+    }
+    const r = Math.sqrt(r2);                     // never Math.hypot in a pair loop
+    const inv = 1 / r;
+    const push = (SEP_R - r) * SEP_K * dt;
+    const nx = dx * inv * push, nz = dz * inv * push;
+
+    if (bActive) { a.nudge(nx, nz); b.nudge(-nx, -nz); }
+    else a.nudge(nx * 2, nz * 2);   // frozen neighbour = static obstacle; 2x keeps
+                                    // the relative separation rate identical
+  }
+}
+```
+
+Four behaviours restored or fixed versus the draft: single visit per pair, correct impulse magnitude, cutoff aligned with the falloff so the force never inverts, and warm/cold agents act as solid obstacles instead of being ghosts hot agents walk through.
+
+### 3.4 Raycast
+
+A radius query is the wrong shape for a bullet. March it.
+
+```ts
+raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): EnemyHit | null {
+  const g = this.grid;
+  if (!g.ready) return this.raycastLinear(origin, dir, maxDist);   // first frame / disabled
+
+  const dxz = Math.hypot(dir.x, dir.z);       // once per shot, not per pair
+  const n = dxz < 1e-4
+    ? g.query(origin.x, origin.y, origin.z, 1.5)                  // near-vertical
+    : g.queryRay(origin.x, origin.y, origin.z, dir.x / dxz, dir.z / dxz, maxDist * dxz);
+
+  let best: EnemyHit | null = null;
+  let bestT = maxDist;
+  for (let k = 0; k < n; k++) {
+    const e = this.enemies[g.qIdx[k]];
+    if (!e.alive) continue;
+    // ---- keep the EXISTING sphere/capsule test verbatim, unchanged ----
+    // Read e.pos live rather than the grid snapshot: the broadphase may be up
+    // to one frame stale, which the 2–4 m ray skirt absorbs, but the exact
+    // test must not be.
+    const t = this.hitTest(origin, dir, e, bestT);
+    if (t >= 0 && t < bestT) { bestT = t; best = { enemy: e, t }; }
+  }
+  return best;
+}
+```
+
+Keep the old linear loop as `raycastLinear` — it is the fallback and the oracle for §3.6.
+
+### 3.5 Cost model (replacing the unsourced "250k → ~6k")
+
+Per-frame separation cost is `N_active · ρ · (2·span+1)² · CELL²` candidate tests, where `ρ` is local agent density. With `CELL = 2`, `span = 1`, the query box is 36 m².
+
+| Scenario | Brute force | Grid | Ratio |
+|---|---|---|---|
+| 500 active, ρ = 0.5/m² | 250,000 tests | build ~40 µs + ~9,000 tests | ~25× |
+| 2,500 active, ρ = 0.5/m² | 6,250,000 tests | build ~45 µs + ~45,000 tests | ~130× |
+| 500 active, ρ = 3/m² (tight ring) | 250,000 tests | ~54,000 tests | ~5× |
+
+Two honest caveats the draft omitted:
+
+- **The build is not free.** `cnt.fill` + prefix sum + cursor copy is three linear passes over 16,384 cells ≈ 40 µs/frame regardless of population. That is 0.24 % of a 16.6 ms frame — worth knowing before you blame the grid for a regression.
+- **The grid degrades under extreme density**, because the query box population grows with ρ. At ρ = 6/m² it is only ~5× better than brute force. Capping the hot set by count (Phase 2) is what keeps ρ bounded — the grid does not replace it.
+
+Memory: 256 KB of cell bookkeeping + ~115 KB of agent arrays, allocated once, never resized.
+Raycast: ~150 cells and ~30 candidates per shot instead of 2,500 sphere tests, ~80×.
+
+### 3.6 Ship checklist
+
+1. Resolve `minImageF` vs `wrapDelta` before anything else — every phase in this doc has the same ambiguity.
+2. Confirm the real separation radius in the current `EnemyManager`. If the shipped code genuinely uses a 2 m cutoff with a 0.95 m falloff, that is a pre-existing attraction bug and Phase 3 is where you fix it; do not port it forward.
+3. Confirm `MAX_AGENTS (4096) ≥ MAX_POP (2500) + merchants + camp members` after Phase 5 raises the cap.
+4. Drop in this dev-only oracle for a few hundred frames — it catches every wrap, span, and stale-index bug in one shot:
+
+```ts
+if (import.meta.env.DEV && (this.frameId & 63) === 0 && this.enemies.length) {
+  const i = (Math.random() * this.enemies.length) | 0;
+  const a = this.enemies[i];
+  if (a?.alive) {
+    const want = new Set<number>();
+    for (let j = 0; j < this.enemies.length; j++) {
+      const b = this.enemies[j];
+      if (j === i || !b?.alive) continue;
+      const dx = wrapDelta(b.pos.x - a.pos.x, WORLD_SIZE);
+      const dz = wrapDelta(b.pos.z - a.pos.z, WORLD_SIZE);
+      if (dx * dx + dz * dz < 0.95 * 0.95) want.add(j);
+    }
+    const got = new Set<number>();
+    const n = this.grid.query(a.pos.x, a.pos.y, a.pos.z, 0.95);
+    for (let k = 0; k < n; k++) got.add(this.grid.qIdx[k]);
+    for (const j of want) if (!got.has(j)) console.error('[EnemyGrid] MISSED', i, j);
+  }
+}
+```
+
+**Expected result:** separation drops from `O(N_active²)` to `O(N_active · ρ)` — ~130× at 2,500 agents — and the bullet scan from 2,500 sphere tests to ~30. Zero allocation per frame, zero per-frame GC pressure, and the separation force finally points the right way.
+
+---
+
+ ## Phase 4 — Flow Field (height-field Dijkstra, double-buffered, time-sliced)
+  
+  **New file:** `src/game/fps/FlowField.ts`
+  **Touches:** `src/game/engine.ts` (tick + block edits), `src/game/fps/Enemy.ts` (chase branch only)
+  
+  ---
+  
+  ### The five real bugs to avoid
+  
+  1. **Height field, not 2D.** Cost must be gated by per-column surface Y or agents route into ceilings and off overhangs. Be honest about the ceiling of this approach: one surface Y per column cannot represent a cave *under* a bridge. Agents whose Y disagrees with the sampled surface must fall back to A*, not be steered by the wrong storey.
+  2. **Sample the gradient, not a stored arrow code.** 8-way quantized directions produce 45° conga lines. And a *cell-quantized* gradient still snaps at cell borders — interpolate across the four neighbouring cell centres or you trade conga lines for jitter.
+  3. **Atomic publish via front/back swap when the search drains.** An agent must never sample a half-built field. This also means the build must be able to *survive across frames* — see defect #7 below, which is the bug that silently kills the whole design.
+  4. **Non-uniform edge costs mean Dijkstra, not BFS.** The moment diagonals cost 1.414 and drops carry a penalty, a FIFO queue no longer produces correct distances, and re-enqueueing into a fixed-size array overruns it.
+  5. **Cap the hot tier by count, not distance (phase 2).** Without it the field alone doesn't survive convergence — all 2,500 arrive and the ring is still 2,500 agents deep.
+  
+  ---
+  
+  ### The rewrite
+  
+  Design changes, in order of importance:
+  
+  - **Torus-aligned field: one cell = one world column, `FIELD = WORLD_SIZE`.** This deletes defects 1, 2, 3, 15 outright — no origin to track, no window bounds, no aliasing, and `& MASK` *is* the torus wrap. Expansion is bounded by a **cost radius**, not by array size, so the memory scales with the world while the work does not.
+  - **Integer fixed-point costs + Dial bucket queue.** Costs are multiples of 1/16 block, so a monotone bucket queue settles every cell exactly once — real Dijkstra, O(1) push/pop, no priority queue, no reallocation. Buckets are doubly linked so a decrease-key unlinks in O(1) instead of leaving stale entries.
+  - **Surface height field is decoupled from the field rebuild**, built incrementally from the project's existing `world.highestY()` and refreshed per dirty column on block edits and chunk loads.
+  - **Explicit three-state machine** (`ready` / `building` / `rebuildRequested`) so a multi-frame build makes progress and publishes.
+  - **Finite `UNREACHABLE` sentinel** instead of `Infinity`, so no arithmetic path can produce NaN.
+  - **Bilinear gradient**, with unreachable neighbours substituted by a slightly-worse-than-here cost, which makes the gradient push *away* from walls instead of into them.
+  
+  Memory for a 256² world: ~1.35 MB of typed arrays, allocated once. Steady-state allocation: zero.
+  
+  ```ts
+  // src/game/fps/FlowField.ts
+  //
+  // One attractor (the player), many followers. Replaces per-enemy A* for the
+  // steady-state chase. Integer Dijkstra over a torus-aligned walkable-height
+  // field, drained by a Dial bucket queue, double-buffered and time-sliced.
+  //
+  // Every buffer is allocated once in the constructor. No steady-state garbage.
+  
+  import { WORLD_SIZE, WORLD_HEIGHT } from '../core/constants';
