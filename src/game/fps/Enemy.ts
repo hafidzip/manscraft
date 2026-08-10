@@ -16,7 +16,7 @@ export const CAMP_CONFIG = {
   maxLeash: 70,
 };
 
-export const pathBudget = { tokens: 0 };
+export const pathBudget = { tokens: 0, maxTokens: 5 };
 
 export type EnemyState = 'spawn' | 'idle' | 'patrol' | 'chase' | 'attack' | 'dead';
 

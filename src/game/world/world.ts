@@ -51,7 +51,9 @@ export class World {
   private memoKey = -1;
   private memoChunk: Chunk | null = null;
   private loadQueue: { cx: number; cz: number }[] = [];
+  private loadHead = 0;
   private dirtyQueue: Chunk[] = [];
+  private dirtyHead = 0;
   private dirtySet = new Set<Chunk>();
   private lastCenter = -1;
   private lastUnloadCheck = 0;
@@ -483,29 +485,41 @@ export class World {
     let processed = 0;
 
     let now = t0;
-    let didMesh = false;
-    while (this.dirtyQueue.length > 0 && (!didMesh || now - t0 + this.meshCost <= budgetMs)) {
-      const c = this.dirtyQueue.shift()!;
+
+    // Process dirty (re-mesh) queue using index cursor instead of shift()
+    while (this.dirtyHead < this.dirtyQueue.length) {
+      // Budget check BEFORE doing work (except first item gets a pass)
+      if (this.dirtyHead > 0 && now - t0 + this.meshCost > budgetMs) break;
+      const c = this.dirtyQueue[this.dirtyHead++];
       if (!this.dirtySet.has(c)) continue;
       const s = now;
       this.buildMesh(c);
       now = performance.now();
       this.meshCost = this.meshCost * 0.6 + (now - s) * 0.4;
-      didMesh = true;
+    }
+    // Compact when fully drained
+    if (this.dirtyHead >= this.dirtyQueue.length) {
+      this.dirtyQueue.length = 0;
+      this.dirtyHead = 0;
+    } else if (this.dirtyHead > 64) {
+      this.dirtyQueue = this.dirtyQueue.slice(this.dirtyHead);
+      this.dirtyHead = 0;
     }
 
     const ccx = wrapChunk(Math.floor(wrapBlock(px) / S));
     const ccz = wrapChunk(Math.floor(wrapBlock(pz) / S));
     const centerKey = this.key(ccx, ccz);
-    if (this.loadQueue.length === 0 && (centerKey !== this.lastCenter || this.lastCenter === -1 || radius !== this.loadRadius)) {
+    if (this.loadHead >= this.loadQueue.length && (centerKey !== this.lastCenter || this.lastCenter === -1 || radius !== this.loadRadius)) {
       this.loadRadius = radius;
       this.rebuildLoadQueue(ccx, ccz, radius);
       this.lastCenter = centerKey;
     }
 
-    let didLoad = false;
-    while (this.loadQueue.length > 0 && (!didLoad || now - t0 + this.loadCost <= budgetMs)) {
-      const item = this.loadQueue.shift()!;
+    // Process load queue using index cursor instead of shift()
+    while (this.loadHead < this.loadQueue.length) {
+      // Budget check BEFORE doing work (except first item gets a pass)
+      if (processed > 0 && now - t0 + this.loadCost > budgetMs) break;
+      const item = this.loadQueue[this.loadHead++];
       const s = now;
       const c = this.ensureData(item.cx, item.cz);
       if (!c.hasMesh) {
@@ -514,7 +528,11 @@ export class World {
       }
       now = performance.now();
       this.loadCost = this.loadCost * 0.6 + (now - s) * 0.4;
-      didLoad = true;
+    }
+    // Compact when fully drained
+    if (this.loadHead >= this.loadQueue.length) {
+      this.loadQueue.length = 0;
+      this.loadHead = 0;
     }
 
     if (t0 - this.lastUnloadCheck > 350) {
@@ -556,7 +574,7 @@ export class World {
   }
 
   get pendingWork(): boolean {
-    return this.loadQueue.length > 0 || this.dirtyQueue.length > 0;
+    return this.loadHead < this.loadQueue.length || this.dirtyHead < this.dirtyQueue.length;
   }
 
   prepareAllData(budgetMs: number): number {
@@ -595,5 +613,6 @@ export class World {
     }
     items.sort((a, b) => a.d - b.d);
     this.loadQueue = items.map(({ cx, cz }) => ({ cx, cz }));
+    this.loadHead = 0;
   }
 }

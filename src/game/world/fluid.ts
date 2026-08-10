@@ -3,7 +3,7 @@ import { B, DEFS, waterId, waterInfo, WATER_MAX_LEVEL } from './blocks';
 import type { World } from './world';
 
 const FLOW_DELAY = 0.12;
-const MAX_PER_FRAME = 420;
+const MAX_PER_FRAME = 160;
 const MAX_QUEUE = 6000;
 
 interface Task {

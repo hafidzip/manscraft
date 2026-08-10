@@ -25,7 +25,7 @@ import { FOG_UNIFORMS } from './vfx/heightFog';
 import { SoundEngine } from './audio/sound';
 import { Spaceship } from './vehicle/spaceship';
 import { WeaponSystem, type GameBridge } from './fps/WeaponSystem';
-import { Enemy, ENEMY_PRESETS } from './fps/Enemy';
+import { Enemy, ENEMY_PRESETS, pathBudget } from './fps/Enemy';
 import { EnemyManager } from './fps/EnemyManager';
 import { Effects } from './fps/effects';
 import { SHOP_ITEMS, COIN_REWARDS, STARTING_COINS, TRADE_DISTANCE, generateMerchantStock, getBlockSellPrice, getFoodSellPrice, type MerchantStock } from './fps/shop';
@@ -185,6 +185,8 @@ export class GameEngine {
   private lumenSunDir = new THREE.Vector3();
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
+  private cachedBiomeName = '';
+  private biomeCheckT = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -748,49 +750,80 @@ export class GameEngine {
   }
 
   private async warmupRenderPipeline(): Promise<void> {
-    const textures = new Set<THREE.Texture>();
-    this.scene.traverse((object) => {
-      const mesh = object as THREE.Mesh;
-      if (!mesh.isMesh && !(object as THREE.Sprite).isSprite && !(object as THREE.Points).isPoints) return;
-      const raw = (mesh as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
-      const materials = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-      for (const material of materials) {
-        for (const value of Object.values(material)) {
-          if (value instanceof THREE.Texture) textures.add(value);
+    // Expose EVERY weapon rig under the camera and make it visible, so the
+    // compile + full-pipeline render below covers all program variants
+    // (base material, shadow depth material, post passes). Without this the
+    // first weapon swap compiles shaders mid-frame and freezes the game.
+    const restoreWeapons = this.weapons?.beginWarmupAll?.() ?? (() => { });
+
+    // Spawn one live instance of every combat effect (tracer, casing, decal,
+    // muzzle flash, smoke, particles) so their shader programs also compile
+    // now instead of on the first shot / subsequent weapon swap.
+    const effectColors = Object.values(DEFS).flatMap((def) => def.colors);
+    this.fx?.beginWarmup?.(effectColors);
+
+    try {
+      const textures = new Set<THREE.Texture>();
+      this.scene.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh && !(object as THREE.Sprite).isSprite && !(object as THREE.Points).isPoints) return;
+        const raw = (mesh as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+        const materials = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        for (const material of materials) {
+          for (const value of Object.values(material)) {
+            if (value instanceof THREE.Texture) textures.add(value);
+          }
+        }
+      });
+      for (const texture of textures) this.renderer.initTexture(texture);
+      await this.renderer.compileAsync(this.scene, this.camera);
+      if (this.disposed || !this.mainRT) return;
+
+      this.sky.update(0, this.camera.position);
+
+      // Two passes: the first compiles/uploads, the second confirms everything
+      // is resident so no work is deferred to the first real gameplay frame.
+      for (let pass = 0; pass < 2; pass++) {
+        this.renderer.shadowMap.needsUpdate = true;
+        this.renderer.setRenderTarget(this.mainRT);
+        this.renderer.render(this.scene, this.camera);
+
+        this.lumenLite!.configure(
+          this.sky.skyColor,
+          this.sky.sunColor,
+          this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
+          this.sky.dayFactor,
+          this.world.gen.sea,
+        );
+        this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
+        this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture!);
+        this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, 1 / 60, false);
+        this.volumetricLight!.lightWorldPosition.copy(this.sky.sunWorldPos);
+        this.volumetricLight!.intensity = 0.01;
+        this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
+        this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
+        this.renderer.setRenderTarget(null);
+
+        if (pass === 0) {
+          await this.nextFrame();
+          if (this.disposed || !this.mainRT) return;
         }
       }
-    });
-    for (const texture of textures) this.renderer.initTexture(texture);
-    await this.renderer.compileAsync(this.scene, this.camera);
-    if (this.disposed || !this.mainRT) return;
+    } finally {
+      restoreWeapons();
+      this.fx?.endWarmup?.();
+    }
 
-    this.sky.update(0, this.camera.position);
+    // Force a shadow refresh on the first real frame now that weapons are hidden.
     this.renderer.shadowMap.needsUpdate = true;
-    this.renderer.setRenderTarget(this.mainRT);
-    this.renderer.render(this.scene, this.camera);
-
-    this.lumenLite!.configure(
-      this.sky.skyColor,
-      this.sky.sunColor,
-      this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
-      this.sky.dayFactor,
-      this.world.gen.sea,
-    );
-    this.lumenLite!.renderPipeline(this.renderer, this.mainRT, this.lightingRT!, this.giRT!, this.blurRT!);
-    this.depthFogPass!.render(this.renderer, this.fogRT!, this.lightingRT!, this.mainRT.depthTexture!);
-    this.bloom!.render(this.renderer, this.fogRT!, this.fogRT!, 1 / 60, false);
-    this.volumetricLight!.lightWorldPosition.copy(this.sky.sunWorldPos);
-    this.volumetricLight!.intensity = 0.01;
-    this.volumetricLight!.render(this.renderer, this.volumetricRT!, this.fogRT!);
-    this.outputStage!.render(this.renderer, this.volumetricRT!.texture);
-    this.renderer.setRenderTarget(null);
     await this.nextFrame();
   }
 
   private captureSnapshot(dt: number): void {
     this.snapT -= dt;
     if (this.snapT > 0) return;
-    this.snapT = 0.25;
+    // Skip snapshot capture during heavy frames to avoid GPU readback stalls
+    this.snapT = this.fps < 40 ? 0.5 : 0.25;
     const src = this.canvas;
     if (!src.width || !src.height) return;
     if (!this.snapCanvas) this.snapCanvas = document.createElement('canvas');
@@ -1547,7 +1580,8 @@ export class GameEngine {
       this.textures.water.offset.y += dt * 0.006;
       animateConveyorTiles(this.textures, this.time);
     }
-    if (this.locked) this.fluid.update(dt);
+    // Skip fluid sim on heavy frames to protect framerate during chunk loading
+    if (this.locked && this.fps > 30) this.fluid.update(dt);
     if (this.locked) {
       let streamX = this.player.pos.x;
       let streamZ = this.player.pos.z;
@@ -1555,11 +1589,18 @@ export class GameEngine {
         streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
         streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
       }
-      this.world.update(streamX, streamZ, dt > 0.024 ? 2.5 : 6);
+      // Adaptive budget: give more time on smooth frames, less on jank
+      // Use previous fps estimate to avoid feedback loops
+      const frameBudget = this.fps > 50 ? 5.5 : this.fps > 35 ? 3.5 : 2.0;
+      this.world.update(streamX, streamZ, frameBudget);
       this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
       if (this.ship && !this.piloting) this.ship.updateParked(dt);
     }
-    if (this.locked && (!this.piloting || this.shipAltitude() < 26)) this.enemies.update(dt);
+    if (this.locked && (!this.piloting || this.shipAltitude() < 26)) {
+      // Reduce pathfinding budget when fps is low to prevent further frame drops
+      pathBudget.maxTokens = this.fps > 50 ? 5 : this.fps > 35 ? 3 : 1;
+      this.enemies.update(dt);
+    }
     if (this.locked) {
       this.updateFurnaces(dt);
       if (this.openFurnaceKey) this.events.onStats(this.buildStats());
@@ -1647,7 +1688,7 @@ export class GameEngine {
     if (this.locked) {
       this.grassShadowT -= dt;
       if (this.grassShadowT <= 0) {
-        this.grassShadowT = 0.25;
+        this.grassShadowT = this.fps < 40 ? 0.5 : 0.25;
         const radius = this.piloting ? 0 : GRASS_SHADOW_RADIUS;
         if (this.world.updateGrassShadowCasters(this.camera.position.x, this.camera.position.z, radius)) {
           this.shadowCooldown = 0;
@@ -1664,7 +1705,7 @@ export class GameEngine {
         this.lastShadowX = p.x;
         this.lastShadowZ = p.z;
         this.lastSunElev = activeElev;
-        this.shadowCooldown = this.piloting ? 0.75 : 0.2;
+        this.shadowCooldown = this.piloting ? 0.75 : (this.fps < 40 ? 0.45 : 0.2);
         this.renderer.shadowMap.needsUpdate = true;
       }
     }
@@ -2577,6 +2618,15 @@ export class GameEngine {
   }
 
 
+  private getBiomeName(x: number, z: number): string {
+    this.biomeCheckT--;
+    if (this.biomeCheckT <= 0) {
+      this.biomeCheckT = 3; // Only re-compute every 3rd stats call
+      this.cachedBiomeName = this.world.gen.biomeDefAt(Math.floor(x), Math.floor(z)).name;
+    }
+    return this.cachedBiomeName;
+  }
+
   private reportStats(dt: number): void {
     this.statT -= dt;
     if (this.statT > 0) return;
@@ -2608,7 +2658,7 @@ export class GameEngine {
       x: Math.floor(C.wrapBlock(p.x)),
       y: Math.floor(p.y),
       z: Math.floor(C.wrapBlock(p.z)),
-      biome: this.world.gen.biomeDefAt(Math.floor(p.x), Math.floor(p.z)).name,
+      biome: this.getBiomeName(p.x, p.z),
       time: this.sky.time,
       underwater: this.player.headInWater,
       muted: this.sound.muted,

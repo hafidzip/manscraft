@@ -114,16 +114,95 @@ export class Effects {
     this.rocketTemplate = this.makeRocketModel();
   }
 
+  /**
+   * Spawn one live instance of EVERY effect type so a full-pipeline render
+   * during the loading screen compiles all their shader program variants
+   * (tracer/casing/decal/smoke/muzzle/particle/flash-light). Otherwise those
+   * programs compile mid-game on the first shot + subsequent weapon swap,
+   * causing a multi-second freeze. Call `endWarmup()` after rendering.
+   */
+  beginWarmup(colors: Iterable<number>): void {
+    const base = tmpV.set(0, -600, 0); // far below the world; never visible
+    // Muzzle flash sprites + flash light
+    this.muzzleFlash(base.clone(), 1);
+    // Tracer
+    this.tracer(base.clone(), base.clone().add(new THREE.Vector3(0, 0, 1)));
+    // Casing
+    this.casing(base.clone(), new THREE.Vector3(1, 0, 0), true);
+    // Smoke puff
+    this.puff(base.clone(), new THREE.Vector3(0, 1, 0), 0.4, 999, '#ffffff');
+    // Particles (one per distinct color so every particle material compiles)
+    for (const c of colors) {
+      this.spawnParticle(base.clone(), new THREE.Vector3(0, 0, 0), c, 0.05, 999, false);
+    }
+    // Decal (force-create one bypassing the world air check)
+    this.forceWarmDecal(base.clone());
+    // Keep them alive through the warmup render(s)
+    this.flashT = 999;
+  }
+
+  /** Force a decal into the scene for warmup, ignoring the world-air guard. */
+  private forceWarmDecal(point: THREE.Vector3): void {
+    let e = this.decalPool.pop();
+    if (!e) {
+      const mat = new THREE.MeshBasicMaterial({
+        transparent: true, depthWrite: false, depthTest: true,
+        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+        side: THREE.DoubleSide, toneMapped: false,
+      });
+      const mesh = new THREE.Mesh(this.decalGeo, mat);
+      mesh.renderOrder = 6;
+      e = { mesh, mat };
+    }
+    e.mat.map = this.holeTexes[0];
+    e.mat.color.set(0xffffff);
+    e.mat.opacity = 1;
+    e.mat.needsUpdate = true;
+    e.mesh.position.copy(point);
+    e.mesh.scale.set(0.125, 0.125, 1);
+    e.mesh.visible = true;
+    this.scene.add(e.mesh);
+    this.decals.push({
+      mesh: e.mesh, mat: e.mat,
+      life: DECAL_LIFE, age: 0, size: 0.125,
+      bx: 0, by: -600, bz: 0, nx: 0, ny: 1, nz: 0, axis: 1, sign: 1,
+      dying: false,
+    });
+  }
+
+  /** Remove every transient effect spawned by beginWarmup(). */
+  endWarmup(): void {
+    this.flashT = 0;
+    for (const s of this.flashSprites) s.visible = false;
+    this.flashLight.intensity = 0;
+    this.flashAnchor = null;
+
+    for (const p of this.particles) { this.scene.remove(p.mesh); this.particlePool.push(p.mesh); }
+    this.particles.length = 0;
+    for (const c of this.casings) { this.scene.remove(c.mesh); this.casingPool.push(c.mesh); }
+    this.casings.length = 0;
+    for (const t of this.tracers) { this.scene.remove(t.mesh); this.tracerPool.push(t.mesh); }
+    this.tracers.length = 0;
+    for (const s of this.smokes) { this.scene.remove(s.sprite); this.smokePool.push(s.sprite); }
+    this.smokes.length = 0;
+    this.clearDecals();
+  }
+
   muzzleFlash(pos: THREE.Vector3, scale = 1, anchor?: THREE.Object3D) {
     this.flashT = 0.045;
     this.flashAnchor = anchor ?? null;
     this.flashIntensity = 3.2 * scale;
 
+    // IMPORTANT: never re-parent the PointLight into a weapon rig. If the light
+    // lives inside a rig that later gets hidden/stowed on weapon swap, three.js
+    // sees the scene light count change and recompiles EVERY material's shader
+    // program synchronously -> multi-second freeze. Keep it in the scene
+    // permanently and just follow the anchor's world position instead.
+    if (this.flashLight.parent !== this.scene) this.scene.add(this.flashLight);
     if (anchor) {
-      if (this.flashLight.parent !== anchor) anchor.add(this.flashLight);
-      this.flashLight.position.set(0, 0, 0);
+      anchor.updateWorldMatrix(true, false);
+      this.flashLight.position.setFromMatrixPosition(anchor.matrixWorld);
     } else {
-      if (this.flashLight.parent !== this.scene) this.scene.add(this.flashLight);
       this.flashLight.position.copy(pos);
     }
     this.flashLight.intensity = this.flashIntensity;
@@ -375,10 +454,8 @@ export class Effects {
       tmpV.set((Math.random() - 0.5) * 2, Math.random() * 1.2, (Math.random() - 0.5) * 2);
       this.puff(pos.clone().add(tmpV), tmpV2.set(0, 1, 0), 0.8 + Math.random() * 0.8, 1.6 + Math.random(), '#8a8378');
     }
-    if (this.flashAnchor) {
-      this.scene.add(this.flashLight);
-      this.flashAnchor = null;
-    }
+    this.flashAnchor = null;
+    if (this.flashLight.parent !== this.scene) this.scene.add(this.flashLight);
     this.flashLight.position.copy(pos).y += 0.5;
     this.flashLight.intensity = 60;
     this.flashT = 0.18;
@@ -388,10 +465,20 @@ export class Effects {
   update(dt: number) {
     if (this.flashT > 0) {
       this.flashT -= dt;
+      // Light stays parented to the scene; follow the muzzle in world space.
+      if (this.flashAnchor) {
+        this.flashAnchor.updateWorldMatrix(true, false);
+        this.flashLight.position.setFromMatrixPosition(this.flashAnchor.matrixWorld);
+      }
       for (const s of this.flashSprites) s.material.opacity = Math.max(0, this.flashT / 0.045);
       this.flashLight.intensity *= Math.max(0, 1 - dt * 26);
       if (this.flashT <= 0) {
-        for (const s of this.flashSprites) s.visible = false;
+        for (const s of this.flashSprites) {
+          s.visible = false;
+          // Detach sprites from the weapon rig so they don't ride into the
+          // hidden stow group on the next weapon swap.
+          if (s.parent !== this.scene) this.scene.add(s);
+        }
         this.flashLight.intensity = 0;
         this.flashAnchor = null;
       }

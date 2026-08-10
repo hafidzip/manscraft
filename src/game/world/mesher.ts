@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, chunkIndex } from '../core/constants';
 import { tileUV } from '../core/textures';
-import { B, DEFS, isWaterId, waterHeight, waterInfo } from './blocks';
+import { B, DEFS, isWaterId, isInserter, isLaserMiner, waterHeight, waterInfo } from './blocks';
 
 export type BlockGetter = (wx: number, wy: number, wz: number) => number;
 
@@ -92,6 +92,9 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         const idx = chunkIndex(x, y, z);
         const id = data[idx];
         if (id === B.AIR) continue;
+        // Ghost machines (inserters / laser miners) render no cube of their
+        // own — their animated machine mesh sits on the block underneath.
+        if (isInserter(id) || isLaserMiner(id)) continue;
         const d = DEFS[id];
         const interior = x > 0 && x < S - 1 && z > 0 && z < S - 1 && y > 0 && y < H - 1;
 

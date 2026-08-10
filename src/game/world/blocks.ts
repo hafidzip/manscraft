@@ -266,17 +266,28 @@ const LM = [B.LASER_MINER_N, B.LASER_MINER_E, B.LASER_MINER_S, B.LASER_MINER_W] 
 const CONV_TOPS = [TILES.conveyor_top_n, TILES.conveyor_top_e, TILES.conveyor_top_s, TILES.conveyor_top_w];
 const INS_TOPS = [TILES.inserter_top_n, TILES.inserter_top_e, TILES.inserter_top_s, TILES.inserter_top_w];
 
-const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[]): BlockDef =>
-  def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
+const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[], ghost = false): BlockDef => {
+  const d = def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
+  if (ghost) {
+    // Ghost machines occupy their cell (so they can be targeted, mined and
+    // cannot be built over) but render NO cube and are not solid: the machine
+    // mesh sits directly on top of whatever block is underneath.
+    d.solid = false;
+    d.opaque = false;
+    // Break instantly, exactly like tall grass / flowers / torches.
+    d.hardness = 0.05;
+  }
+  return d;
+};
 
 CONV.forEach((id, i) => {
   DEFS[id] = machineDef('Conveyor Belt', CONV_TOPS[i], TILES.conveyor_side, 0.8, [0x484854, 0x6a6a72, 0xdc8c1e]);
 });
 INS.forEach((id, i) => {
-  DEFS[id] = machineDef('Inserter', INS_TOPS[i], TILES.inserter_side, 1.0, [0x505058, 0x6a6a72, 0xdc8c1e]);
+  DEFS[id] = machineDef('Inserter', INS_TOPS[i], TILES.inserter_side, 1.0, [0x505058, 0x6a6a72, 0xdc8c1e], true);
 });
 {
-  const lm = machineDef('Laser Miner', TILES.furnace_top, TILES.inserter_side, 1.4, [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34]);
+  const lm = machineDef('Laser Miner', TILES.furnace_top, TILES.inserter_side, 1.4, [0x54575c, 0x9aa0a8, 0xff5a1e, 0x2c2f34], true);
   LM.forEach((id) => { DEFS[id] = lm; });
 }
 
@@ -287,6 +298,7 @@ const LM_DIR = orient(LM, (i) => DIRS[i]);
 export const isConveyor = (id: number): boolean => CONV_DIR.has(id);
 export const isInserter = (id: number): boolean => INS_DIR.has(id);
 export const isLaserMiner = (id: number): boolean => LM_DIR.has(id);
+export const isMachine = (id: number): boolean => CONV_DIR.has(id) || INS_DIR.has(id) || LM_DIR.has(id);
 export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;
 export const inserterDir = (id: number): Dir | null => INS_DIR.get(id) ?? null;
 export const laserMinerDir = (id: number): Dir | null => LM_DIR.get(id) ?? null;

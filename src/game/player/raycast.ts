@@ -1,5 +1,5 @@
 
-import { B, DEFS, isWaterId } from '../world/blocks';
+import { B, DEFS, isWaterId, isMachine } from '../world/blocks';
 import type { World } from '../world/world';
 
 export interface RayHit {
@@ -60,7 +60,13 @@ export function raycastVoxel(
     if (id === -1) return null;
     if (id === B.AIR || isWaterId(id)) continue;
     const def = DEFS[id];
-    const blocks = ignoreNonSolid ? def.solid : def.solid || def.cross === true;
+    // ignoreNonSolid (bullets / projectiles): only real solid cubes stop the
+    // ray, so shots pass straight through ghost machines (inserter, laser
+    // miner) exactly like they pass through grass and flowers.
+    // Otherwise (player aiming / mining): ghost machines ARE targetable.
+    const blocks = ignoreNonSolid
+      ? def.solid
+      : def.solid || def.cross === true || isMachine(id);
     if (blocks) {
       return { x, y, z, nx, ny, nz, id, dist: t };
     }

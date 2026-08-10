@@ -4,7 +4,7 @@ import { Inventory } from './Inventory';
 import { AudioSynth } from './audio';
 import { getAtlas, blockCubeGeometry } from './textures';
 import { minImageF } from '../core/constants';
-import { conveyorDir } from '../world/blocks';
+import { conveyorDir, isInserter, isLaserMiner } from '../world/blocks';
 
 const tmpV = new THREE.Vector3();
 
@@ -127,11 +127,25 @@ export class ItemDropManager {
     return this.world.solid(Math.floor(x), Math.floor(y), Math.floor(z));
   }
 
+  /**
+   * Item-vs-world collision. Real solid cubes block, and so do ghost machine
+   * cells (inserter / laser miner): they have no cube of their own but items
+   * must NOT be able to slide inside them, otherwise a conveyor pushes drops
+   * into the inserter's own cell and the inserter can never pick them up
+   * (it grabs from the cell BEHIND itself, not from its own cell).
+   */
+  private blocksItemAt(x: number, y: number, z: number): boolean {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (this.world.solid(bx, by, bz)) return true;
+    const id = this.world.get(bx, by, bz);
+    return isInserter(id) || isLaserMiner(id);
+  }
+
   private blocked(x: number, y: number, z: number): boolean {
     for (const ox of [-HALF, HALF])
       for (const oz of [-HALF, HALF])
         for (const oy of [0, HALF * 2])
-          if (this.solidAt(x + ox, y + oy, z + oz)) return true;
+          if (this.blocksItemAt(x + ox, y + oy, z + oz)) return true;
     return false;
   }
 
@@ -178,12 +192,17 @@ export class ItemDropManager {
         }
       }
 
+      // If an item is already overlapping a blocker (e.g. a machine was just
+      // placed on top of it), let it move freely so it can escape instead of
+      // being trapped forever.
+      const stuck = this.blocked(p.x, p.y, p.z);
+
       const nx = p.x + item.vel.x * step;
-      if (this.blocked(nx, p.y, p.z)) item.vel.x = 0;
+      if (!stuck && this.blocked(nx, p.y, p.z)) item.vel.x = 0;
       else p.x = nx;
 
       const nz = p.z + item.vel.z * step;
-      if (this.blocked(p.x, p.y, nz)) item.vel.z = 0;
+      if (!stuck && this.blocked(p.x, p.y, nz)) item.vel.z = 0;
       else p.z = nz;
 
       if (!onBelt) {

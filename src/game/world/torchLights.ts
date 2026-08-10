@@ -66,6 +66,9 @@ export class TorchLights {
     for (const l of this.lights) l.intensity = 0;
   }
 
+  private nearBuf: { pos: THREE.Vector3; d: number }[] = [];
+  private sortT = 0;
+
   update(dt: number, camera: THREE.Vector3): void {
     this.time += dt;
 
@@ -74,16 +77,38 @@ export class TorchLights {
       return;
     }
 
-    const near: { pos: THREE.Vector3; d: number }[] = [];
-    for (const t of this.torches.values()) {
-      const d = t.pos.distanceToSquared(camera);
-      near.push({ pos: t.pos, d });
+    // Only re-sort nearest torches every ~150ms instead of every frame
+    this.sortT -= dt;
+    if (this.sortT <= 0) {
+      this.sortT = 0.15;
+      // Reuse array to avoid GC pressure
+      this.nearBuf.length = 0;
+      for (const t of this.torches.values()) {
+        const d = t.pos.distanceToSquared(camera);
+        this.nearBuf.push({ pos: t.pos, d });
+      }
+      // Partial sort: only need top POOL_SIZE items
+      if (this.nearBuf.length > POOL_SIZE) {
+        // Selection-based partial sort for top N
+        for (let i = 0; i < Math.min(POOL_SIZE, this.nearBuf.length); i++) {
+          let min = i;
+          for (let j = i + 1; j < this.nearBuf.length; j++) {
+            if (this.nearBuf[j].d < this.nearBuf[min].d) min = j;
+          }
+          if (min !== i) {
+            const tmp = this.nearBuf[i];
+            this.nearBuf[i] = this.nearBuf[min];
+            this.nearBuf[min] = tmp;
+          }
+        }
+      } else {
+        this.nearBuf.sort((a, b) => a.d - b.d);
+      }
     }
-    near.sort((a, b) => a.d - b.d);
 
     for (let i = 0; i < this.lights.length; i++) {
       const l = this.lights[i];
-      const t = near[i];
+      const t = this.nearBuf[i];
       if (!t) { l.intensity = 0; continue; }
       l.position.copy(t.pos);
       const flick = 0.82 + 0.18 * Math.sin(this.time * 11 + i * 1.7)

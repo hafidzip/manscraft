@@ -101,7 +101,7 @@ export class EnemyManager {
     if (!this.enabled) return;
     if (!this.primed) this.primed = true;
 
-    pathBudget.tokens = 5;
+    pathBudget.tokens = pathBudget.maxTokens;
 
     const ppx = this.player.pos.x;
     const ppz = this.player.pos.z;

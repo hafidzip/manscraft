@@ -100,6 +100,13 @@ export class WeaponSystem {
     this.bridge = bridge;
     this.onHud = onHud;
     this.stow.name = 'weapon-stow';
+    // Keep the stow group inside the scene graph (as a camera child) so that
+    // renderer.compileAsync(scene, camera) can reach EVERY weapon rig material.
+    // Previously `stow` was detached, so non-mounted weapons were never
+    // compiled during warmup and their shader programs were built mid-frame on
+    // the first weapon swap -> visible freeze.
+    this.stow.visible = false;
+    this.camera.add(this.stow);
     for (const id of WEAPON_ORDER) {
       const rig = buildWeapon(id);
       rig.root.visible = false;
@@ -179,6 +186,38 @@ export class WeaponSystem {
       const active = this.rigs.get(this.mountedId);
       if (active) active.root.visible = !this.holstered;
     }
+  }
+
+  /**
+   * Expose every weapon rig directly under the camera and make it visible so a
+   * full-pipeline render compiles all program variants (including shadow depth
+   * materials). Returns a restore function.
+   */
+  beginWarmupAll(): () => void {
+    const moved: THREE.Object3D[] = [];
+    const prevStowVisible = this.stow.visible;
+    this.stow.visible = true;
+
+    for (const rig of this.rigs.values()) {
+      if (rig.root.parent !== this.camera) {
+        moved.push(rig.root);
+        this.camera.add(rig.root);
+      }
+      rig.root.visible = true;
+    }
+    this.camera.updateWorldMatrix(true, true);
+
+    return () => {
+      for (const rig of this.rigs.values()) rig.root.visible = false;
+      for (const root of moved) this.stow.add(root);
+      this.stow.visible = prevStowVisible;
+      const active = this.rigs.get(this.mountedId);
+      if (active) {
+        this.camera.add(active.root);
+        active.root.visible = !this.holstered;
+      }
+      this.camera.updateWorldMatrix(true, true);
+    };
   }
 
   dispose(): void {
