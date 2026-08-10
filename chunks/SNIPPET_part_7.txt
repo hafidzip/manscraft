@@ -1,0 +1,180 @@
+    }
+  }
+
+  has(k: number): boolean {
+    const t = this.keys, m = this.mask;
+    let i = this.slotOf(k, m);
+    for (;;) {
+      const v = t[i];
+      if (v === k) return true;
+      if (v === KEY_EMPTY) return false;
+      i = (i + 1) & m;
+    }
+  }
+
+  delete(k: number): boolean {
+    const t = this.keys, m = this.mask;
+    let i = this.slotOf(k, m);
+    for (;;) {
+      const v = t[i];
+      if (v === k) { t[i] = KEY_TOMB; this.live--; return true; }
+      if (v === KEY_EMPTY) return false;
+      i = (i + 1) & m;
+    }
+  }
+
+  clear(): void {
+    this.keys.fill(KEY_EMPTY);
+    this.live = 0; this.used = 0;
+  }
+
+  private rehash(): void {
+    const old = this.keys;
+    let cap = old.length;
+    if (this.live * 2 >= cap) cap <<= 1;         // grow only when genuinely half-full
+    const t = new Int32Array(cap).fill(KEY_EMPTY);
+    const m = cap - 1;
+    for (let i = 0; i < old.length; i++) {
+      const k = old[i];
+      if (k < 0) continue;
+      let j = (Math.imul(k, 0x9E3779B1) >>> 15) & m;
+      while (t[j] >= 0) j = (j + 1) & m;
+      t[j] = k;
+    }
+    this.keys = t; this.mask = m;
+    this.used = this.live;
+    this.limit = (cap * 3) >> 2;
+  }
+}
+
+/** Next power of two ≥ MAX_QUEUE, so head/tail wrap with a mask. */
+const QCAP  = 1 << (32 - Math.clz32(Math.max(1, MAX_QUEUE)));
+const QMASK = QCAP - 1;
+```
+
+```ts
+export class FluidSim {
+  // Ring buffer: fixed allocation, never grows, never leaks.
+  private qKey  = new Int32Array(QCAP);
+  private qTime = new Float64Array(QCAP);
+  private qHead = 0;
+  private qCount = 0;
+  private pending = new IntSet(1 << 10);
+
+  poke(x: number, y: number, z: number, delay = FLOW_DELAY): void {
+    if (y < 0 || y >= WORLD_HEIGHT) return;     // no fluid can exist outside the column
+    if (this.qCount >= QCAP) return;            // same drop-on-overflow guard as MAX_QUEUE
+    const k = cellKey(x, y, z);
+    if (!this.pending.add(k)) return;           // already queued — one probe, not two
+    const w = (this.qHead + this.qCount) & QMASK;
+    this.qKey[w]  = k;
+    this.qTime[w] = this.now + delay;
+    this.qCount++;
+  }
+
+  update(dt: number): void {
+    this.now += dt;
+    const keys = this.qKey, times = this.qTime;
+
+    // Nothing due → don't open a world batch at all.
+    if (this.qCount === 0 || times[this.qHead] > this.now) return;
+
+    this.world.beginBatch();
+    let processed = 0;
+    // NOTE: qHead/qCount are advanced on `this` *before* recompute(), because
+    // recompute() re-enters poke() for neighbours and needs the live write cursor.
+    while (this.qCount > 0 && processed < MAX_PER_FRAME) {
+      const h = this.qHead;
+      if (times[h] > this.now) break;           // identical monotone-FIFO semantics
+      const k = keys[h];
+      this.qHead = (h + 1) & QMASK;
+      this.qCount--;
+      this.pending.delete(k);                   // deleted before recompute, as before
+      this.recompute(
+        k & 0x1FF,
+        (k >>> KEY_Y_SHIFT) & 0xFF,
+        (k >>> KEY_Z_SHIFT) & 0x1FF,
+      );
+      processed++;
+    }
+    this.world.endBatch();
+  }
+
+  /** Additive API — call on world regen / teleport to drop stale work. */
+  clear(): void {
+    this.qHead = 0; this.qCount = 0;
+    this.pending.clear();
+  }
+}
+```
+
+**What changed**
+- Template-literal keys gone. `cellKey` packs to a 26-bit SMI (max 67,108,863), so `poke`/`delete` allocate **zero** bytes. At 160 cells/frame × 60 fps that's ~9,600 string allocations/sec removed, plus the same number of string hashes.
+- `Set<string>` → open-addressed `Int32Array` set. Constant-time probes on integer keys, no hash-table node allocation, no rehash garbage in steady state.
+- `Task[]` of object literals → parallel `Int32Array` + `Float64Array` ring buffer. No task objects, cache-friendly linear reads, and `qHead`/`qCount` wrap with a mask.
+- Early-out before `beginBatch()`/`endBatch()` when nothing is due (saves two calls per frame on the common idle frame). Remove the early return if your batch pair has side effects you rely on.
+- **Two bugs fixed, flagging them since they change observable behaviour for the better:**
+  1. The old array grew forever — `head` advanced but `queue.length` never shrank, so once `length > MAX_QUEUE` every future `poke` was dropped permanently and the array leaked. The ring makes the guard mean "160-ish live tasks", not "ever pushed".
+  2. `"-1,40,3"` and `"511,40,3"` were different string keys for the same physical cell on a wrapping world, so seam cells were recomputed twice. Masked keys dedupe them.
+- **Caveat:** `recompute` now receives coordinates normalized into `[0,512)` / `[0,256)`. That's a no-op if `world.getBlockRaw`/`setBlock` wrap internally (they must, for a 32-chunk torus). If they don't, store `x`/`y`/`z` in three `Int16Array`s alongside `qKey` and pass those instead.
+
+---
+
+## 9. TorchLights (`src/game/world/torchLights.ts`) — optimized
+
+```ts
+// ── module scope (torchLights.ts) ───────────────────────────────────────────
+
+const K = POOL_SIZE;                              // 6
+const LIGHT_R  = 18;                              // set to your PointLight.distance
+const LIGHT_R2 = LIGHT_R * LIGHT_R;
+const RESCAN_MOVE  = 0.75;                        // camera travel needed to reorder top-K
+const RESCAN_MOVE2 = RESCAN_MOVE * RESCAN_MOVE;
+
+// Fixed top-K selection buffer, ascending by squared distance. Zero allocation.
+const SEL_D   = new Float64Array(K);
+const SEL_IDX = new Int32Array(K);
+```
+
+```ts
+  // ── class fields ──────────────────────────────────────────────────────────
+  private flat = new Float32Array(0);   // xyz triples; torches never move, so this is stable
+  private flatN = 0;
+  private listDirty = true;             // set by markDirty() on place/break
+  private scanX = 0; private scanY = 0; private scanZ = 0;
+  private scanned = false;
+  private nearCount = 0;
+
+  /** Call from your torch place / break paths (wherever `this.torches` is mutated). */
+  markDirty(): void { this.listDirty = true; }
+
+  private rebuildFlat(): void {
+    const n = this.torches.size;
+    if (this.flat.length < n * 3) {
+      this.flat = new Float32Array(Math.max(192, n * 6));   // amortized growth, rare
+    }
+    const f = this.flat;
+    let w = 0;
+    for (const t of this.torches.values()) {
+      const p = t.pos;
+      f[w++] = p.x; f[w++] = p.y; f[w++] = p.z;
+    }
+    this.flatN = n;
+    this.listDirty = false;
+  }
+
+  update(dt: number, camera: THREE.Vector3): void {
+    this.sortT -= dt;
+
+    // Re-rank only when the answer can actually differ:
+    //   • a torch was added/removed (immediate), or
+    //   • the camera moved far enough AND the 150 ms throttle elapsed.
+    // Standing still with a static torch set is now free.
+    const dcx = camera.x - this.scanX, dcy = camera.y - this.scanY, dcz = camera.z - this.scanZ;
+    const camMoved = !this.scanned || dcx * dcx + dcy * dcy + dcz * dcz > RESCAN_MOVE2;
+
+    if (this.listDirty || (this.sortT <= 0 && camMoved)) {
+      this.sortT = 0.15;
+      this.scanX = camera.x; this.scanY = camera.y; this.scanZ = camera.z;
+      this.scanned = true;
+      if (this.listDirty) this.rebuildFlat();

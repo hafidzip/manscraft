@@ -1,0 +1,180 @@
+                    & OCC[oIdx(y, z - 1)] & OCC[oIdx(y, z + 1)]
+                    & INNER_BITS) >>> 1;                 // back to x-space
+
+      // Non-cube blocks always visited (cross/water/cutout keep old behaviour).
+      let bits = (rowNonAir & ~cubes) | (cubes & ~buried);
+      if (bits === 0) continue;
+
+      while (bits !== 0) {
+        const low = bits & -bits;
+        const x = 31 - Math.clz32(low);
+        bits ^= low;
+
+        const id = data[(y * S + z) * S + x];
+        if (SKIP_ID[id]) continue;                        // table, not 3 calls
+        const d = DEFS[id];
+        const pi = pIdx(x, y, z);                         // padded index
+
+        // ── UNCHANGED LOGIC, MECHANICAL ACCESSOR SWAP ────────────────────
+        // ... cross blocks (tallgrass, torch, flowers) ...
+        // ... 6 face tests + AO sampling per visible face ...
+        // ... water corner height averaging ...
+        //
+        // Replace every  localGet(lx, ly, lz)  with  PAD[pi + <const offset>]:
+        //   -X: PAD[pi + OFF_NX]   +X: PAD[pi + OFF_PX]
+        //   -Y: PAD[pi + OFF_NY]   +Y: PAD[pi + OFF_PY]
+        //   -Z: PAD[pi + OFF_NZ]   +Z: PAD[pi + OFF_PZ]
+        // AO/water diagonals are sums of those offsets, e.g.
+        //   (-X,-Z,+Y): PAD[pi + OFF_NX + OFF_NZ + OFF_PY]
+        // No bounds checks, no `get()`, no `interior` fast/slow split — the
+        // `interior` local can be deleted; the padded path is always valid.
+      }
+    }
+  }
+
+  return {
+    opaque:  buildGeom(opaqueB),
+    cutout:  buildGeom(cutoutB, false, true),
+    foliage: buildGeom(foliageB),
+    water:   buildGeom(waterB, true),
+  };
+}
+```
+
+**Expected effect:** ~20k voxel visits → hundreds; per-sample cost drops from a 3-branch closure call to one array index. Typical chunk should land well under 1 ms (from 2–5 ms). All scratch is module-scoped and allocation-free, so this drops straight into a Web Worker later — the only shared input is `data` plus optional neighbour buffers.
+
+---
+
+## 3. World Update Loop (`src/game/world/world.ts` — `update`)
+
+**What changed**
+
+- **Adaptive clock batching**, not blind "every 4th". A `performance.now()` read (~100 ns) is noise next to a 2 ms mesh build, so when the cost EMA is expensive we still check every item (better budget accuracy); we only batch to `CLOCK_STRIDE` when items are cheap — which is exactly the case the per-item clock cost was hurting. EMA is updated from the batch average, so its meaning is unchanged.
+- **Swap-and-truncate compaction** replaces `slice()` — no new array, no GC churn.
+- **Amortized eviction**: a persistent `Map` iterator (safe under concurrent delete/insert, zero allocation) walks a bounded number of chunks per frame instead of a 350 ms burst that scans the whole map. Only runs with budget left, and uses squared wrap-aware distance (no `Math.hypot`).
+- Queue arrays and head indices are hoisted into locals; break guards keep the **original** `head > 0` / `processed > 0` semantics so the "at least one item" behaviour is unchanged.
+- Return value stays `processed`.
+
+```ts
+// ─── module scope (top of world.ts) ─────────────────────────────────────────
+const CLOCK_STRIDE   = 8;     // clock reads batched at this rate when items are cheap
+const CHEAP_ITEM_MS  = 0.5;   // above this, per-item clock cost is noise -> check every item
+const COMPACT_AFTER  = 64;
+const EVICT_SCAN     = 32;    // chunks examined per frame
+const EVICT_RETIRE   = 2;     // chunks retired per frame
+
+// ─── new field ──────────────────────────────────────────────────────────────
+private evictIter: Iterator<[ChunkKey, Chunk]> | null = null;  // key type of this.chunks
+
+update(px: number, pz: number, budgetMs: number, radius = VIEW_DISTANCE): number {
+    const t0 = performance.now();
+    let processed = 0;
+    let now = t0;
+
+    // ── Dirty queue: re-mesh modified chunks ──────────────────────────────
+    {
+      const dq = this.dirtyQueue;
+      let dh = this.dirtyHead;
+      const stride = this.meshCost > CHEAP_ITEM_MS ? 1 : CLOCK_STRIDE;
+      let batchStart = now, batchItems = 0;
+
+      while (dh < dq.length) {
+        if (dh > 0 && now - t0 + this.meshCost > budgetMs) break;   // original guard
+        const c = dq[dh++];
+        if (!this.dirtySet.has(c)) continue;                        // stale entry
+        this.buildMesh(c);
+        if (++batchItems >= stride) {
+          const t = performance.now();
+          this.meshCost = this.meshCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+          batchStart = now = t;
+          batchItems = 0;
+        }
+      }
+      if (batchItems > 0) {
+        const t = performance.now();
+        this.meshCost = this.meshCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+        now = t;
+      }
+      this.dirtyHead = dh;
+
+      // Compaction: in-place shift + truncate (slice() allocated a new array).
+      if (dh >= dq.length) {
+        dq.length = 0;
+        this.dirtyHead = 0;
+      } else if (dh > COMPACT_AFTER) {
+        const n = dq.length;
+        for (let i = dh, j = 0; i < n; i++, j++) dq[j] = dq[i];
+        dq.length = n - dh;
+        this.dirtyHead = 0;
+      }
+    }
+
+    // ── Load queue: generate + mesh new chunks ────────────────────────────
+    {
+      const lq = this.loadQueue;
+      let lh = this.loadHead;
+      const stride = this.loadCost > CHEAP_ITEM_MS ? 1 : CLOCK_STRIDE;
+      let batchStart = now, batchItems = 0;
+
+      while (lh < lq.length) {
+        if (processed > 0 && now - t0 + this.loadCost > budgetMs) break;  // original guard
+        const item = lq[lh++];
+        const c = this.ensureData(item.cx, item.cz);
+        if (!c.hasMesh) { this.buildMesh(c); processed++; }
+        if (++batchItems >= stride) {
+          const t = performance.now();
+          this.loadCost = this.loadCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+          batchStart = now = t;
+          batchItems = 0;
+        }
+      }
+      if (batchItems > 0) {
+        const t = performance.now();
+        this.loadCost = this.loadCost * 0.6 + ((t - batchStart) / batchItems) * 0.4;
+        now = t;
+      }
+      this.loadHead = lh;
+
+      if (lh >= lq.length) {
+        lq.length = 0;
+        this.loadHead = 0;
+      } else if (lh > COMPACT_AFTER) {
+        const n = lq.length;
+        for (let i = lh, j = 0; i < n; i++, j++) lq[j] = lq[i];
+        lq.length = n - lh;
+        this.loadHead = 0;
+      }
+    }
+
+    // ── Eviction: amortized, bounded, only with budget left ───────────────
+    if (now - t0 < budgetMs) this.evictStep(px, pz);
+
+    return processed;
+}
+
+/**
+ * Walks the chunk map with a persistent iterator, EVICT_SCAN entries per frame,
+ * retiring at most EVICT_RETIRE. Replaces the full-map burst scan every 350 ms.
+ * Map iterators tolerate concurrent delete/insert, so it can be resumed safely.
+ */
+private evictStep(px: number, pz: number): void {
+    const pcx = Math.floor(px / CHUNK_SIZE);
+    const pcz = Math.floor(pz / CHUNK_SIZE);
+    const keepSq = EVICT_DISTANCE * EVICT_DISTANCE;
+    let scanned = 0, retired = 0, restarts = 0;
+
+    while (scanned < EVICT_SCAN && retired < EVICT_RETIRE) {
+      if (!this.evictIter) this.evictIter = this.chunks.entries();
+      const step = this.evictIter.next();
+      if (step.done) {
+        this.evictIter = null;
+        if (++restarts > 1) return;          // empty / fully swept this frame
+        continue;
+      }
+      scanned++;
+
+      const [key, c] = step.value;
+      const dx = wrapDelta(c.cx - pcx, WORLD_CHUNKS);
+      const dz = wrapDelta(c.cz - pcz, WORLD_CHUNKS);
+      if (dx * dx + dz * dz <= keepSq) continue;
+      if (this.dirtySet.has(c)) continue;    // don't retire pending work

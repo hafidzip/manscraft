@@ -1,0 +1,180 @@
+    const a0 = gx00 * f + c00, a1 = gx10 * fm1 + c10;
+    const b0 = gx01 * f + c01, b1 = gx11 * fm1 + c11;
+    const a = a0 + u * (a1 - a0);
+    const b = b0 + u * (b1 - b0);
+    out[i] += amp * xform(a + v * (b - a), m);
+  }
+}
+
+/** Same, but for arbitrary (already warped) coordinates. Memoises the last cell. */
+function perlinRowScattered(
+  out: Float64Array, n: number, xsA: Float64Array, zsA: Float64Array,
+  freq: number, per: number, amp: number, m: XF, so: number,
+): void {
+  let cx = 0x7fffffff, cz = 0x7fffffff;
+  let g00x = 0, g00z = 0, g10x = 0, g10z = 0, g01x = 0, g01z = 0, g11x = 0, g11z = 0;
+
+  for (let i = 0; i < n; i++) {
+    const x = xsA[i] * freq, z = zsA[i] * freq;
+    const xi = Math.floor(x), zi = Math.floor(z);
+    if (xi !== cx || zi !== cz) {          // warp is low-frequency: usually a hit
+      cx = xi; cz = zi;
+      const x0 = wrapLat(xi, per), x1 = wrapLat(xi + 1, per);
+      const z0 = wrapLat(zi, per), z1 = wrapLat(zi + 1, per);
+      const h00 = hash2(x0, z0, so), h10 = hash2(x1, z0, so);
+      const h01 = hash2(x0, z1, so), h11 = hash2(x1, z1, so);
+      g00x = gradX(h00); g00z = gradZ(h00); g10x = gradX(h10); g10z = gradZ(h10);
+      g01x = gradX(h01); g01z = gradZ(h01); g11x = gradX(h11); g11z = gradZ(h11);
+    }
+    const f = x - xi, fm1 = f - 1, g = z - zi, gm1 = g - 1;
+    const u = fade(f), v = fade(g);
+    const a0 = g00x * f + g00z * g,   a1 = g10x * fm1 + g10z * g;
+    const b0 = g01x * f + g01z * gm1, b1 = g11x * fm1 + g11z * gm1;
+    const a = a0 + u * (a1 - a0);
+    const b = b0 + u * (b1 - b0);
+    out[i] += amp * xform(a + v * (b - a), m);
+  }
+}
+
+/** fbm / ridged / billow all share one path. Octave order == scalar order == bit-exact. */
+function fbmRowUniform(
+  out: Float64Array, n: number, px0: number, pz: number,
+  freq: number, per: number, oct: number, lac: number, gain: number,
+  amp: number, m: XF = XF.RAW, so = 0,
+): void {
+  out.fill(0, 0, n);
+  for (let o = 0; o < oct; o++) {
+    perlinRowUniform(out, n, px0, pz, freq, per, amp, m, so + o);
+    freq *= lac; per *= lac; amp *= gain;
+  }
+}
+
+function fbmRowScattered(
+  out: Float64Array, n: number, xs: Float64Array, zs: Float64Array,
+  freq: number, per: number, oct: number, lac: number, gain: number,
+  amp: number, m: XF = XF.RAW, so = 0,
+): void {
+  out.fill(0, 0, n);
+  for (let o = 0; o < oct; o++) {
+    perlinRowScattered(out, n, xs, zs, freq, per, amp, m, so + o);
+    freq *= lac; per *= lac; amp *= gain;
+  }
+}
+```
+
+### 10c — Batched chunk-row fill (replaces the single-column miss path)
+
+```ts
+// One allocation for the whole generator lifetime. Rename to match your fields().
+interface RowScratch {
+  wx: Float64Array; wz: Float64Array; xs: Float64Array; zs: Float64Array;
+  cont: Float64Array; mount: Float64Array; ridge: Float64Array; billow: Float64Array;
+  temp: Float64Array; humid: Float64Array;
+}
+const mkScratch = (): RowScratch => ({
+  wx: new Float64Array(ROW), wz: new Float64Array(ROW),
+  xs: new Float64Array(ROW), zs: new Float64Array(ROW),
+  cont: new Float64Array(ROW), mount: new Float64Array(ROW),
+  ridge: new Float64Array(ROW), billow: new Float64Array(ROW),
+  temp: new Float64Array(ROW), humid: new Float64Array(ROW),
+});
+
+private rowScratch: RowScratch = mkScratch();
+
+/** px0 MUST be 16-aligned. Fills k0..k0+15, which are contiguous (16 | 512). */
+fillColumnRow(px0: number, pz: number): void {
+  const s = this.rowScratch, n = ROW;
+
+  // 1. domain warp — warp2's two fbm calls, now one pass each over 16 columns
+  fbmRowUniform(s.wx, n, px0, pz, WARP_FREQ, WARP_PER, WARP_OCT, LAC, GAIN, WARP_AMP, XF.RAW, SO_WX);
+  fbmRowUniform(s.wz, n, px0, pz, WARP_FREQ, WARP_PER, WARP_OCT, LAC, GAIN, WARP_AMP, XF.RAW, SO_WZ);
+  for (let i = 0; i < n; i++) {
+    s.xs[i] = (px0 + i) + s.wx[i] * WARP_STRENGTH;   // identical to warp2()
+    s.zs[i] = pz        + s.wz[i] * WARP_STRENGTH;
+  }
+
+  // 2. fields() on the warped domain
+  fbmRowScattered(s.cont,   n, s.xs, s.zs, CONT_FREQ,  CONT_PER,  CONT_OCT,  LAC, GAIN, 1, XF.RAW,    SO_CONT);
+  fbmRowScattered(s.mount,  n, s.xs, s.zs, MOUNT_FREQ, MOUNT_PER, MOUNT_OCT, LAC, GAIN, 1, XF.RAW,    SO_MOUNT);
+  fbmRowScattered(s.ridge,  n, s.xs, s.zs, RIDGE_FREQ, RIDGE_PER, RIDGE_OCT, LAC, GAIN, 1, XF.RIDGED, SO_RIDGE);
+  fbmRowScattered(s.billow, n, s.xs, s.zs, BILL_FREQ,  BILL_PER,  BILL_OCT,  LAC, GAIN, 1, XF.BILLOW, SO_BILL);
+
+  // 3. climate() — unwarped, so the cheaper uniform evaluator applies
+  fbmRowUniform(s.temp,  n, px0, pz, TEMP_FREQ,  TEMP_PER,  TEMP_OCT,  LAC, GAIN, 1, XF.RAW, SO_TEMP);
+  fbmRowUniform(s.humid, n, px0, pz, HUMID_FREQ, HUMID_PER, HUMID_OCT, LAC, GAIN, 1, XF.RAW, SO_HUMID);
+
+  // 4. per-column tail — YOUR UNCHANGED biome + height math, zero allocation
+  const k0 = (pz << W_SHIFT) | px0;
+  for (let i = 0; i < n; i++) {
+    const mount = s.mount[i], cont = s.cont[i];
+    const biome = pickBiome(s.temp[i], s.humid[i], mount, cont);
+    const h = this.heightFor(biome, cont, mount, s.ridge[i], s.billow[i]); // ← was inline
+    this.publish(k0 + i, h, biome, mount);
+  }
+}
+
+/** API-compatible shims, in case anything else calls these. */
+fields(px: number, pz: number): Fields {
+  const k = this.computeColumn(px, pz);
+  return { cont: 0, mount: this.cache.mount[k], /* … */ } as Fields;
+}
+```
+
+### 10d — Worker prewarm: lock-free, single-writer `state`
+
+```ts
+// ── generator.worker.ts ──────────────────────────────────────────────────────
+let gen: TerrainGenerator | null = null;
+self.onmessage = (ev: MessageEvent) => {
+  const m = ev.data;
+  if (m.t === 'init') { gen = TerrainGenerator.attach(m.seed, m.buf); return; }
+  if (m.t === 'rows') {
+    const jobs: Int32Array = m.jobs, ring: Int32Array = m.ring, pub: Int32Array = m.pub;
+    for (let i = 0; i < jobs.length; i++) {
+      const k0 = jobs[i];
+      gen!.fillColumnRowRaw(k0 & W_MASK, k0 >>> W_SHIFT);   // writes payload only
+      const slot = Atomics.add(pub, 1, 1);                  // claim a ring slot
+      ring[slot & (RING - 1)] = k0;
+      Atomics.store(pub, 0, slot + 1);                      // release: publish
+    }
+  }
+};
+
+// ── main thread ──────────────────────────────────────────────────────────────
+/** Queue a spiral of chunk rows around (cx, cz). Call from the loading screen. */
+prewarm(cx: number, cz: number, radiusChunks: number): void {
+  if (!this.cache.shared) return;                    // fallback: prewarmSlice()
+  this.pool ??= new GenPool(this.seed, this.cache.buf, Math.max(1,
+    Math.min(4, (navigator.hardwareConcurrency || 2) - 1)));
+  this.pool.enqueueSpiral(cx, cz, radiusChunks);     // 16 rows per chunk
+}
+
+/**
+ * ONE acquire load per frame makes every payload byte written before the
+ * matching publish visible. Only this thread ever writes `state`, so there is
+ * no cross-thread race on the plane the hot path reads.
+ */
+drainPrewarm(): number {
+  const p = this.pool; if (!p) return 0;
+  const end = Atomics.load(p.pub, 0);               // acquire
+  const st = this.cache.state;
+  let done = 0;
+  for (let i = p.consumed; i < end; i++, done++) {
+    const k0 = p.ring[i & (RING - 1)];
+    for (let j = 0; j < ROW; j++) st[k0 + j] = COL_READY;   // plain, single-writer
+  }
+  p.consumed = end;
+  return done;
+}
+
+/** No SharedArrayBuffer (not cross-origin isolated)? Smear the cost instead. */
+prewarmSlice(cx: number, cz: number, radiusChunks: number, budgetMs: number): boolean {
+  const t0 = performance.now();
+  const st = this.cache.state;
+  while (this.warmCursor < this.warmPlan.length) {
+    if ((this.warmCursor & 3) === 0 && performance.now() - t0 > budgetMs) return false;
+    const k0 = this.warmPlan[this.warmCursor++];
+    if (st[k0] === COL_EMPTY) this.fillColumnRow(k0 & W_MASK, k0 >>> W_SHIFT);
+  }
+  return true;
+}

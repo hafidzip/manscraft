@@ -1,0 +1,180 @@
+    const sim = this.simMsEma;
+    let want: 0 | 1 | 2 = this.postQ;
+
+    if (sim > SIM_HARD_MS)            want = Q_MINIMAL;
+    else if (sim > SIM_SOFT_MS)       want = Q_NO_VOL;
+    else if (sim < SIM_SOFT_MS * 0.6) want = Q_FULL;          // clear recovery
+    else if (this.postQ === Q_MINIMAL && sim < SIM_HARD_MS * 0.75) want = Q_NO_VOL;
+
+    if (want !== this.postQ && now - this.postQAt > QUALITY_DWELL_MS) {
+      this.postQ = want;
+      this.postQAt = now;
+    }
+}
+```
+
+**Expected effect:** heavy frames lose ~2 full-screen passes instead of cascading; chunk-load spikes are bounded by the streaming budget rather than by a lagging fps EMA; no dropped simulation time.
+
+---
+
+## 2. Chunk Mesher (`src/game/world/mesher.ts` — `buildChunkGeometry`)
+
+**What changed**
+
+- **Bitmask voxel iteration.** One linear pass over `data` builds a 16-bit non-air mask and a full-cube mask per `(y, z)` row (rows are contiguous given `chunkIndex`), plus `maxY`. The main loop then visits **only non-air, non-buried voxels** instead of all 20,480 — typical chunks drop from 20,480 iterations to a few hundred.
+- **Buried-cube culling via bit ops.** `buried = (m<<1) & (m>>>1) & below & above & north & south` kills interior stone in bulk. Applied *only* to full opaque cubes, so cross blocks / water / cutouts keep exactly their original visit set → byte-identical geometry.
+- **Padded neighbour shell.** A module-scoped `(S+2)×(H+2)×(S+2)` `Uint8Array` holds the chunk plus a 1-voxel border (including the 4 corner columns AO needs). `localGet`'s three bounds branches and all cross-chunk `get()` calls inside the hot loop collapse to a single unchecked array index; neighbour offsets are compile-time constants.
+- **Optional neighbour `data` arrays** (backwards-compatible 5th parameter) let the shell be filled from sibling chunk buffers instead of ~5k `get()` calls. Falls back to `get` when omitted.
+- **`isInserter`/`isLaserMiner`/`isTurret` and `DEFS` lookups** become one-byte table reads built once at module load.
+- Shell fill and mask scan are bounded by `maxY + 1`, so sky-only columns cost nothing.
+
+> ⚠️ **One thing to verify:** `OCCLUDES[]` must be exactly the predicate your face test uses for "neighbour hides this quad". If they disagree, geometry changes. Everything else here is mechanical.
+
+```ts
+// ─── module scope (top of mesher.ts) ────────────────────────────────────────
+const PW    = S + 2;              // padded x/z width  (18)
+const PLANE = PW * PW;            // padded y stride   (324)
+const PAD_LEN = (H + 2) * PLANE;  // 26,568 bytes
+
+// Padded neighbour offsets — constants, no arithmetic in the hot loop.
+const OFF_NX = -1, OFF_PX = 1;
+const OFF_NZ = -PW, OFF_PZ = PW;
+const OFF_NY = -PLANE, OFF_PY = PLANE;
+
+/** pad index for local coords, valid for -1 <= x,z <= S and -1 <= y <= H */
+const pIdx = (x: number, y: number, z: number): number =>
+  (y + 1) * PLANE + (z + 1) * PW + (x + 1);
+
+// One-time id tables: replace per-voxel DEFS/function-call lookups.
+const SKIP_ID   = new Uint8Array(256);  // inserter / laser miner / turret
+const IS_CUBE   = new Uint8Array(256);  // full opaque cube -> eligible for burial
+const OCCLUDES  = new Uint8Array(256);  // hides the neighbouring quad
+for (let id = 0; id < 256; id++) {
+  const d = DEFS[id];
+  if (!d) continue;
+  SKIP_ID[id]  = (isInserter(id) || isLaserMiner(id) || isTurret(id)) ? 1 : 0;
+  // MUST mirror the face-test predicate exactly.
+  const fullOpaque = !!d.solid && !d.cross && !d.cutout && !d.liquid;
+  IS_CUBE[id]  = fullOpaque ? 1 : 0;
+  OCCLUDES[id] = fullOpaque ? 1 : 0;
+}
+
+// Reused scratch. NOT reentrant: one meshing call at a time per thread
+// (safe today — meshing is synchronous; a worker gets its own module instance).
+const PAD      = new Uint8Array(PAD_LEN);
+const NONAIR   = new Uint32Array(H * S);        // bits 0..S-1, indexed y*S+z
+const CUBEMASK = new Uint32Array(H * S);
+const OCC      = new Uint32Array((H + 2) * PW); // bits 0..S+1 (x = -1..S)
+const oIdx = (y: number, z: number): number => (y + 1) * PW + (z + 1);
+
+const INNER_BITS = ((1 << S) - 1) << 1;         // candidate bits in OCC space
+const ALL_BITS   = (1 << (S + 2)) - 1;
+
+/** Optional sibling chunk voxel buffers — avoids ~5k get() calls per chunk. */
+export interface ChunkNeighbors {
+  nx?: Uint8Array; px?: Uint8Array;   // cx-1, cx+1
+  nz?: Uint8Array; pz?: Uint8Array;   // cz-1, cz+1
+}
+
+export function buildChunkGeometry(
+  get: BlockGetter, cx: number, cz: number, data: Uint8Array,
+  neighbors?: ChunkNeighbors,                    // optional, API-compatible
+): ChunkGeoms {
+  const opaqueB  = newBucket();
+  const cutoutB  = newBucket();
+  const foliageB = newBucket();
+  const waterB   = newBucket();
+  const baseX = cx * S;
+  const baseZ = cz * S;
+
+  // ── Pass 1: row masks + maxY. One linear sweep of data (rows contiguous). ──
+  NONAIR.fill(0); CUBEMASK.fill(0);
+  let maxY = -1;
+  for (let y = 0; y < H; y++) {
+    let layerAny = 0;
+    for (let z = 0; z < S; z++) {
+      const rowBase = (y * S + z) * S;
+      let na = 0, cu = 0;
+      for (let x = 0; x < S; x++) {
+        const id = data[rowBase + x];
+        if (id === B.AIR) continue;
+        const bit = 1 << x;
+        na |= bit;
+        if (IS_CUBE[id]) cu |= bit;
+      }
+      NONAIR[y * S + z] = na;
+      CUBEMASK[y * S + z] = cu;
+      layerAny |= na;
+    }
+    if (layerAny !== 0) maxY = y;
+  }
+  if (maxY < 0) {
+    return { opaque: buildGeom(opaqueB), cutout: buildGeom(cutoutB, false, true),
+             foliage: buildGeom(foliageB), water: buildGeom(waterB, true) };
+  }
+  const yTop = Math.min(H - 1, maxY + 1);   // AO/water never samples above this
+
+  // ── Pass 2: fill the padded shell (body + 1-voxel border), bounded by yTop ─
+  PAD.fill(B.AIR, (yTop + 2) * PLANE, PAD_LEN);       // clear stale rows above
+  for (let y = -1; y <= yTop + 1; y++) {
+    if (y < 0) {                                       // below world -> bedrock
+      PAD.fill(B.BEDROCK, pIdx(-1, y, -1), pIdx(-1, y, -1) + PLANE);
+      continue;
+    }
+    if (y >= H) break;
+    // body
+    for (let z = 0; z < S; z++) {
+      const src = (y * S + z) * S;
+      const dst = pIdx(0, y, z);
+      for (let x = 0; x < S; x++) PAD[dst + x] = data[src + x];
+    }
+    // ±X borders (columns) — from sibling buffers when available
+    for (let z = 0; z < S; z++) {
+      PAD[pIdx(-1, y, z)] = neighbors?.nx
+        ? neighbors.nx[chunkIndex(S - 1, y, z)] : get(baseX - 1, y, baseZ + z);
+      PAD[pIdx(S, y, z)] = neighbors?.px
+        ? neighbors.px[chunkIndex(0, y, z)] : get(baseX + S, y, baseZ + z);
+    }
+    // ±Z borders (contiguous rows)
+    if (neighbors?.nz) {
+      const b = (y * S + (S - 1)) * S, d = pIdx(0, y, -1);
+      for (let x = 0; x < S; x++) PAD[d + x] = neighbors.nz[b + x];
+    } else {
+      for (let x = 0; x < S; x++) PAD[pIdx(x, y, -1)] = get(baseX + x, y, baseZ - 1);
+    }
+    if (neighbors?.pz) {
+      const b = (y * S) * S, d = pIdx(0, y, S);
+      for (let x = 0; x < S; x++) PAD[d + x] = neighbors.pz[b + x];
+    } else {
+      for (let x = 0; x < S; x++) PAD[pIdx(x, y, S)] = get(baseX + x, y, baseZ + S);
+    }
+    // 4 corner columns (AO diagonals)
+    PAD[pIdx(-1, y, -1)] = get(baseX - 1, y, baseZ - 1);
+    PAD[pIdx(S,  y, -1)] = get(baseX + S, y, baseZ - 1);
+    PAD[pIdx(-1, y,  S)] = get(baseX - 1, y, baseZ + S);
+    PAD[pIdx(S,  y,  S)] = get(baseX + S, y, baseZ + S);
+  }
+
+  // ── Pass 3: occluder bitmasks from the pad (x = -1..S per row) ────────────
+  OCC.fill(0);
+  for (let z = -1; z <= S; z++) OCC[oIdx(-1, z)] = ALL_BITS;  // bedrock floor
+  for (let y = 0; y <= yTop + 1 && y < H; y++) {
+    for (let z = -1; z <= S; z++) {
+      let m = 0;
+      const rb = pIdx(-1, y, z);
+      for (let i = 0; i <= S + 1; i++) if (OCCLUDES[PAD[rb + i]]) m |= 1 << i;
+      OCC[oIdx(y, z)] = m;
+    }
+  }
+
+  // ── Pass 4: visit only exposed voxels ─────────────────────────────────────
+  for (let y = 0; y <= maxY; y++) {
+    for (let z = 0; z < S; z++) {
+      const rowNonAir = NONAIR[y * S + z];
+      if (rowNonAir === 0) continue;                     // empty row: free skip
+
+      const cubes = CUBEMASK[y * S + z];
+      const mid = OCC[oIdx(y, z)];
+      // Fully-enclosed cubes emit nothing in the original either.
+      const buried = ((mid << 1) & (mid >>> 1)
+                    & OCC[oIdx(y - 1, z)] & OCC[oIdx(y + 1, z)]

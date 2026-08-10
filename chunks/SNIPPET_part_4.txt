@@ -1,0 +1,180 @@
+
+      this.retireChunk(c);                   // existing dispose path, unchanged
+      this.chunks.delete(key);
+      retired++;
+    }
+}
+```
+
+**Expected effect:** zero allocation in the steady state (no `slice`, no key arrays), clock reads drop by ~8× on the cheap paths while staying per-item where accuracy matters, and the 350 ms eviction spike flattens into ≤32 map steps per frame.
+
+---
+
+## 4. FlowField Dijkstra (`src/game/fps/FlowField.ts` — `expand`)
+
+```ts
+// ─── module scope (add near the existing DX/DZ tables) ──────────────────────
+const RMASK = RING - 1;
+const GRID = MASK + 1;
+
+/** ROW[z] === z << SHIFT — kills the shift in the neighbour address math. */
+const ROW: Int32Array = (() => {
+  const t = new Int32Array(GRID);
+  for (let z = 0; z < GRID; z++) t[z] = z << SHIFT;
+  return t;
+})();
+
+/** Scratch: the 4 orthogonal neighbour indices of the current cell — 0:+x 1:-x 2:+z 3:-z */
+const ORTH_IDX = new Int32Array(4);
+/** Scratch: 1 when that orthogonal neighbour's *surface* is steppable from fromY. */
+const ORTH_OK = new Uint8Array(4);
+/** Scratch: the 4 diagonal neighbour indices — 0:(+x,+z) 1:(-x,+z) 2:(+x,-z) 3:(-x,-z) */
+const DIAG_IDX = new Int32Array(4);
+/** Which ORTH_* slots are a diagonal's two companions (identical test to the old inline one). */
+const DIAG_CX = new Uint8Array([0, 1, 0, 1]);
+const DIAG_CZ = new Uint8Array([2, 2, 3, 3]);
+
+// ─── the method ─────────────────────────────────────────────────────────────
+private expand(): boolean {
+    const dist = this.back, surf = this.surfY, extra = this.extra;
+    const state = this.state, bHead = this.bHead;      // typed-array refs are stable
+    const orthIdx = ORTH_IDX, orthOk = ORTH_OK, diagIdx = DIAG_IDX;
+    const tEnd = performance.now() + TIME_GUARD_MS;
+    let budget = EXPAND_BUDGET;
+
+    while (this.open > 0) {
+      if (--budget < 0) return false;
+      // wall-clock probe every 2048 cells instead of every 1024
+      if ((budget & 2047) === 0 && performance.now() > tEnd) return false;
+
+      // Bucket scan: only touch this.curCost when it actually has to move.
+      let b = this.curCost & RMASK;
+      if (bHead[b] === -1) {
+        let cc = this.curCost;
+        do { cc++; b = cc & RMASK; } while (bHead[b] === -1);
+        this.curCost = cc;
+      }
+
+      const idx = bHead[b];
+      this.unlink(idx, b);
+      state[idx] = SETTLED;
+
+      const cost = dist[idx];
+      // Cheapest possible outgoing edge already overflows -> no neighbour can pass.
+      // (Valid while extra[] penalties are >= 0 and C_STRAIGHT <= C_DIAG. Drop this
+      //  line if extra[] can ever be negative.)
+      if (cost + C_STRAIGHT > MAX_COST) continue;
+
+      const fromY = surf[idx];
+      const climbCap = fromY + MAX_STEP;   // toY >  climbCap  <=>  dy >  MAX_STEP
+      const dropCap  = fromY - MAX_DROP;   // toY <  dropCap   <=>  dy < -MAX_DROP
+
+      // 4 wrapped adds + 2 table loads per settled cell, instead of 16 mask ops
+      // and 8 shifts spread across the 8 directions.
+      const cx = idx & MASK;
+      const cz = idx >>> SHIFT;
+      const rc = idx - cx;                 // === cz << SHIFT, for free
+      const xp = (cx + 1) & MASK, xm = (cx - 1) & MASK;
+      const rp = ROW[(cz + 1) & MASK], rm = ROW[(cz - 1) & MASK];
+
+      orthIdx[0] = xp + rc; orthIdx[1] = xm + rc;
+      orthIdx[2] = cx + rp; orthIdx[3] = cx + rm;
+      diagIdx[0] = xp + rp; diagIdx[1] = xm + rp;
+      diagIdx[2] = xp + rm; diagIdx[3] = xm + rm;
+
+      // ── pass 1: orthogonals. Also caches the exact surface test the diagonals
+      //    used to re-do, so diagonal companion lookups become free.
+      for (let d = 0; d < 4; d++) {
+        const nidx = orthIdx[d];
+        const toY = surf[nidx];
+        const ok = toY !== NO_SURFACE && toY <= climbCap && toY >= dropCap;
+        orthOk[d] = ok ? 1 : 0;
+        if (!ok) continue;
+
+        const st = state[nidx];            // one read, reused below
+        if (st === SETTLED) continue;
+        const e = extra[nidx];
+        if (e === BLOCKED) continue;
+
+        const dy = toY - fromY;
+        const nc = cost + C_STRAIGHT + e +
+                   (dy > 0 ? C_CLIMB * dy : dy < 0 ? C_DROP * -dy : 0);
+        const dn = dist[nidx];
+        if (nc > MAX_COST || nc >= dn) continue;
+
+        if (st === OPEN) this.unlink(nidx, dn & RMASK);
+        dist[nidx] = nc;
+        state[nidx] = OPEN;
+        this.link(nidx, nc & RMASK);
+      }
+
+      // ── pass 2: diagonals. Rejected diagonals never touch memory at all.
+      for (let d = 0; d < 4; d++) {
+        if (orthOk[DIAG_CX[d]] === 0 || orthOk[DIAG_CZ[d]] === 0) continue;
+
+        const nidx = diagIdx[d];
+        const st = state[nidx];
+        if (st === SETTLED) continue;
+        const toY = surf[nidx];
+        if (toY === NO_SURFACE || toY > climbCap || toY < dropCap) continue;
+        const e = extra[nidx];
+        if (e === BLOCKED) continue;
+
+        const dy = toY - fromY;
+        const nc = cost + C_DIAG + e +
+                   (dy > 0 ? C_CLIMB * dy : dy < 0 ? C_DROP * -dy : 0);
+        const dn = dist[nidx];
+        if (nc > MAX_COST || nc >= dn) continue;
+
+        if (st === OPEN) this.unlink(nidx, dn & RMASK);
+        dist[nidx] = nc;
+        state[nidx] = OPEN;
+        this.link(nidx, nc & RMASK);
+      }
+    }
+    return true;
+}
+```
+
+**What changed**
+
+- **Address math hoisted.** `& MASK` / `<< SHIFT` go from 16 mask ops + 8 shifts per settled cell down to 2 wrapped adds, 2 wrapped adds + `ROW[]` loads, and `rc = idx - cx` (no shift). Wrap-safe, so it works across the seam.
+- **Diagonal companion lookups eliminated, exactly.** The old diagonal test on `ax`/`az` is *bit-identical* to the orthogonal surface test (`NO_SURFACE`, `MAX_STEP`, `MAX_DROP` — it deliberately ignores `BLOCKED`). Running orthogonals first and caching the result in `ORTH_OK` removes 8 `surf[]` reads per settled cell — not just on flat terrain, always. Order of neighbour visits changed, but bucket-Dijkstra distances are order-independent (`dist` is a min), so the produced field is identical.
+- **`state[nidx]` read once** instead of twice (SETTLED check + OPEN check), same for `dist[nidx]`.
+- **Fewer field loads:** `state`/`bHead` hoisted to locals; `this.curCost` is only written when the bucket cursor actually advances (was a property increment per empty bucket).
+- **Time guard halved** to every 2048 cells; `climbCap`/`dropCap` precomputed so the step/drop test is two compares against `toY` with no subtraction.
+- **Early-out** when `cost + C_STRAIGHT > MAX_COST` skips the entire 8-neighbour scan at the frontier edge.
+- `DX`/`DZ` are no longer referenced by `expand` (keep them if other methods use them).
+
+Net: ~8 fewer typed-array loads and ~12 fewer ALU ops per settled cell — roughly 70k fewer loads on a full 9000-cell frame.
+
+---
+
+## 5. EnemyManager Update Loop (`src/game/fps/EnemyManager.ts` — `update`)
+
+```ts
+// ─── module scope ───────────────────────────────────────────────────────────
+/** Reused player-image position for camp investigate calls — never handed out raw. */
+const CAMP_IMG = new THREE.Vector3();
+
+// ─── the method ─────────────────────────────────────────────────────────────
+update(dt: number) {
+    if (!this.enabled) return;
+    if (!this.primed) this.primed = true;
+
+    const player = this.player;
+    const ppx = player.pos.x;
+    const ppz = player.pos.z;
+    const list = this.enemies;          // hoisted; array ref stays stable
+    const period = TIER_PERIOD_S;
+    const active = this.activeScratch;
+    active.length = 0;
+
+    this.assignTiers(ppx, ppz);
+
+    // Reverse iteration + swap-remove is safe: the element swapped into slot i
+    // comes from a *higher* index, which this frame has already processed. So no
+    // enemy is ticked twice and none is skipped.
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      const acc = e.tickAccum + dt;

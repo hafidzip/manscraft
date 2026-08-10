@@ -1,0 +1,180 @@
+
+      const f = this.flat, n = this.flatN;
+      const cx = camera.x, cy = camera.y, cz = camera.z;
+      let count = 0;
+      let worst = 0;
+
+      for (let t = 0, o = 0; t < n; t++, o += 3) {
+        const dx = f[o] - cx, dy = f[o + 1] - cy, dz = f[o + 2] - cz;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > LIGHT_R2) continue;                 // contributes nothing — cull
+        if (count === K && d >= worst) continue;    // O(1) reject: the overwhelming case
+
+        let i = count < K ? count : K - 1;          // slot to write / overwrite
+        while (i > 0 && SEL_D[i - 1] > d) {
+          SEL_D[i] = SEL_D[i - 1];
+          SEL_IDX[i] = SEL_IDX[i - 1];
+          i--;
+        }
+        SEL_D[i] = d; SEL_IDX[i] = t;
+        if (count < K) count++;
+        worst = SEL_D[count - 1];
+      }
+      this.nearCount = count;
+
+      // Apply to the light pool (adapt field names to yours).
+      const pool = this.pool;
+      for (let i = 0; i < K; i++) {
+        const l = pool[i];
+        if (i < count) {
+          const o = SEL_IDX[i] * 3;
+          l.position.set(f[o], f[o + 1], f[o + 2]);
+          if (!l.visible) l.visible = true;
+        } else if (l.visible) {
+          l.visible = false;
+        }
+      }
+    }
+
+    // ── per-frame flicker / intensity animation: your existing code, unchanged ──
+  }
+```
+
+**What changed**
+- `nearBuf` and its `{ pos, d }` object literals are gone. The old path allocated one object **per torch per 150 ms** — with 100 torches that's ~670 short-lived objects/sec feeding the GC. New path: two module-scoped typed arrays, zero allocation.
+- O(N×K) partial selection sort → a 6-slot ascending insertion buffer. The `d >= worst` test rejects a torch in one compare, so the real cost is O(N) plus a handful of ≤5-element shifts. A binary heap is strictly worse at K=6: more branches, worse locality, same asymptotics.
+- Range cull (`d > LIGHT_R2`) drops torches that couldn't contribute a photon before they ever enter the ranking.
+- `Map.values()` iteration replaced by a flat `Float32Array` of xyz triples, rebuilt only when the torch set changes. Sequential float reads instead of chasing `Map` → entry → `Vector3` pointers; safe because torches are static once placed.
+- The 150 ms timer is now a throttle, not a trigger. A stationary player with an unchanged torch set does no work at all; placing a torch re-ranks immediately instead of waiting up to 150 ms (strictly better latency, same worst case).
+- **Optional, flagged because it changes behaviour:** the world is a 512-unit torus, so `distanceToSquared` is wrong for torches across the seam — a torch 3 blocks away can score as 509 away. If you want the fix, replace `f[o] - cx` with `wrapDelta(f[o] - cx, WORLD_SIZE)` on the x and z terms (y is unwrapped).
+- **Optional polish:** add ~10% hysteresis on `worst` before evicting a lit torch to stop lights popping when two torches trade ranks at the pool boundary.
+
+---
+## 10. Terrain Generator Column Cache (`src/game/world/generator.ts`)
+
+**What changed**
+
+1. **Cache allocation:** three lazy allocations + a 512 KB `fill(-1)` pass → **one** eager buffer with SoA views. Validity lives in a `Uint8Array` that is zero-initialised by the allocator, so *the fill disappears entirely*, and `colHeight` is free to hold any value (including `0`/negative).
+2. **Hot path:** the `if (!hCache)` init branch is gone from every call. `computeColumn` is now 3 integer ops + one `Uint8` load + one compare — small enough for V8 to inline into the caller. The miss path is a separate non-inlined function.
+3. **Batching (the real CPU win):** a miss is *never* isolated — the mesher needs the other 15 columns of that chunk row within microseconds. So a miss fills the whole 16-wide, 16-aligned run (16 divides 512, so a run never crosses a `z` row and writes are contiguous). Row-form noise hoists everything that depends only on `z`, or only on the current lattice cell, out of the sample loop. For octaves with a lattice period ≥ 16 blocks — i.e. continent, mountain, warp, climate — **the 4 gradient hashes are fetched once per 16 samples instead of 64 times**.
+4. **Bit-exact:** the row evaluator recomputes each sample's coordinate with the same expression as the scalar path and refreshes gradients on any lattice-cell change, so it degrades to scalar cost for high-frequency octaves and produces *bit-identical* worlds. `verifyRowExact()` asserts this in dev.
+5. **Zero allocation on the miss path:** `fields()`/`climate()` no longer return objects; they write into module-scoped row scratch.
+6. **Worker prewarm:** columns are filled by a worker pool directly into a `SharedArrayBuffer`. Workers never touch the `state` plane — they bump a shared publish counter, and the main thread does **one** `Atomics.load` per frame to make a whole batch of rows visible, then flips `state` itself. Result: `state` is single-writer, the per-column hot path stays a plain load, and no locks exist anywhere. Generation is a pure function of `(seed, px, pz)`, so a duplicated compute is harmless.
+
+### 10a — Cache: one buffer, zero fill, inlineable hot path
+
+```ts
+import * as C from '../core/constants';
+
+const W        = C.WORLD_SIZE;                 // 512
+const W_MASK   = W - 1;
+const W_SHIFT  = 9;                            // log2(512)
+const ROW      = C.CHUNK_SIZE;                 // 16 columns == one chunk row
+const ROW_MASK = ROW - 1;
+if ((W & W_MASK) !== 0 || (W % ROW) !== 0) throw new Error('WORLD_SIZE must be pow2 and chunk-aligned');
+
+const COL_EMPTY = 0, COL_READY = 1;
+
+// SoA planes over ONE buffer. Offsets: state 0 | biome n | height 2n | mount 4n
+// n is even and 4n is 4-byte aligned, so every typed-array view is legal.
+interface ColCache {
+  buf: ArrayBufferLike;
+  state:  Uint8Array;    // W*W   COL_EMPTY | COL_READY   (zero-init == empty: no fill)
+  biome:  Uint8Array;    // W*W
+  height: Int16Array;    // W*W
+  mount:  Float32Array;  // W*W
+  shared: boolean;
+}
+
+function allocColCache(): ColCache {
+  const n = W * W;                                   // 262 144
+  const bytes = n * 8;                               // 2 MiB, single allocation
+  const canShare = typeof SharedArrayBuffer !== 'undefined'
+                && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
+  const buf: ArrayBufferLike = canShare ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
+  return {
+    buf,
+    state:  new Uint8Array(buf, 0, n),
+    biome:  new Uint8Array(buf, n, n),
+    height: new Int16Array(buf, n * 2, n),
+    mount:  new Float32Array(buf, n * 4, n),
+    shared: canShare,
+  };
+}
+
+// ── inside class TerrainGenerator ────────────────────────────────────────────
+private cache: ColCache = allocColCache();   // eager: ~0.2ms once, never re-checked
+
+/** Unchanged contract: returns the cache index for (px, pz), data guaranteed present. */
+private computeColumn(px: number, pz: number): number {
+  const k = ((pz & W_MASK) << W_SHIFT) | (px & W_MASK);   // was pz * W + px
+  if (this.cache.state[k] !== COL_EMPTY) return k;        // hit: ~1ns, inlineable
+  this.fillColumnRow(px & W_MASK & ~ROW_MASK, pz & W_MASK); // miss: fill all 16
+  return k;
+}
+
+/** For any code that used the old `colHeight[k] === -1` sentinel. */
+isColumnReady(k: number): boolean { return this.cache.state[k] !== COL_EMPTY; }
+
+/** Payload first, validity last — that ordering is what makes the pool lock-free. */
+private publish(k: number, h: number, biome: number, mount: number): void {
+  const c = this.cache;
+  c.height[k] = h;
+  c.biome[k]  = biome;
+  c.mount[k]  = mount;
+  c.state[k]  = COL_READY;
+}
+
+/** reset(seed) only clears the 256 KB state plane — 8× less work than 3 fills. */
+reset(seed: number): void {
+  this.seed = seed;
+  this.reseedNoise(seed);
+  this.cache.state.fill(COL_EMPTY);
+  this.pool?.reset(seed, this.cache.buf);
+}
+```
+
+### 10b — Row-exact periodic Perlin (uniform + scattered)
+
+```ts
+// Point these at your EXISTING hash / gradient table so worlds stay identical.
+const fade = (t: number): number => t * t * t * (t * (t * 6 - 15) + 10);
+const wrapLat = (i: number, per: number): number => i - Math.floor(i / per) * per;
+
+// Per-octave transform: 0 = fbm (raw), 1 = ridged, 2 = billow.
+// Mirror your scalar ridged/billow EXACTLY here and nowhere else.
+const enum XF { RAW = 0, RIDGED = 1, BILLOW = 2 }
+function xform(v: number, m: XF): number {
+  return m === XF.RAW ? v : m === XF.BILLOW ? Math.abs(v) * 2 - 1 : 1 - Math.abs(v);
+}
+
+/**
+ * n samples at integer x = px0..px0+n-1 (scaled by `freq`), fixed z.
+ * Accumulates amp * xform(perlin) into `out`. Gradients are refetched only when
+ * the x lattice cell changes — once per 16 samples for the low-frequency octaves.
+ */
+function perlinRowUniform(
+  out: Float64Array, n: number, px0: number, pz: number,
+  freq: number, per: number, amp: number, m: XF, so: number,
+): void {
+  const z = pz * freq;
+  const zi = Math.floor(z), zf = z - zi, zfm1 = zf - 1, v = fade(zf);
+  const z0 = wrapLat(zi, per), z1 = wrapLat(zi + 1, per);
+
+  let cell = 0x7fffffff;
+  let gx00 = 0, gx10 = 0, gx01 = 0, gx11 = 0, c00 = 0, c10 = 0, c01 = 0, c11 = 0;
+
+  for (let i = 0; i < n; i++) {
+    const xs  = (px0 + i) * freq;          // same expression as the scalar path
+    const xi  = Math.floor(xs);
+    if (xi !== cell) {                     // cold: 4 hashes, amortised over the run
+      cell = xi;
+      const x0 = wrapLat(xi, per), x1 = wrapLat(xi + 1, per);
+      const h00 = hash2(x0, z0, so), h10 = hash2(x1, z0, so);
+      const h01 = hash2(x0, z1, so), h11 = hash2(x1, z1, so);
+      gx00 = gradX(h00); c00 = gradZ(h00) * zf;    // z half of each dot product
+      gx10 = gradX(h10); c10 = gradZ(h10) * zf;    // is constant across the row
+      gx01 = gradX(h01); c01 = gradZ(h01) * zfm1;
+      gx11 = gradX(h11); c11 = gradZ(h11) * zfm1;
+    }
+    const f = xs - xi, fm1 = f - 1, u = fade(f);

@@ -1,4 +1,0 @@
-Two version traps: the varying is `vMapUv` on r152+ and `vUv` before it, and tiles need a half-texel inset or they bleed into their neighbours at mip level > 0.
-
-
-
