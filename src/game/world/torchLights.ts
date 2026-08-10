@@ -77,19 +77,15 @@ export class TorchLights {
       return;
     }
 
-    // Only re-sort nearest torches every ~150ms instead of every frame
     this.sortT -= dt;
     if (this.sortT <= 0) {
       this.sortT = 0.15;
-      // Reuse array to avoid GC pressure
       this.nearBuf.length = 0;
       for (const t of this.torches.values()) {
         const d = t.pos.distanceToSquared(camera);
         this.nearBuf.push({ pos: t.pos, d });
       }
-      // Partial sort: only need top POOL_SIZE items
       if (this.nearBuf.length > POOL_SIZE) {
-        // Selection-based partial sort for top N
         for (let i = 0; i < Math.min(POOL_SIZE, this.nearBuf.length); i++) {
           let min = i;
           for (let j = i + 1; j < this.nearBuf.length; j++) {

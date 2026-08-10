@@ -750,15 +750,8 @@ export class GameEngine {
   }
 
   private async warmupRenderPipeline(): Promise<void> {
-    // Expose EVERY weapon rig under the camera and make it visible, so the
-    // compile + full-pipeline render below covers all program variants
-    // (base material, shadow depth material, post passes). Without this the
-    // first weapon swap compiles shaders mid-frame and freezes the game.
     const restoreWeapons = this.weapons?.beginWarmupAll?.() ?? (() => { });
 
-    // Spawn one live instance of every combat effect (tracer, casing, decal,
-    // muzzle flash, smoke, particles) so their shader programs also compile
-    // now instead of on the first shot / subsequent weapon swap.
     const effectColors = Object.values(DEFS).flatMap((def) => def.colors);
     this.fx?.beginWarmup?.(effectColors);
 
@@ -781,8 +774,6 @@ export class GameEngine {
 
       this.sky.update(0, this.camera.position);
 
-      // Two passes: the first compiles/uploads, the second confirms everything
-      // is resident so no work is deferred to the first real gameplay frame.
       for (let pass = 0; pass < 2; pass++) {
         this.renderer.shadowMap.needsUpdate = true;
         this.renderer.setRenderTarget(this.mainRT);
@@ -814,7 +805,6 @@ export class GameEngine {
       this.fx?.endWarmup?.();
     }
 
-    // Force a shadow refresh on the first real frame now that weapons are hidden.
     this.renderer.shadowMap.needsUpdate = true;
     await this.nextFrame();
   }
@@ -822,7 +812,6 @@ export class GameEngine {
   private captureSnapshot(dt: number): void {
     this.snapT -= dt;
     if (this.snapT > 0) return;
-    // Skip snapshot capture during heavy frames to avoid GPU readback stalls
     this.snapT = this.fps < 40 ? 0.5 : 0.25;
     const src = this.canvas;
     if (!src.width || !src.height) return;
@@ -1580,7 +1569,6 @@ export class GameEngine {
       this.textures.water.offset.y += dt * 0.006;
       animateConveyorTiles(this.textures, this.time);
     }
-    // Skip fluid sim on heavy frames to protect framerate during chunk loading
     if (this.locked && this.fps > 30) this.fluid.update(dt);
     if (this.locked) {
       let streamX = this.player.pos.x;
@@ -1589,15 +1577,12 @@ export class GameEngine {
         streamX = this.ship.pos.x + this.ship.vel.x * 0.7;
         streamZ = this.ship.pos.z + this.ship.vel.z * 0.7;
       }
-      // Adaptive budget: give more time on smooth frames, less on jank
-      // Use previous fps estimate to avoid feedback loops
       const frameBudget = this.fps > 50 ? 5.5 : this.fps > 35 ? 3.5 : 2.0;
       this.world.update(streamX, streamZ, frameBudget);
       this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
       if (this.ship && !this.piloting) this.ship.updateParked(dt);
     }
     if (this.locked && (!this.piloting || this.shipAltitude() < 26)) {
-      // Reduce pathfinding budget when fps is low to prevent further frame drops
       pathBudget.maxTokens = this.fps > 50 ? 5 : this.fps > 35 ? 3 : 1;
       this.enemies.update(dt);
     }
@@ -2621,7 +2606,7 @@ export class GameEngine {
   private getBiomeName(x: number, z: number): string {
     this.biomeCheckT--;
     if (this.biomeCheckT <= 0) {
-      this.biomeCheckT = 3; // Only re-compute every 3rd stats call
+      this.biomeCheckT = 3;
       this.cachedBiomeName = this.world.gen.biomeDefAt(Math.floor(x), Math.floor(z)).name;
     }
     return this.cachedBiomeName;

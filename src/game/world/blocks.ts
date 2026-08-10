@@ -269,12 +269,8 @@ const INS_TOPS = [TILES.inserter_top_n, TILES.inserter_top_e, TILES.inserter_top
 const machineDef = (name: string, top: number, side: number, hardness: number, colors: number[], ghost = false): BlockDef => {
   const d = def({ name, top, side, bottom: side, icon: top, hardness, sound: 'stone', colors });
   if (ghost) {
-    // Ghost machines occupy their cell (so they can be targeted, mined and
-    // cannot be built over) but render NO cube and are not solid: the machine
-    // mesh sits directly on top of whatever block is underneath.
     d.solid = false;
     d.opaque = false;
-    // Break instantly, exactly like tall grass / flowers / torches.
     d.hardness = 0.05;
   }
   return d;

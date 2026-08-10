@@ -206,8 +206,6 @@ export class InserterManager {
     const dir = inserterDir(id) ?? [0, 0];
     const rest = InserterManager.angleFor(-dir[0], -dir[1]);
     const g = arm.group;
-    // The inserter has no cube of its own: its cell sits directly on the block
-    // below, so the machine base is at arm.y (the top face of that block).
     g.position.set(ix + 0.5, arm.y, iz + 0.5);
 
     arm.t += dt;
@@ -218,7 +216,6 @@ export class InserterManager {
         arm.swingAngle += (rest - arm.swingAngle) * Math.min(1, 14 * dt);
         tiltTarget = -0.18;
         if (arm.t > 0.12) {
-          // Items rest on the block below the machine cell, i.e. at arm.y.
           const taken = this.drops.takeAt(ix + 0.5 - dir[0], arm.y, iz + 0.5 - dir[1], 0.52);
           if (taken) {
             arm.heldId = taken.blockId;

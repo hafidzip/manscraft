@@ -486,9 +486,7 @@ export class World {
 
     let now = t0;
 
-    // Process dirty (re-mesh) queue using index cursor instead of shift()
     while (this.dirtyHead < this.dirtyQueue.length) {
-      // Budget check BEFORE doing work (except first item gets a pass)
       if (this.dirtyHead > 0 && now - t0 + this.meshCost > budgetMs) break;
       const c = this.dirtyQueue[this.dirtyHead++];
       if (!this.dirtySet.has(c)) continue;
@@ -497,7 +495,6 @@ export class World {
       now = performance.now();
       this.meshCost = this.meshCost * 0.6 + (now - s) * 0.4;
     }
-    // Compact when fully drained
     if (this.dirtyHead >= this.dirtyQueue.length) {
       this.dirtyQueue.length = 0;
       this.dirtyHead = 0;
@@ -515,9 +512,7 @@ export class World {
       this.lastCenter = centerKey;
     }
 
-    // Process load queue using index cursor instead of shift()
     while (this.loadHead < this.loadQueue.length) {
-      // Budget check BEFORE doing work (except first item gets a pass)
       if (processed > 0 && now - t0 + this.loadCost > budgetMs) break;
       const item = this.loadQueue[this.loadHead++];
       const s = now;
@@ -529,7 +524,6 @@ export class World {
       now = performance.now();
       this.loadCost = this.loadCost * 0.6 + (now - s) * 0.4;
     }
-    // Compact when fully drained
     if (this.loadHead >= this.loadQueue.length) {
       this.loadQueue.length = 0;
       this.loadHead = 0;

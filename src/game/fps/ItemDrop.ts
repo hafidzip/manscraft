@@ -127,13 +127,6 @@ export class ItemDropManager {
     return this.world.solid(Math.floor(x), Math.floor(y), Math.floor(z));
   }
 
-  /**
-   * Item-vs-world collision. Real solid cubes block, and so do ghost machine
-   * cells (inserter / laser miner): they have no cube of their own but items
-   * must NOT be able to slide inside them, otherwise a conveyor pushes drops
-   * into the inserter's own cell and the inserter can never pick them up
-   * (it grabs from the cell BEHIND itself, not from its own cell).
-   */
   private blocksItemAt(x: number, y: number, z: number): boolean {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (this.world.solid(bx, by, bz)) return true;
@@ -192,9 +185,6 @@ export class ItemDropManager {
         }
       }
 
-      // If an item is already overlapping a blocker (e.g. a machine was just
-      // placed on top of it), let it move freely so it can escape instead of
-      // being trapped forever.
       const stuck = this.blocked(p.x, p.y, p.z);
 
       const nx = p.x + item.vel.x * step;
