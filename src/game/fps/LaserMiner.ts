@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { B, DEFS, isWaterId, laserMinerDir, isLaserMiner } from '../world/blocks';
+import { laserMinerDir, isLaserMiner } from '../world/blocks';
 import { wrapBlock, minImageF } from '../core/constants';
 import { MK_LASER, type MachineRecord } from '../world/machineRegistry';
 import type { MachineAgent, MachineView } from './machineScheduler';
+import { acquireFrontTarget } from '../factory/machineProcessing';
 
 type WorldView = {
   get(x: number, y: number, z: number): number;
@@ -156,8 +157,8 @@ interface Turret {
 const SCAN_RADIUS = 26;
 const PRUNE_RADIUS = 42;
 const MAX_TURRETS = 12;
-const RANGE = 6;
 const MINE_TIME = 0.85;
+const REACQUIRE_CD = 0.02;
 
 const tmpTip = new THREE.Vector3();
 const tmpTarget = new THREE.Vector3();
@@ -295,68 +296,13 @@ export class LaserMinerManager implements MachineAgent {
 
   private acquire(t: Turret): void {
     const [fx, fz] = t.dir;
-    const lx = -fz, lz = fx;
-    let best: { ox: number; oy: number; oz: number } | null = null;
-    let bestScore = Infinity;
-    for (let step = 1; step <= RANGE; step++) {
-      const spread = Math.min(2, Math.max(1, Math.round((step - 1) * 0.5)));
-      for (let lat = -spread; lat <= spread; lat++) {
-        for (let vert = -spread; vert <= spread; vert++) {
-          const ox = fx * step + lx * lat;
-          const oz = fz * step + lz * lat;
-          const oy = vert;
-          const id = this.vox(wrapBlock(t.wx + ox), t.y + oy, wrapBlock(t.wz + oz));
-          if (id < 0 || !this.hooks.mineable(id)) continue;
-          if (!this.reachable(t, ox, oy, oz, lx, lz)) continue;
-          const score = step * 10 + Math.abs(lat) * 2 + Math.abs(vert) * 2;
-          if (score < bestScore) { bestScore = score; best = { ox, oy, oz }; }
-        }
-      }
-    }
-    t.target = best;
+    const found = acquireFrontTarget(
+      { getBlock: (x, y, z) => this.vox(x, y, z) },
+      t.wx, t.y, t.wz, fx, fz,
+      (id) => this.hooks.mineable(id),
+    );
+    t.target = found ? { ox: fx, oy: 0, oz: fz } : null;
     t.charge = 0;
-  }
-
-  private reachable(t: Turret, ox: number, oy: number, oz: number, lx: number, lz: number): boolean {
-    const gx = wrapBlock(t.wx + ox);
-    const gy = t.y + oy;
-    const gz = wrapBlock(t.wz + oz);
-    const tgtX = t.wx + ox + 0.5;
-    const tgtY = t.y + oy + 0.5;
-    const tgtZ = t.wz + oz + 0.5;
-    for (let a = -1; a <= 1; a++) {
-      for (let b = -1; b <= 1; b++) {
-        const sx = t.wx + 0.5 + lx * a * 0.45;
-        const sy = t.y + 0.24 + b * 0.2;
-        const sz = t.wz + 0.5 + lz * a * 0.45;
-        if (this.clearPath(sx, sy, sz, tgtX, tgtY, tgtZ, gx, gy, gz)) return true;
-      }
-    }
-    return false;
-  }
-
-  private clearPath(
-    sx: number, sy: number, sz: number,
-    tx: number, ty: number, tz: number,
-    gx: number, gy: number, gz: number,
-  ): boolean {
-    const dx = tx - sx, dy = ty - sy, dz = tz - sz;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < 0.01) return true;
-    const steps = Math.ceil(dist * 4);
-    for (let i = 1; i < steps; i++) {
-      const frac = i / steps;
-      const bx = wrapBlock(Math.floor(sx + dx * frac));
-      const by = Math.floor(sy + dy * frac);
-      const bz = wrapBlock(Math.floor(sz + dz * frac));
-      if (bx === gx && by === gy && bz === gz) continue;
-      const id = this.vox(bx, by, bz);
-      if (id < 0) continue;
-      if (id === B.AIR || isWaterId(id)) continue;
-      if (!DEFS[id]?.solid) continue;
-      return false;
-    }
-    return true;
   }
 
   update(dt: number, playerPos: THREE.Vector3): void {
@@ -414,9 +360,6 @@ export class LaserMinerManager implements MachineAgent {
       const id = this.vox(
         wrapBlock(t.wx + t.target.ox), t.y + t.target.oy, wrapBlock(t.wz + t.target.oz));
       if (id < 0 || !this.hooks.mineable(id)) { t.target = null; t.charge = 0; }
-      else if (!this.reachable(t, t.target.ox, t.target.oy, t.target.oz, -t.dir[1], t.dir[0])) {
-        t.target = null; t.charge = 0;
-      }
     }
     if (!t.target) {
       t.scanCd -= dt;
@@ -466,7 +409,7 @@ export class LaserMinerManager implements MachineAgent {
         this.hooks.mine(wx, wy, wz, tmpDrop);
         t.target = null;
         t.charge = 0;
-        t.scanCd = 0.05;
+        t.scanCd = REACQUIRE_CD;
       }
     } else {
       const yawRest = LaserMinerManager.yawFor(t.dir[0], t.dir[1]) + Math.sin(time * 0.8) * 0.35;

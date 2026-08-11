@@ -42,6 +42,7 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.GLASS]: 'Glass',
   [B.FURNACE]: 'Furnace',
   [B.COAL]: 'Coal',
+  [B.RAW_COAL_ORE]: 'Coal Ore',
   [B.STICK]: 'Stick',
   [B.TORCH]: 'Torch',
   [B.CONVEYOR]: 'Conveyor Belt',

@@ -9,6 +9,12 @@ import type { MachineAgent, MachineView } from './machineScheduler';
 
 type WorldView = { get(x: number, y: number, z: number): number };
 
+export interface InserterAutomation {
+  tryInsert(x: number, y: number, z: number, itemId: number): boolean;
+  emitAbove(x: number, y: number, z: number, itemId: number, count?: number): void;
+  isMachine(x: number, y: number, z: number): boolean;
+}
+
 const pillarGeo = new THREE.BoxGeometry(0.15, 0.5, 0.15);
 pillarGeo.translate(0, 0.25, 0);
 const capGeo = new THREE.BoxGeometry(0.2, 0.1, 0.2);
@@ -72,8 +78,13 @@ export class InserterManager implements MachineAgent {
     private scene: THREE.Scene,
     private world: WorldView,
     private drops: ItemDropManager,
-    private audio: AudioSynth
+    private audio: AudioSynth,
+    private automation: InserterAutomation | null = null,
   ) {}
+
+  setAutomation(automation: InserterAutomation | null): void {
+    this.automation = automation;
+  }
 
   private cubeGeo(blockId: number): THREE.BufferGeometry {
     let g = this.cubeGeoCache.get(blockId);
@@ -299,12 +310,25 @@ export class InserterManager implements MachineAgent {
         tiltTarget = -0.4;
         if (arm.t >= RELEASE_T) {
           if (arm.itemCube) {
-            const hx = ix + 0.5 + dir[0] * 0.95;
-            const hz = iz + 0.5 + dir[1] * 0.95;
-            this.drops.spawn(arm.heldId, new THREE.Vector3(hx, arm.y + 1.22, hz),
-              new THREE.Vector3(dir[0] * 0.6, -1.2, dir[1] * 0.6));
+            const fx = wrapBlock(arm.wx + dir[0]);
+            const fz = wrapBlock(arm.wz + dir[1]);
+            const held = arm.heldId;
+            let transferred = false;
+            if (this.automation?.isMachine(fx, arm.y, fz)) {
+              if (!this.automation.tryInsert(fx, arm.y, fz, held)) {
+                this.automation.emitAbove(fx, arm.y, fz, held, 1);
+              }
+              transferred = true;
+            }
+            if (!transferred) {
+              const hx = ix + 0.5 + dir[0] * 0.95;
+              const hz = iz + 0.5 + dir[1] * 0.95;
+              this.drops.spawn(held, new THREE.Vector3(hx, arm.y + 1.22, hz),
+                new THREE.Vector3(dir[0] * 0.6, -1.2, dir[1] * 0.6));
+            }
             arm.tilt.remove(arm.itemCube);
             arm.itemCube = null;
+            arm.heldId = 0;
           }
           arm.state = 'return';
           arm.t = 0;

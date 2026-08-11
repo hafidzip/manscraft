@@ -3,6 +3,9 @@ import { CHUNK_SIZE as S, WORLD_HEIGHT as H, wrapBlock, wrapChunk } from '../cor
 import { packChunk, cellX, cellY, cellZ } from '../core/cellKey';
 import { B } from '../world/blocks';
 import type { FurnaceState } from '../crafting/smelting';
+import {
+  sanitizeCraftingState, machineKey, parseMachineKey, type CraftingTableState,
+} from '../factory/machineProcessing';
 
 export const DELTA_MAGIC = 0x4d435744;
 export const DELTA_VERSION = 1;
@@ -239,6 +242,48 @@ export function deserializeFurnaces(a: FurnaceTuple[] | null | undefined): Map<s
     } as FurnaceState);
   }
   return m;
+}
+
+export type CraftingTuple = [number, number, number, string | null, ...number[]];
+
+export function serializeCraftingTables(
+  tables: Map<string, CraftingTableState>,
+): CraftingTuple[] {
+  const out: CraftingTuple[] = [];
+  for (const [key, state] of tables) {
+    const at = parseMachineKey(key);
+    if (!at) continue;
+    const pairs: number[] = [];
+    for (const rawId of Object.keys(state.buffered)) {
+      const id = Number(rawId);
+      const count = state.buffered[id] ?? 0;
+      if (id > 0 && count > 0) pairs.push(id, count);
+    }
+    if (!state.recipeId && pairs.length === 0) continue;
+    out.push([at[0], at[1], at[2], state.recipeId, ...pairs]);
+  }
+  return out;
+}
+
+export function deserializeCraftingTables(
+  tuples: CraftingTuple[] | null | undefined,
+): Map<string, CraftingTableState> {
+  const out = new Map<string, CraftingTableState>();
+  if (!Array.isArray(tuples)) return out;
+  for (const tuple of tuples) {
+    if (!Array.isArray(tuple) || tuple.length < 4) continue;
+    const x = Number(tuple[0]), y = Number(tuple[1]), z = Number(tuple[2]);
+    if (![x, y, z].every(Number.isFinite)) continue;
+    const buffered: Record<number, number> = {};
+    for (let i = 4; i + 1 < tuple.length; i += 2) {
+      const id = Math.floor(Number(tuple[i]));
+      const count = Math.floor(Number(tuple[i + 1]));
+      if (id > 0 && count > 0) buffered[id] = (buffered[id] ?? 0) + count;
+    }
+    const recipeId = typeof tuple[3] === 'string' ? tuple[3] : null;
+    out.set(machineKey(x, y, z), sanitizeCraftingState({ recipeId, buffered }));
+  }
+  return out;
 }
 
 export const editCellX = cellX;

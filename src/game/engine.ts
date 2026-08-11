@@ -2,9 +2,9 @@
 import * as THREE from 'three';
 import * as C from './core/constants';
 import { createTextures, tileUV, animateConveyorTiles, type TextureSet } from './core/textures';
-import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter, isLaserMiner } from './world/blocks';
+import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter, isLaserMiner, isOreBlock } from './world/blocks';
 import { World, type ChunkMaterials } from './world/world';
-import { InserterManager } from './fps/Inserter';
+import { InserterManager, type InserterAutomation } from './fps/Inserter';
 import { LaserMinerManager } from './fps/LaserMiner';
 import { TurretManager } from './fps/Turret';
 import { FlowField } from './fps/FlowField';
@@ -47,9 +47,14 @@ import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
 import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
 import { TorchLights } from './world/torchLights';
 import {
-  newFurnace, tickFurnace, furnaceIdle, furnaceKey, isFuel, smeltResult, SMELT_TIME,
-  type FurnaceState,
+  newFurnace, tickFurnace, furnaceIdle, isFuel, smeltResult, SMELT_TIME,
+  drainFurnaceOutput, newFurnaceTickResult, type FurnaceState,
 } from './crafting/smelting';
+import {
+  MachineKind, feedMachine, machineKey, parseMachineKey, spillCrafting, spillFurnace,
+  setCraftingBlueprint, harvestOutcome, newCraftingTable, craftingTableIdle,
+  type CraftingTableState, type MachineItemSink,
+} from './factory/machineProcessing';
 import { ItemDropManager } from './fps/ItemDrop';
 import { buildExtrudedItem, paintDrumstick, pixelTexture } from './fps/textures';
 import type { BodyRig } from './fps/models';
@@ -126,7 +131,10 @@ export class GameEngine {
   private inventoryOpen = false;
   private craftingOpen = false;
   private furnaces = new Map<string, FurnaceState>();
+  private craftingTables = new Map<string, CraftingTableState>();
   private openFurnaceKey: string | null = null;
+  private openCraftingKey: string | null = null;
+  private readonly furnaceTickOut = newFurnaceTickResult();
   private sim: PlanetFactorySim | null = null;
   private persistDeltas: WorldDeltaStore | null = null;
   private persistLedger: ItemLedger | null = null;
@@ -143,6 +151,30 @@ export class GameEngine {
   private mineCharge = 0;
   private switchAt = 0;
   private itemDrops!: ItemDropManager;
+
+  private readonly machineSink: MachineItemSink = {
+    emitAbove: (x, y, z, itemId, count = 1) => {
+      const pos = new THREE.Vector3(x + 0.5, y + 1.15, z + 0.5);
+      const vel = new THREE.Vector3(0, 0.2, 0);
+      for (let i = 0; i < count; i++) this.itemDrops.spawn(itemId, pos, vel);
+    },
+  };
+
+  private readonly inserterAutomation: InserterAutomation = {
+    isMachine: (x, y, z) => this.machineKindAt(x, y, z) !== MachineKind.None,
+    emitAbove: (x, y, z, itemId, count = 1) =>
+      this.machineSink.emitAbove(x, y, z, itemId, count),
+    tryInsert: (x, y, z, itemId) => {
+      const kind = this.machineKindAt(x, y, z);
+      if (kind === MachineKind.None) return false;
+      const state = kind === MachineKind.Furnace
+        ? this.furnaceStateAt(x, y, z)
+        : this.craftingStateAt(x, y, z);
+      const accepted = feedMachine(kind, state, x, y, z, itemId, this.machineSink);
+      if (accepted) this.events.onStats(this.buildStats());
+      return accepted;
+    },
+  };
   private heldFood!: THREE.Group;
   private droppedGun: { mesh: THREE.Object3D; vel: THREE.Vector3; spin: THREE.Vector3; settled: boolean } | null = null;
   private targets: Target[] = [];
@@ -515,6 +547,7 @@ export class GameEngine {
     this.persistDeltas = claimed.deltas;
     this.persistLedger = claimed.ledger;
     this.furnaces = claimed.sim.furnaces;
+    this.craftingTables = claimed.sim.craftingTables;
 
     this.world = new World(seed, mats, claimed.deltas);
     claimed.sim.attachToLive(this.world);
@@ -723,6 +756,7 @@ export class GameEngine {
       this.syncHotbarMode();
     }, { bus: this.changeBus, instanced: true, ledger: this.persistLedger ?? undefined });
     this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
+    this.inserters.setAutomation(this.inserterAutomation);
     this.laserMiners = new LaserMinerManager(this.scene, this.world, {
       mineable: (id) => this.laserMinerCanMine(id),
       mine: (x, y, z, dropPos) => this.laserMinerMine(x, y, z, dropPos),
@@ -971,6 +1005,7 @@ export class GameEngine {
     if (id === B.AIR || id < 0) return false;
     if (isWaterId(id)) return false;
     if (isConveyor(id) || isInserter(id) || isLaserMiner(id) || id === B.TURRET) return false;
+    if (isOreBlock(id)) return TO_FPS[id] !== undefined;
     const d = DEFS[id];
     if (!d || !d.solid || !isFinite(d.hardness)) return false;
     return TO_FPS[id] !== undefined;
@@ -980,10 +1015,14 @@ export class GameEngine {
     const id = this.world.getBlockRaw(x, y, z);
     if (id < 0 || !this.laserMinerCanMine(id)) return;
     const d = DEFS[id];
-    this.world.setBlock(x, y, z, B.AIR);
-    if (id === B.TORCH) this.torchLights.remove(x, y, z);
-    this.detachTorchesSupportedBy(x, y, z, true);
-    this.removeFloatingPlantsAbove(x, y, z);
+    const outcome = harvestOutcome(id, TO_FPS);
+    if (!outcome) return;
+    if (outcome.destroy) {
+      if (!this.world.destroyBlockAt(x, y, z)) return;
+      if (id === B.TORCH) this.torchLights.remove(x, y, z);
+      this.detachTorchesSupportedBy(x, y, z, true);
+      this.removeFloatingPlantsAbove(x, y, z);
+    }
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 20, 3.2);
 
     const from = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
@@ -997,14 +1036,13 @@ export class GameEngine {
       );
     }
 
-    const fpsId = TO_FPS[id];
-    if (fpsId !== undefined) {
-      this.itemDrops.spawn(fpsId, dropPos.clone(), new THREE.Vector3(
-        (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4));
-    }
+    this.itemDrops.spawn(outcome.itemId, dropPos.clone(), new THREE.Vector3(
+      (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4));
     this.sound.playBreak(d.sound);
     this.blocksMined++;
-    this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    if (outcome.destroy) {
+      this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    }
   }
 
   private removeFloatingPlantsAbove(x: number, y: number, z: number): void {
@@ -1107,9 +1145,36 @@ export class GameEngine {
     return this.openFurnaceKey ? this.furnaces.get(this.openFurnaceKey) ?? null : null;
   }
 
+  private machineKindAt(x: number, y: number, z: number): MachineKind {
+    const id = this.world.getBlockRaw(x, y, z);
+    if (id === B.FURNACE || id === B.FURNACE_LIT) return MachineKind.Furnace;
+    if (id === B.CRAFTING_TABLE) return MachineKind.CraftingTable;
+    return MachineKind.None;
+  }
+
+  private furnaceStateAt(x: number, y: number, z: number): FurnaceState {
+    const key = machineKey(x, y, z);
+    let state = this.furnaces.get(key);
+    if (!state) {
+      state = newFurnace();
+      this.furnaces.set(key, state);
+    }
+    return state;
+  }
+
+  private craftingStateAt(x: number, y: number, z: number): CraftingTableState {
+    const key = machineKey(x, y, z);
+    let state = this.craftingTables.get(key);
+    if (!state) {
+      state = newCraftingTable();
+      this.craftingTables.set(key, state);
+    }
+    return state;
+  }
+
   private openFurnaceAt(x: number, y: number, z: number): void {
-    const k = furnaceKey(x, y, z);
-    if (!this.furnaces.has(k)) this.furnaces.set(k, newFurnace());
+    const k = machineKey(x, y, z);
+    this.furnaceStateAt(x, y, z);
     this.openFurnaceKey = k;
     this.craftingOpen = false;
     this.inventoryOpen = false;
@@ -1321,19 +1386,36 @@ export class GameEngine {
   }
 
   private updateFurnaces(dt: number): void {
-    if (this.furnaces.size === 0) return;
     for (const [k, st] of this.furnaces) {
+      const at = parseMachineKey(k);
+      if (!at) {
+        this.furnaces.delete(k);
+        continue;
+      }
+      const [x, y, z] = at;
+      const legacy = drainFurnaceOutput(st);
+      if (legacy) this.machineSink.emitAbove(x, y, z, legacy.id, legacy.count);
       const wasLit = st.burn > 0;
-      tickFurnace(st, dt);
+      const out = this.furnaceTickOut;
+      tickFurnace(st, dt, out);
+      if (out.producedCount > 0) {
+        this.machineSink.emitAbove(x, y, z, out.producedId, out.producedCount);
+      }
       const lit = st.burn > 0;
       if (lit !== wasLit) {
-        const [x, y, z] = k.split(',').map(Number);
         const cur = this.world.getBlockRaw(x, y, z);
         if (cur === B.FURNACE || cur === B.FURNACE_LIT) {
           this.world.setBlock(x, y, z, lit ? B.FURNACE_LIT : B.FURNACE);
         }
       }
       if (furnaceIdle(st) && k !== this.openFurnaceKey) this.furnaces.delete(k);
+    }
+    this.updateCraftingTableGc();
+  }
+
+  private updateCraftingTableGc(): void {
+    for (const [key, state] of this.craftingTables) {
+      if (key !== this.openCraftingKey && craftingTableIdle(state)) this.craftingTables.delete(key);
     }
   }
 
@@ -1349,7 +1431,11 @@ export class GameEngine {
     this.events.onStats(this.buildStats());
   }
 
-  openCraftingTable(): void {
+  openCraftingTable(x?: number, y?: number, z?: number): void {
+    this.openCraftingKey = x === undefined || y === undefined || z === undefined
+      ? null
+      : machineKey(x, y, z);
+    if (this.openCraftingKey) this.craftingStateAt(x!, y!, z!);
     this.craftingOpen = true;
     this.inventoryOpen = false;
     this.inventory.setCraftSize(3);
@@ -1357,8 +1443,27 @@ export class GameEngine {
     this.events.onStats(this.buildStats());
   }
 
+  get openCraftingState(): CraftingTableState | null {
+    return this.openCraftingKey ? this.craftingTables.get(this.openCraftingKey) ?? null : null;
+  }
+
+  get openCraftingCoords(): [number, number, number] | null {
+    return this.openCraftingKey ? parseMachineKey(this.openCraftingKey) : null;
+  }
+
+  selectCraftingBlueprint(recipeId: string | null): void {
+    const state = this.openCraftingState;
+    const at = this.openCraftingCoords;
+    if (!state || !at) return;
+    for (const item of setCraftingBlueprint(state, recipeId)) {
+      this.machineSink.emitAbove(at[0], at[1], at[2], item.id, item.count);
+    }
+    this.events.onStats(this.buildStats());
+  }
+
   closeCraftingTable(): void {
     this.craftingOpen = false;
+    this.openCraftingKey = null;
     const inv = this.inventory;
     for (let i = 0; i < inv.craft.length; i++) {
       const it = inv.craft[i];
@@ -1367,6 +1472,34 @@ export class GameEngine {
     inv.setCraftSize(2);
     this.requestLock();
     this.events.onStats(this.buildStats());
+  }
+
+  private spillMachineOnBreak(x: number, y: number, z: number, id: number): void {
+    const key = machineKey(x, y, z);
+    if (id === B.FURNACE || id === B.FURNACE_LIT) {
+      const state = this.furnaces.get(key);
+      if (state) {
+        for (const item of spillFurnace(state)) {
+          this.machineSink.emitAbove(x, y, z, item.id, item.count);
+        }
+        this.furnaces.delete(key);
+      }
+      if (this.openFurnaceKey === key) this.openFurnaceKey = null;
+      return;
+    }
+    if (id === B.CRAFTING_TABLE) {
+      const state = this.craftingTables.get(key);
+      if (state) {
+        for (const item of spillCrafting(state)) {
+          this.machineSink.emitAbove(x, y, z, item.id, item.count);
+        }
+        this.craftingTables.delete(key);
+      }
+      if (this.openCraftingKey === key) {
+        this.openCraftingKey = null;
+        this.craftingOpen = false;
+      }
+    }
   }
 
   toggleEnemies(enabled?: boolean): void {
@@ -1577,7 +1710,7 @@ export class GameEngine {
         this.aimDir.x, this.aimDir.y, this.aimDir.z, 5);
       if (hit && hit.id === B.CRAFTING_TABLE) {
         this.mouse.right = false;
-        this.openCraftingTable();
+        this.openCraftingTable(hit.x, hit.y, hit.z);
         return;
       }
       if (hit && (hit.id === B.FURNACE || hit.id === B.FURNACE_LIT)) {
@@ -2283,7 +2416,21 @@ export class GameEngine {
     if (this.breakT < 1) return;
 
     const { x, y, z, id } = this.target;
-    this.world.setBlock(x, y, z, B.AIR);
+    const outcome = harvestOutcome(id, TO_FPS);
+    if (!outcome) return;
+
+    if (!outcome.destroy) {
+      this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 14, 2.4);
+      this.sound.playBreak(d.sound);
+      this.itemDrops.spawn(outcome.itemId, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      this.blocksMined++;
+      this.breakT = 0;
+      this.mineCharge = 0;
+      this.crack.visible = false;
+      return;
+    }
+
+    if (!this.world.destroyBlockAt(x, y, z)) return;
     if (id === B.TORCH) this.torchLights.remove(x, y, z);
     this.detachTorchesSupportedBy(x, y, z, true);
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
@@ -2293,20 +2440,7 @@ export class GameEngine {
 
     this.removeFloatingPlantsAbove(x, y, z);
 
-    if (id === B.FURNACE || id === B.FURNACE_LIT) {
-      const k = furnaceKey(x, y, z);
-      const st = this.furnaces.get(k);
-      if (st) {
-        const drop = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
-        for (const it of [st.input, st.fuel, st.output]) {
-          if (it && it.kind === 'block') {
-            for (let n = 0; n < it.count; n++) this.itemDrops.spawn(it.blockId, drop);
-          }
-        }
-        this.furnaces.delete(k);
-        if (this.openFurnaceKey === k) this.closeFurnace();
-      }
-    }
+    this.spillMachineOnBreak(x, y, z, id);
 
     this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
     this.breakT = 0;
@@ -2728,6 +2862,7 @@ export class GameEngine {
     const MAX_BLAST_DROPS = 14;
     let drops = 0;
     const destroyed = this.world.destroySphere(pos, 2.9, (x, y, z, id) => {
+      this.spillMachineOnBreak(x, y, z, id);
       this.removeFloatingPlantsAbove(x, y, z);
       if (id === B.TORCH) this.torchLights.remove(x, y, z);
       this.detachTorchesSupportedBy(x, y, z, false);
@@ -2885,6 +3020,7 @@ export class GameEngine {
       ledger: this.persistLedger,
       sim: this.sim,
       furnaces: this.furnaces,
+      craftingTables: this.craftingTables,
       playerState: () => ({ x: p.x, y: p.y, z: p.z, yaw: this.player.yaw }),
     });
   }

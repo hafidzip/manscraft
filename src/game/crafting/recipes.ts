@@ -92,6 +92,11 @@ export function recipeIngredients(r: Recipe): Ingredient[] {
   return r.shapeless ?? [];
 }
 
+export const RECIPE_IDS: readonly string[] = RECIPES.map((r) => r.id);
+export const AUTOMATABLE_RECIPE_IDS: readonly string[] = RECIPES
+  .filter((r) => r.output.kind === 'block')
+  .map((r) => r.id);
+
 
 const sameIngredient = (a: Ingredient, b: Ingredient) =>
   a.kind === b.kind && a.blockId === b.blockId;

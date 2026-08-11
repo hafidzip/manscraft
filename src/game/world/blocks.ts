@@ -300,6 +300,20 @@ export const isConveyor = (id: number): boolean => CONV_DIR.has(id);
 export const isInserter = (id: number): boolean => INS_DIR.has(id);
 export const isLaserMiner = (id: number): boolean => LM_DIR.has(id);
 export const isTurret = (id: number): boolean => id === B.TURRET;
+
+export const ORE_BLOCK_IDS = [
+  B.ORE_RUBY, B.ORE_AMBER, B.ORE_LUMINESCENCE, B.ORE_DIAMOND,
+  B.ORE_GOLD, B.ORE_SILVER, B.ORE_JADE, B.ORE_EMERALD, B.COAL_ORE,
+] as const;
+const ORE_SET = new Set<number>(ORE_BLOCK_IDS);
+
+export const isOreBlock = (id: number): boolean => ORE_SET.has(id);
+export const isIndestructible = (id: number): boolean => id === B.BEDROCK || isOreBlock(id);
+export const oreHarvestTime = (id: number): number => {
+  const h = DEFS[id]?.hardness ?? 1.6;
+  return Number.isFinite(h) && h > 0 ? h : 1.6;
+};
+
 export const isMachine = (id: number): boolean =>
   CONV_DIR.has(id) || INS_DIR.has(id) || LM_DIR.has(id) || id === B.TURRET;
 export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;

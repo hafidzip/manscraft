@@ -44,6 +44,7 @@ export const BLOCK_SELL_PRICES: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 1, [B.STONE]: 1, [B.SAND]: 1, [B.SANDSTONE]: 2,
   [B.LOG]: 1, [B.LEAVES]: 0, [B.CACTUS]: 1, [B.PLANK]: 1, [B.ORE]: 3,
   [B.COBBLE]: 1, [B.WOOL]: 1, [B.CRAFTING_TABLE]: 15, [B.GLASS]: 2, [B.FURNACE]: 18,
+  [B.RAW_COAL_ORE]: 1, [B.COAL]: 2,
   50: 4, 51: 3, 52: 3, 53: 5, 54: 3, 55: 2, 56: 3, 57: 4,
 };
 

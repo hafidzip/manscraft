@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronUp, Hammer, Package, ArrowRight } from 'lucide-react';
 import type { GameEngine } from '../../game/engine';
 import { RECIPES, RECIPE_GROUPS, recipeIngredients, type Recipe, type RecipeGroupId } from '../../game/crafting/recipes';
@@ -9,16 +9,28 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
   refreshInv: () => void;
   selectedSlot: number;
 }) {
+  const table = game()?.openCraftingState ?? null;
+  const tableKey = game()?.openCraftingCoords?.join(',') ?? '';
   const [bookGroup, setBookGroup] = useState<RecipeGroupId>('building');
-  const [bookSel, setBookSel] = useState<string | null>(null);
+  const [bookSel, setBookSel] = useState<string | null>(table?.recipeId ?? null);
   const [bookFlash, setBookFlash] = useState(0);
+
+  useEffect(() => {
+    setBookSel(game()?.openCraftingState?.recipeId ?? null);
+  }, [tableKey]);
 
   const inv = game()?.inventory;
   if (!inv) return null;
 
   const activeGroup = RECIPE_GROUPS.find((g) => g.id === bookGroup) ?? RECIPE_GROUPS[0];
   const list = RECIPES.filter((r) => r.group === activeGroup.id);
-  const sel: Recipe | null = list.find((r) => r.id === bookSel) ?? list[0] ?? null;
+  const sel: Recipe | null = list.find((r) => r.id === bookSel) ?? null;
+
+  const pickBlueprint = (id: string) => {
+    setBookSel(id);
+    game()?.selectCraftingBlueprint(id);
+    refreshInv();
+  };
 
   const countOf = (id: number) => inv.countBlock(id);
   const needMap = new Map<number, number>();
@@ -74,7 +86,7 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
               <button
                 key={r.id}
                 title={r.name}
-                onClick={() => setBookSel(r.id)}
+                onClick={() => pickBlueprint(r.id)}
                 className={`mc-book-rail w-[50px] h-[50px] flex items-center justify-center
                   ${sel?.id === r.id ? 'mc-book-rail-active mc-book-picked' : ''}`}
               >
@@ -103,7 +115,7 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
                 for (const [id, n] of reqMap) can = Math.min(can, Math.floor(countOf(id) / n));
                 const outId = (r.output as { blockId?: number }).blockId ?? 1;
                 return (
-                  <button key={r.id} title={r.name} onClick={() => setBookSel(r.id)}
+                  <button key={r.id} title={r.name} onClick={() => pickBlueprint(r.id)}
                     className={`mc-book-slot mc-book-slot-hoverable w-[46px] h-[46px] flex items-center justify-center cursor-pointer
                       ${sel?.id === r.id ? 'mc-book-picked' : ''} ${can <= 0 ? 'opacity-45' : ''}`}>
                     <BlockIcon blockId={outId} size={28} />
@@ -163,6 +175,11 @@ export function CraftingOverlay({ game, refreshInv, selectedSlot }: {
                         <span className={`px-font text-[7px] ${ok ? 'text-[#6dc24a]' : 'text-[#ff5347]'}`}>
                           {have}/{n}
                         </span>
+                        {table && (
+                          <span className="px-font text-[7px] text-[#8ab4ff]">
+                            A:{table.buffered[id] ?? 0}/{n}
+                          </span>
+                        )}
                       </div>
                     );
                   })}

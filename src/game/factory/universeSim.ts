@@ -2,6 +2,7 @@ import { PlanetFactorySim, MAX_BACKLOG, type TerrainLike } from './factorySim';
 import { ItemLedger } from './itemLedger';
 import { WorldDeltaStore } from '../persist/worldDelta';
 import { hub, type PlanetSave } from '../persist/planetStore';
+import { runMachineProcessingSelfTests } from './machineProcessing.selftest';
 
 const TICK_MS = 500;
 const CATCHUP_BUDGET_MS = 8;
@@ -99,6 +100,7 @@ class UniverseSim {
     sim.rebuildFromDeltas();
     if (req.save?.sim) sim.restore(req.save.sim);
     sim.restoreFurnaces(hub.furnacesOf(req.planetKey));
+    sim.restoreCraftingTables(hub.craftingTablesOf(req.planetKey));
 
     const awayMs = req.save ? Date.now() - req.save.savedAtMs : 0;
     const offline = Math.min(Math.max(0, awayMs / 1000), MAX_BACKLOG);
@@ -135,6 +137,7 @@ class UniverseSim {
         deltaRecords: sim.deltas.size,
         deltaStats: { ...sim.deltas.stats },
         furnaces: sim.furnaces.size,
+        craftingTables: sim.craftingTables.size,
         belts: sim.beltStats(),
       };
     }
@@ -147,9 +150,13 @@ universeSim.start();
 
 declare global {
   interface Window {
-    __manscraftSim?: { hub: typeof hub; universeSim: UniverseSim };
+    __manscraftSim?: {
+      hub: typeof hub;
+      universeSim: UniverseSim;
+      selfTest: typeof runMachineProcessingSelfTests;
+    };
   }
 }
 if (typeof window !== 'undefined') {
-  window.__manscraftSim = { hub, universeSim };
+  window.__manscraftSim = { hub, universeSim, selfTest: runMachineProcessingSelfTests };
 }

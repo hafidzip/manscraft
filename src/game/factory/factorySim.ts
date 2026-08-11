@@ -1,16 +1,22 @@
 /* eslint-disable no-bitwise */
 import { WORLD_HEIGHT as H, CHUNK_SIZE as S, wrapBlock, wrapChunk } from '../core/constants';
 import { packCell, packChunk, cellX, cellY, cellZ } from '../core/cellKey';
-import { B, DEFS, isConveyor, isWaterId } from '../world/blocks';
+import { B, DEFS, isConveyor, isWaterId, isOreBlock } from '../world/blocks';
 import {
   MK_INSERTER, MK_LASER, MK_CONVEYOR, kindOf, dirXOf, dirZOf,
 } from '../world/machineRegistry';
 import { TO_FPS } from '../engine/constants';
 import {
-  tickFurnace, furnaceIdle, furnaceKey, newFurnace, type FurnaceState,
+  tickFurnace, furnaceIdle, drainFurnaceOutput, newFurnaceTickResult,
+  newFurnace, type FurnaceState,
 } from '../crafting/smelting';
 import { ItemLedger, BeltNetwork, clampCellY, type BeltBlockView } from './itemLedger';
 import type { WorldDeltaStore } from '../persist/worldDelta';
+import {
+  MachineKind, acquireFrontTarget, feedMachine, harvestOutcome, machineKey,
+  parseMachineKey, newCraftingTable, sanitizeCraftingState, spillCrafting, spillFurnace,
+  type CraftingTableState, type MachineItemSink,
+} from './machineProcessing';
 
 export const INSERTER_DIP = 0.14;
 export const INSERTER_CARRY = 0.46;
@@ -18,7 +24,6 @@ export const INSERTER_RELEASE = 0.12;
 export const INSERTER_RETURN = 0.46;
 export const INSERTER_CYCLE = INSERTER_DIP + INSERTER_CARRY + INSERTER_RELEASE + INSERTER_RETURN;
 export const INSERTER_IDLE_POLL = 0.12;
-export const LASER_RANGE = 6;
 export const LASER_MINE_TIME = 0.85;
 export const LASER_AIM = 0.18;
 export const LASER_RETARGET = 0.05;
@@ -31,8 +36,6 @@ const LIVE_AGENT_R2 = LIVE_AGENT_RADIUS * LIVE_AGENT_RADIUS;
 const GROUND_CELL_CAP = 64;
 
 const INPUT_Y_OFFSETS = [0, 1];
-
-const FEED_FURNACES = false;
 
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -139,6 +142,18 @@ export class PlanetFactorySim {
   readonly ledger: ItemLedger;
   readonly deltas: WorldDeltaStore;
   readonly furnaces = new Map<string, FurnaceState>();
+  readonly craftingTables = new Map<string, CraftingTableState>();
+  private readonly furnaceTickOut = newFurnaceTickResult();
+
+  private readonly sink: MachineItemSink = {
+    emitAbove: (x, y, z, itemId, count = 1) => {
+      this.ledger.addAtCell(
+        packCell(wrapBlock(x), clampCellY(y + 1), wrapBlock(z)),
+        itemId,
+        count,
+      );
+    },
+  };
 
   private view: HeadlessVoxelView;
   private machines = new Map<number, SimMachine>();
@@ -285,6 +300,7 @@ export class PlanetFactorySim {
   }
 
   private setBlockAuthoritative(x: number, y: number, z: number, id: number): void {
+    if (id === B.AIR && isOreBlock(this.view.getBlock(x, y, z))) return;
     if (this.live) {
       this.live.setBlock(x, y, z, id);
     } else {
@@ -298,78 +314,36 @@ export class PlanetFactorySim {
     if (id === B.AIR || id < 0) return false;
     if (isWaterId(id)) return false;
     if (kindOf(id) !== 0) return false;
+    if (isOreBlock(id)) return TO_FPS[id] !== undefined;
     const d = DEFS[id];
     if (!d || !d.solid || !isFinite(d.hardness)) return false;
     return TO_FPS[id] !== undefined;
   }
 
-  private reachable(m: SimMachine, tx: number, ty: number, tz: number): boolean {
-    const ox = m.x + 0.5;
-    const oy = m.y + 1.2;
-    const oz = m.z + 0.5;
-    const gx = tx + 0.5;
-    const gy = ty + 0.5;
-    const gz = tz + 0.5;
-    let dx = gx - ox;
-    let dz = gz - oz;
-    dx -= 512 * Math.round(dx / 512);
-    dz -= 512 * Math.round(dz / 512);
-    const dy = gy - oy;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    const steps = Math.max(1, Math.ceil(dist * 2));
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      const bx = wrapBlock(Math.floor(ox + dx * t));
-      const by = Math.floor(oy + dy * t);
-      const bz = wrapBlock(Math.floor(oz + dz * t));
-      if (by < 0 || by >= H) return false;
-      if (bx === tx && by === ty && bz === tz) continue;
-      if (bx === m.x && (by === m.y || by === m.y + 1) && bz === m.z) continue;
-      const id = this.view.getBlock(bx, by, bz);
-      if (id !== B.AIR && DEFS[id]?.solid) return false;
-    }
-    return true;
-  }
-
   private acquire(m: SimMachine): boolean {
-    const rx = -m.dz;
-    const rz = m.dx;
-    let bestScore = Infinity;
-    let bx = -1;
-    let by = -1;
-    let bz = -1;
-    for (let step = 1; step <= LASER_RANGE; step++) {
-      for (let lat = -2; lat <= 2; lat++) {
-        for (let vert = -2; vert <= 2; vert++) {
-          const px = wrapBlock(m.x + m.dx * step + rx * lat);
-          const py = m.y + vert;
-          const pz = wrapBlock(m.z + m.dz * step + rz * lat);
-          if (py < 0 || py >= H) continue;
-          const id = this.view.getBlock(px, py, pz);
-          if (!this.mineable(id)) continue;
-          const score = step * 10 + Math.abs(lat) * 2 + Math.abs(vert) * 2;
-          if (score < bestScore && this.reachable(m, px, py, pz)) {
-            bestScore = score;
-            bx = px;
-            by = py;
-            bz = pz;
-          }
-        }
-      }
+    const found = acquireFrontTarget(
+      { getBlock: (x, y, z) => this.view.getBlock(x, y, z) },
+      m.x, m.y, m.z, m.dx, m.dz,
+      (id) => this.mineable(id),
+    );
+    if (!found) {
+      m.tx = -1;
+      return false;
     }
-    if (bx < 0) return false;
-    m.tx = bx;
-    m.ty = by;
-    m.tz = bz;
-    m.aim = 0;
+    m.tx = found.cell.x;
+    m.ty = found.cell.y;
+    m.tz = found.cell.z;
+    m.aim = LASER_AIM;
     return true;
   }
 
   private tickLaser(m: SimMachine, dt: number): void {
     if (m.tx < 0) {
       if (m.t > 0) m.t = Math.max(0, m.t - dt);
-      else if (!this.acquire(m)) m.t = LASER_RETARGET;
-      return;
+      else if (!this.acquire(m)) {
+        m.t = LASER_RETARGET;
+        return;
+      }
     }
     const id = this.view.getBlock(m.tx, m.ty, m.tz);
     if (!this.mineable(id)) {
@@ -378,27 +352,30 @@ export class PlanetFactorySim {
       m.t = LASER_RETARGET;
       return;
     }
-    if (m.aim < LASER_AIM) {
-      m.aim += dt;
-      return;
-    }
     m.charge += dt / LASER_MINE_TIME;
-    if (m.charge >= 1) {
+    let guard = 4;
+    while (m.charge >= 1 && guard-- > 0) {
       m.charge -= 1;
       const worldId = this.view.getBlock(m.tx, m.ty, m.tz);
-      const itemId = TO_FPS[worldId];
-      this.setBlockAuthoritative(m.tx, m.ty, m.tz, B.AIR);
-      if (itemId !== undefined) {
+      const outcome = harvestOutcome(worldId, TO_FPS);
+      if (outcome) {
+        if (outcome.destroy) this.setBlockAuthoritative(m.tx, m.ty, m.tz, B.AIR);
         const fx = wrapBlock(m.x + m.dx);
         const fz = wrapBlock(m.z + m.dz);
         const below = this.view.getBlock(fx, m.y, fz);
         const yOff = below !== B.AIR && (DEFS[below]?.solid || isConveyor(below)) ? 1 : 0;
-        this.ledger.add(fx + 0.5, m.y + yOff, fz + 0.5, itemId, 1);
+        this.ledger.add(fx + 0.5, m.y + yOff, fz + 0.5, outcome.itemId, 1);
         this.stats.produced++;
+        this.stats.mined++;
+        if (outcome.destroy) {
+          m.tx = -1;
+          m.t = LASER_RETARGET;
+          break;
+        }
+      } else {
+        m.tx = -1;
+        break;
       }
-      this.stats.mined++;
-      m.tx = -1;
-      m.t = LASER_RETARGET;
     }
   }
 
@@ -434,20 +411,32 @@ export class PlanetFactorySim {
           return;
         }
       }
-      if (FEED_FURNACES) {
-      }
       return;
     }
     if (m.t < INSERTER_CYCLE) return;
     m.t -= INSERTER_CYCLE;
     if (m.held > 0) {
-      const out = this.inserterOutputCell(m);
-      const isBeltCell = isConveyor(this.view.getBlock(cellX(out), m.y, cellZ(out)));
-      const cap = isBeltCell ? 64 : GROUND_CELL_CAP;
-      if (this.ledger.countAtCell(out) < cap) {
-        this.ledger.addAtCell(out, m.held, 1);
+      const fx = wrapBlock(m.x + m.dx);
+      const fz = wrapBlock(m.z + m.dz);
+      const kind = this.machineKindAt(fx, m.y, fz);
+      if (kind !== MachineKind.None) {
+        const state = kind === MachineKind.Furnace
+          ? this.furnaceAt(fx, m.y, fz)
+          : this.craftingAt(fx, m.y, fz);
+        if (!feedMachine(kind, state, fx, m.y, fz, m.held, this.sink)) {
+          this.sink.emitAbove(fx, m.y, fz, m.held, 1);
+        }
         this.stats.inserted++;
         m.held = 0;
+      } else {
+        const out = this.inserterOutputCell(m);
+        const isBeltCell = isConveyor(this.view.getBlock(cellX(out), m.y, cellZ(out)));
+        const cap = isBeltCell ? 64 : GROUND_CELL_CAP;
+        if (this.ledger.countAtCell(out) < cap) {
+          this.ledger.addAtCell(out, m.held, 1);
+          this.stats.inserted++;
+          m.held = 0;
+        }
       }
     }
     m.st = 0;
@@ -455,22 +444,67 @@ export class PlanetFactorySim {
 
   private tickFurnaces(dt: number): void {
     for (const [k, st] of this.furnaces) {
-      const before = st.output && st.output.kind === 'block' ? st.output.count : 0;
-      tickFurnace(st, dt);
-      const after = st.output && st.output.kind === 'block' ? st.output.count : 0;
-      if (after > before) this.stats.smelted++;
+      const at = parseMachineKey(k);
+      if (!at) {
+        this.furnaces.delete(k);
+        continue;
+      }
+      const legacy = drainFurnaceOutput(st);
+      if (legacy) this.sink.emitAbove(at[0], at[1], at[2], legacy.id, legacy.count);
+      const out = this.furnaceTickOut;
+      tickFurnace(st, dt, out);
+      if (out.producedCount > 0) {
+        this.sink.emitAbove(at[0], at[1], at[2], out.producedId, out.producedCount);
+        this.stats.smelted += out.producedCount;
+      }
       if (furnaceIdle(st)) this.furnaces.delete(k);
     }
   }
 
+  private machineKindAt(x: number, y: number, z: number): MachineKind {
+    const id = this.view.getBlock(x, y, z);
+    if (id === B.FURNACE || id === B.FURNACE_LIT) return MachineKind.Furnace;
+    if (id === B.CRAFTING_TABLE) return MachineKind.CraftingTable;
+    return MachineKind.None;
+  }
+
   furnaceAt(x: number, y: number, z: number): FurnaceState {
-    const k = furnaceKey(x, y, z);
+    const k = machineKey(x, y, z);
     let st = this.furnaces.get(k);
     if (!st) {
       st = newFurnace();
       this.furnaces.set(k, st);
     }
     return st;
+  }
+
+  craftingAt(x: number, y: number, z: number): CraftingTableState {
+    const k = machineKey(x, y, z);
+    let st = this.craftingTables.get(k);
+    if (!st) {
+      st = newCraftingTable();
+      this.craftingTables.set(k, st);
+    }
+    return st;
+  }
+
+  restoreCraftingTables(m: Map<string, CraftingTableState>): void {
+    this.craftingTables.clear();
+    for (const [k, st] of m) this.craftingTables.set(k, sanitizeCraftingState(st));
+  }
+
+  spillMachineAt(x: number, y: number, z: number): void {
+    const k = machineKey(x, y, z);
+    const furnace = this.furnaces.get(k);
+    if (furnace) {
+      for (const item of spillFurnace(furnace)) this.sink.emitAbove(x, y, z, item.id, item.count);
+      this.furnaces.delete(k);
+    }
+    const crafting = this.craftingTables.get(k);
+    if (crafting) {
+      for (const item of spillCrafting(crafting)) this.sink.emitAbove(x, y, z, item.id, item.count);
+      this.craftingTables.delete(k);
+    }
   }
 
   private rebuildBeltsIfDirty(): void {

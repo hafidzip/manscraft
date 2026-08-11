@@ -3,7 +3,7 @@ import { B, type WorldLike } from './World';
 import { Inventory } from './Inventory';
 import { AudioSynth } from './audio';
 import { getAtlas, blockCubeGeometry } from './textures';
-import { minImageF } from '../core/constants';
+import { minImageF, WORLD_HALF } from '../core/constants';
 import { packCell } from '../core/cellKey';
 import { DEFS } from '../world/blocks';
 import { MK_CONVEYOR, MK_GHOST, dirXOf, dirZOf, kindOf } from '../world/machineRegistry';
@@ -379,6 +379,13 @@ export class ItemDropManager {
     return null;
   }
 
+  private reimage(it: DroppedItem, px: number, pz: number): void {
+    const dx = it.pos.x - px;
+    if (dx > WORLD_HALF || dx < -WORLD_HALF) it.pos.x = px + minImageF(dx);
+    const dz = it.pos.z - pz;
+    if (dz > WORLD_HALF || dz < -WORLD_HALF) it.pos.z = pz + minImageF(dz);
+  }
+
   private matVisit = (cell: number): void => {
     if (this.matScanLeft <= 0 || this.matCount >= MATERIALIZE_PER_FRAME) return;
     this.matScanLeft--;
@@ -397,7 +404,11 @@ export class ItemDropManager {
     for (let i = 0; i < n; i++) {
       const cell = this.matCellsBuf[i];
       if (ledger.takeAnyFromCell(cell, 1) <= 0) continue;
-      this.matVec.set(cellX(cell) + 0.5, cellY(cell) + 0.06, cellZ(cell) + 0.5);
+      this.matVec.set(
+        px + minImageF(cellX(cell) + 0.5 - px),
+        cellY(cell) + 0.1,
+        pz + minImageF(cellZ(cell) + 0.5 - pz),
+      );
       this.spawn(ledger.out.id, this.matVec, this.matZero);
     }
   }
@@ -411,6 +422,7 @@ export class ItemDropManager {
       const item = this.awake[ai];
       if (ai >= this.awake.length) continue;
       item.time += dt;
+      this.reimage(item, px, pz);
       const p = item.pos;
 
       item.vel.y -= GRAVITY * step;
@@ -495,8 +507,10 @@ export class ItemDropManager {
       this.stats.wakeChecks++;
       const dx = minImageF(it.pos.x - px);
       const dz = minImageF(it.pos.z - pz);
-      if (dx * dx + dz * dz < SLEEP_DIST2) this.wake(it);
-      else this.wakeCursor++;
+      if (dx * dx + dz * dz < SLEEP_DIST2) {
+        this.reimage(it, px, pz);
+        this.wake(it);
+      } else this.wakeCursor++;
     }
   }
 

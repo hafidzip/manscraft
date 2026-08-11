@@ -1,16 +1,19 @@
 /* eslint-disable no-bitwise */
 import {
-  WorldDeltaStore, serializeFurnaces, deserializeFurnaces, type FurnaceTuple,
+  WorldDeltaStore, serializeFurnaces, deserializeFurnaces,
+  serializeCraftingTables, deserializeCraftingTables,
+  type FurnaceTuple, type CraftingTuple,
 } from './worldDelta';
 import { ItemLedger } from '../factory/itemLedger';
 import type { PlanetFactorySim, SimSnapshot } from '../factory/factorySim';
 import type { FurnaceState } from '../crafting/smelting';
+import type { CraftingTableState } from '../factory/machineProcessing';
 
 const DB_NAME = 'manscraft.worlds.v1';
 const STORE = 'planets';
 const LS_PREFIX = 'manscraft.world.';
 
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 export interface PlanetSave {
   v: number;
@@ -21,6 +24,7 @@ export interface PlanetSave {
   savedAtMs: number;
   deltas: Uint8Array;
   furnaces: FurnaceTuple[];
+  crafting: CraftingTuple[];
   ledger: Uint8Array;
   sim: SimSnapshot | null;
   player: { x: number; y: number; z: number; yaw: number } | null;
@@ -48,6 +52,7 @@ export interface EngineLike {
   ledger: ItemLedger;
   sim: PlanetFactorySim | null;
   furnaces: Map<string, FurnaceState>;
+  craftingTables: Map<string, CraftingTableState>;
   playerState(): { x: number; y: number; z: number; yaw: number };
 }
 
@@ -80,9 +85,16 @@ class PlanetPersistenceHub {
         r.onsuccess = () => res(r.result as PlanetSave[]);
         r.onerror = () => rej(r.error);
       });
-      for (const s of all) {
-        this.mem.set(s.key, s);
-        this.stats.loads++;
+      for (const raw of all) {
+        if (raw.key.startsWith('legacy:')) {
+          this.mem.set(raw.key, raw);
+          continue;
+        }
+        const save = this.migrate(raw);
+        if (save) {
+          this.mem.set(save.key, save);
+          this.stats.loads++;
+        }
       }
     } catch {
       this.stats.errors++;
@@ -100,19 +112,20 @@ class PlanetPersistenceHub {
   }
 
   get(key: string): PlanetSave | null {
-    return this.mem.get(key) ?? null;
+    if (key.startsWith('legacy:')) return null;
+    return this.migrate(this.mem.get(key) ?? null);
   }
 
   has(key: string): boolean {
-    return this.mem.has(key);
+    return this.get(key) !== null;
   }
 
   keys(): string[] {
-    return Array.from(this.mem.keys());
+    return Array.from(this.mem.keys()).filter((key) => !key.startsWith('legacy:'));
   }
 
   stableSeed(key: string): number | null {
-    return this.mem.get(key)?.seed ?? null;
+    return this.get(key)?.seed ?? null;
   }
 
   install(
@@ -121,7 +134,7 @@ class PlanetPersistenceHub {
     themeSea: number,
   ): { deltas: WorldDeltaStore; ledger: ItemLedger; save: PlanetSave | null } {
     this.stats.installs++;
-    const save = this.mem.get(key) ?? null;
+    const save = this.get(key);
     if (!save) return { deltas: new WorldDeltaStore(), ledger: new ItemLedger(), save: null };
     if (save.seed !== seed || Math.abs(save.themeSea - themeSea) > 1e-6 || save.v !== SAVE_VERSION) {
       this.stats.rejects++;
@@ -146,6 +159,7 @@ class PlanetPersistenceHub {
       savedAtMs: Date.now(),
       deltas: engine.deltas.serialize(),
       furnaces: serializeFurnaces(engine.furnaces),
+      crafting: serializeCraftingTables(engine.craftingTables),
       ledger: engine.ledger.serialize(),
       sim: engine.sim ? engine.sim.snapshot() : null,
       player: engine.playerState(),
@@ -161,12 +175,37 @@ class PlanetPersistenceHub {
     prev.ledger = sim.ledger.serialize();
     prev.deltas = sim.deltas.serialize();
     prev.furnaces = serializeFurnaces(sim.furnaces);
+    prev.crafting = serializeCraftingTables(sim.craftingTables);
     prev.savedAtMs = Date.now();
     this.markDirty(key);
   }
 
   furnacesOf(key: string): Map<string, FurnaceState> {
-    return deserializeFurnaces(this.mem.get(key)?.furnaces ?? null);
+    return deserializeFurnaces(this.get(key)?.furnaces ?? null);
+  }
+
+  craftingTablesOf(key: string): Map<string, CraftingTableState> {
+    return deserializeCraftingTables(this.get(key)?.crafting ?? null);
+  }
+
+  private migrate(raw: PlanetSave | null): PlanetSave | null {
+    if (!raw) return null;
+    if (raw.v === SAVE_VERSION) {
+      if (!Array.isArray(raw.crafting)) raw.crafting = [];
+      return raw;
+    }
+    if (raw.v < SAVE_VERSION) {
+      this.archiveLegacy(raw);
+      return null;
+    }
+    return null;
+  }
+
+  private archiveLegacy(raw: PlanetSave): void {
+    const key = `legacy:${raw.key}`;
+    if (this.mem.has(key)) return;
+    this.mem.set(key, { ...raw, key });
+    this.markDirty(key);
   }
 
   private markDirty(key: string): void {
@@ -224,11 +263,23 @@ class PlanetPersistenceHub {
         if (!k || !k.startsWith(LS_PREFIX)) continue;
         const raw = localStorage.getItem(k);
         if (!raw) continue;
-        const s = JSON.parse(raw);
-        s.deltas = unb64(s.deltas);
-        s.ledger = unb64(s.ledger);
-        this.mem.set(s.key, s);
-        this.stats.loads++;
+        const encoded = JSON.parse(raw) as Omit<PlanetSave, 'deltas' | 'ledger'> & {
+          deltas: string;
+          ledger: string;
+        };
+        const s = {
+          ...encoded,
+          deltas: unb64(encoded.deltas),
+          ledger: unb64(encoded.ledger),
+        } as PlanetSave;
+        if (s.key.startsWith('legacy:')) this.mem.set(s.key, s);
+        else {
+          const save = this.migrate(s);
+          if (save) {
+            this.mem.set(save.key, save);
+            this.stats.loads++;
+          }
+        }
       }
     } catch {
       this.stats.errors++;

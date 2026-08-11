@@ -13,6 +13,8 @@ const W = WORLD_SIZE;
 const MAX_TREE_DENSITY = Object.values(BIOME_DEFS)
   .reduce((m, d) => Math.max(m, d.trees), 0);
 
+export const ORE_SURFACE_CLEARANCE = 6;
+
 export interface PlanetTheme {
   seed: bigint | string | number;
   name?: string;
@@ -182,6 +184,10 @@ export class TerrainGenerator {
     return this.colHeight[k];
   }
 
+  oreCeiling(h: number): number {
+    return Math.min(h - ORE_SURFACE_CLEARANCE, this.sea - 2, H - 8);
+  }
+
   areaAt(x: number, z: number): TerrainArea {
     const px = wrapBlock(x), pz = wrapBlock(z);
     const k = pz * W + px;
@@ -319,7 +325,8 @@ export class TerrainGenerator {
           for (let y = h + 1; y <= this.sea; y++) data[chunkIndex(lx, y, lz)] = B.WATER;
         }
 
-        for (let y = 2; y < Math.min(h, H - 8); y++) {
+        const oreMaxY = this.oreCeiling(h);
+        for (let y = 2; y <= oreMaxY; y++) {
           if (data[chunkIndex(lx, y, lz)] !== B.STONE) continue;
           const oreRoll = this.decoHash(0x07e0 + y, px, pz);
           const coalRoll = this.decoHash(0x0c0a + y, px, pz);
@@ -327,35 +334,35 @@ export class TerrainGenerator {
             data[chunkIndex(lx, y, lz)] = B.COAL_ORE;
             continue;
           }
-          if (y <= 15 && oreRoll < 0.008) {
+          if (y <= 5 && oreRoll < 0.008) {
             data[chunkIndex(lx, y, lz)] = B.ORE_LUMINESCENCE;
             continue;
           }
-          if (y <= 20 && y >= 5 && oreRoll < 0.012) {
+          if (y >= 4 && y <= 8 && oreRoll < 0.012) {
             data[chunkIndex(lx, y, lz)] = B.ORE_DIAMOND;
             continue;
           }
-          if (y <= 25 && y >= 8 && oreRoll < 0.010) {
+          if (y >= 6 && y <= 10 && oreRoll < 0.010) {
             data[chunkIndex(lx, y, lz)] = B.ORE_EMERALD;
             continue;
           }
-          if (y <= 30 && y >= 10 && oreRoll < 0.014) {
+          if (y >= 8 && y <= 15 && oreRoll < 0.014) {
             data[chunkIndex(lx, y, lz)] = B.ORE_RUBY;
             continue;
           }
-          if (y <= 35 && y >= 15 && oreRoll < 0.016) {
+          if (y >= 10 && y <= 18 && oreRoll < 0.016) {
             data[chunkIndex(lx, y, lz)] = B.ORE_GOLD;
             continue;
           }
-          if (y <= 40 && y >= 18 && oreRoll < 0.018) {
+          if (y >= 12 && y <= 20 && oreRoll < 0.018) {
             data[chunkIndex(lx, y, lz)] = B.ORE_JADE;
             continue;
           }
-          if (y <= 45 && y >= 20 && oreRoll < 0.020) {
+          if (y >= 14 && y <= 25 && oreRoll < 0.020) {
             data[chunkIndex(lx, y, lz)] = B.ORE_SILVER;
             continue;
           }
-          if (y <= 50 && y >= 25 && oreRoll < 0.022) {
+          if (y >= 16 && oreRoll < 0.022) {
             data[chunkIndex(lx, y, lz)] = B.ORE_AMBER;
           }
         }

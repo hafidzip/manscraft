@@ -25,6 +25,7 @@ export const B = {
   INSERTER: 62,
   LASER_MINER: 63,
   TURRET: 64,
+  RAW_COAL_ORE: 65,
 } as const;
 
 export const BLOCK_COLORS: Record<number, number> = {
@@ -48,6 +49,7 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.INSERTER]: 0x505058,
   [B.LASER_MINER]: 0x9aa0a8,
   [B.TURRET]: 0x8c939c,
+  [B.RAW_COAL_ORE]: 0x34343a,
 };
 
 export interface RayHit {

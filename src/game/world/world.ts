@@ -4,7 +4,7 @@ import {
   CHUNK_SIZE as S, WORLD_HEIGHT as H, VIEW_DISTANCE, EVICT_DISTANCE, WORLD_SIZE, WORLD_CHUNKS,
   wrapChunk, wrapBlock, wrapDelta, chunkIndex,
 } from '../core/constants';
-import { B, DEFS, isWaterId } from './blocks';
+import { B, DEFS, isWaterId, isIndestructible } from './blocks';
 import { TerrainGenerator } from './generator';
 import { buildChunkGeometry } from './mesher';
 import { raycastVoxel } from '../player/raycast';
@@ -155,7 +155,7 @@ export class World {
           const dx = x + 0.5 - center.x, dy = y + 0.5 - center.y, dz = z + 0.5 - center.z;
           if (dx * dx + dy * dy + dz * dz > r2 + Math.random() * 1.2) continue;
           const b = this.getBlockRaw(x, y, z);
-          if (b === B.AIR || b === B.BEDROCK) continue;
+          if (b === B.AIR || isIndestructible(b)) continue;
           this.setBlock(x, y, z, B.AIR);
 
           const px = Math.floor(wrapBlock(x));
@@ -336,6 +336,13 @@ export class World {
     const pz = Math.floor(wrapBlock(wz));
     const c = this.ensureData(Math.floor(px / S), Math.floor(pz / S));
     return c.data[chunkIndex(px % S, wy, pz % S)];
+  }
+
+  destroyBlockAt(x: number, y: number, z: number): boolean {
+    const id = this.getBlockRaw(x, y, z);
+    if (id === B.AIR || isIndestructible(id)) return false;
+    this.setBlock(x, y, z, B.AIR);
+    return true;
   }
 
   isSolid(wx: number, wy: number, wz: number): boolean {
