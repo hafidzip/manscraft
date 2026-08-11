@@ -27,7 +27,7 @@ export const TO_FPS: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,
   [B.LOG]: 6, [B.LEAVES]: 7, [B.CACTUS]: 8, [B.PLANKS]: 9,
   [B.CRAFTING_TABLE]: 14, [B.GLASS]: 15, [B.FURNACE]: 16, [B.FURNACE_LIT]: 16,
-  [B.COBBLE]: 11,
+  [B.COBBLE]: 11, [B.SNOW]: 17,
   [B.COAL_ORE]: 65, [B.TORCH]: 60,
   [B.CONVEYOR_N]: 61, [B.CONVEYOR_E]: 61, [B.CONVEYOR_S]: 61, [B.CONVEYOR_W]: 61,
   [B.INSERTER_N]: 62, [B.INSERTER_E]: 62, [B.INSERTER_S]: 62, [B.INSERTER_W]: 62,

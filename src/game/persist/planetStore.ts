@@ -21,6 +21,9 @@ export interface PlanetSave {
   seed: number;
   themeSea: number;
   themeJson: string | null;
+  /** This planet's own origin tag — the implicit tag of every unlisted/untagged voxel
+   *  (task 8). Optional so saves written before this field existed still load fine. */
+  originTag?: number;
   savedAtMs: number;
   deltas: Uint8Array;
   furnaces: FurnaceTuple[];
@@ -54,6 +57,8 @@ export interface EngineLike {
   furnaces: Map<string, FurnaceState>;
   craftingTables: Map<string, CraftingTableState>;
   playerState(): { x: number; y: number; z: number; yaw: number };
+  /** Optional: this planet's origin tag, persisted alongside the save (task 8). */
+  planetTheme?: { originTag?: number } | null;
 }
 
 class PlanetPersistenceHub {
@@ -156,6 +161,7 @@ class PlanetPersistenceHub {
       seed: engine.worldSeed,
       themeSea: engine.themeSea,
       themeJson: engine.themeJson,
+      originTag: engine.planetTheme?.originTag ?? 0,
       savedAtMs: Date.now(),
       deltas: engine.deltas.serialize(),
       furnaces: serializeFurnaces(engine.furnaces),
@@ -192,6 +198,7 @@ class PlanetPersistenceHub {
     if (!raw) return null;
     if (raw.v === SAVE_VERSION) {
       if (!Array.isArray(raw.crafting)) raw.crafting = [];
+      if (typeof raw.originTag !== 'number') raw.originTag = 0;
       return raw;
     }
     if (raw.v < SAVE_VERSION) {

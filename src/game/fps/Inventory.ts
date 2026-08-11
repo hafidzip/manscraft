@@ -1,8 +1,9 @@
 import { B } from './World';
+import { NO_ORIGIN, originLabel, type OriginTag } from '../core/origin';
 
 export type SlotItem =
   | { kind: 'weapon'; weaponId: string }
-  | { kind: 'block'; blockId: number; count: number }
+  | { kind: 'block'; blockId: number; count: number; origin?: OriginTag }
   | { kind: 'food'; foodId: string; count: number };
 
 export interface FoodDef {
@@ -41,6 +42,7 @@ export const BLOCK_NAMES: Record<number, string> = {
   [B.CRAFTING_TABLE]: 'Crafting Table',
   [B.GLASS]: 'Glass',
   [B.FURNACE]: 'Furnace',
+  [B.SNOW]: 'Snow Block',
   [B.COAL]: 'Coal',
   [B.RAW_COAL_ORE]: 'Coal Ore',
   [B.STICK]: 'Stick',
@@ -64,11 +66,26 @@ const WEAPONS = ['handgun', 'smg', 'rifle', 'sniper', 'bazooka', 'laser'] as con
 
 type Stackable = Extract<SlotItem, { count: number }>;
 
+const originOf = (it: SlotItem): OriginTag => (it.kind === 'block' ? (it.origin ?? NO_ORIGIN) : NO_ORIGIN);
+
 const sameStack = (a: SlotItem, b: SlotItem): boolean => {
-  if (a.kind === 'block' && b.kind === 'block') return a.blockId === b.blockId;
+  if (a.kind === 'block' && b.kind === 'block') {
+    // Same block id but a different origin planet keeps its own stack so a jungle log
+    // and an ice log never collapse into one visually-ambiguous stack.
+    return a.blockId === b.blockId && originOf(a) === originOf(b);
+  }
   if (a.kind === 'food' && b.kind === 'food') return a.foodId === b.foodId;
   return false;
 };
+
+/** "Jungle Wood Log" / "Ice Snow Block" — surfaces a block's origin planet in the UI. */
+export function itemDisplayName(it: SlotItem): string {
+  if (it.kind === 'weapon') return it.weaponId;
+  if (it.kind === 'food') return FOOD_NAMES[it.foodId] ?? it.foodId;
+  const base = BLOCK_NAMES[it.blockId] ?? `Block ${it.blockId}`;
+  const label = it.origin ? originLabel(it.origin) : null;
+  return label ? `${label} ${base}` : base;
+}
 
 const mergeInto = (arr: (SlotItem | null)[], item: Stackable): number => {
   let left = item.count;
@@ -87,7 +104,7 @@ const placeInto = (arr: (SlotItem | null)[], item: Stackable, left: number): num
     if (arr[i]) continue;
     const add = Math.min(STACK, left);
     arr[i] = item.kind === 'block'
-      ? { kind: 'block', blockId: item.blockId, count: add }
+      ? { kind: 'block', blockId: item.blockId, count: add, origin: item.origin }
       : { kind: 'food', foodId: item.foodId, count: add };
     left -= add;
   }
@@ -149,6 +166,15 @@ export class Inventory {
   addBlock(blockId: number, count = 1): boolean {
     if (blockId === B.AIR || blockId === B.BEDROCK) return false;
     return stackItem(this.hotbar, this.mainInv, { kind: 'block', blockId, count });
+  }
+
+  /** Origin-aware pickup. Call this from the break/mine path with the voxel's origin tag. */
+  addBlockFrom(blockId: number, origin: OriginTag, count = 1): boolean {
+    if (blockId === B.AIR || blockId === B.BEDROCK) return false;
+    const item: SlotItem = origin
+      ? { kind: 'block', blockId, count, origin }
+      : { kind: 'block', blockId, count };
+    return stackItem(this.hotbar, this.mainInv, item);
   }
 
   consumeAt(ref: SlotRef, n = 1): boolean {

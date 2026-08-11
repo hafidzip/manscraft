@@ -1,4 +1,5 @@
 import type * as THREE from 'three';
+import { NO_ORIGIN, originColorMul, type OriginTag } from '../core/origin';
 
 export const B = {
   AIR: 0,
@@ -18,6 +19,9 @@ export const B = {
   CRAFTING_TABLE: 14,
   GLASS: 15,
   FURNACE: 16,
+  /** Mirrors world/blocks.ts `B.SNOW`. Ids intentionally differ — the two id spaces
+   *  stay separate; cross-space translation lives in engine/constants.ts (TO_FPS/FROM_FPS). */
+  SNOW: 17,
   COAL: 58,
   STICK: 59,
   TORCH: 60,
@@ -45,12 +49,33 @@ export const BLOCK_COLORS: Record<number, number> = {
   [B.CRAFTING_TABLE]: 0xa48150,
   [B.GLASS]: 0xcee8f5,
   [B.FURNACE]: 0x7c7c80,
+  [B.SNOW]: 0xeef6f8,
   [B.CONVEYOR]: 0x484854,
   [B.INSERTER]: 0x505058,
   [B.LASER_MINER]: 0x9aa0a8,
   [B.TURRET]: 0x8c939c,
   [B.RAW_COAL_ORE]: 0x34343a,
 };
+
+/** FPS id -> tint group (mirrors world/blocks.ts BLOCK_GROUP for the other id space). */
+export const FPS_BLOCK_GROUP: Partial<Record<number, string>> = {
+  [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.SAND]: 'sand', [B.SANDSTONE]: 'sand',
+  [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.PLANK]: 'planks', [B.SNOW]: 'snow',
+  [B.CACTUS]: 'cactus', [B.STONE]: 'stone', [B.COBBLE]: 'stone', [B.CRAFTING_TABLE]: 'planks',
+};
+
+/**
+ * Origin-aware colour for the FPS per-block instanced meshes / icons / held items.
+ * Themed families resolve through the item's own origin tag; everything else is fixed.
+ */
+export function blockColorFor(id: number, tag: OriginTag = NO_ORIGIN): number {
+  const group = FPS_BLOCK_GROUP[id];
+  const base = BLOCK_COLORS[id] ?? 0xffffff;
+  if (!tag || !group) return base;
+  const [mr, mg, mb] = originColorMul(tag, group);
+  const c = (s: number, m: number) => Math.min(255, Math.round(((base >> s) & 0xff) * m));
+  return (c(16, mr) << 16) | (c(8, mg) << 8) | c(0, mb);
+}
 
 export interface RayHit {
   point: THREE.Vector3;

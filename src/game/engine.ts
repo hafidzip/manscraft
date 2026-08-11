@@ -43,7 +43,7 @@ import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
 import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
-import { matchCraft, craftableCount, RECIPES, recipeIngredients } from './crafting/recipes';
+import { matchCraft, craftableCount, RECIPES, recipeIngredients, resolveOutput } from './crafting/recipes';
 import { TorchLights } from './world/torchLights';
 import {
   newFurnace, tickFurnace, furnaceIdle, isFuel, smeltResult, SMELT_TIME,
@@ -989,7 +989,7 @@ export class GameEngine {
     const s = inv.craftSize;
     const possible = Math.min(times, craftableCount(inv.craft, s));
     if (possible <= 0) return false;
-    const base = recipe.output;
+    const base = resolveOutput(inv.craft, s, recipe);
     const out: SlotItem = base.kind === 'weapon'
       ? { ...base }
       : { ...base, count: (base.count ?? 1) * possible };

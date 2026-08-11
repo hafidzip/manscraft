@@ -8,7 +8,8 @@ import {
 } from '../factory/machineProcessing';
 
 export const DELTA_MAGIC = 0x4d435744;
-export const DELTA_VERSION = 1;
+/** v1: id byte only. v2: id(1) + originTag(1) packed as (tag << 8) | id — task 8. */
+export const DELTA_VERSION = 2;
 
 const localIdxOf = (lx: number, y: number, lz: number): number => (y * S + lz) * S + lx;
 const lxOf = (i: number): number => i & 15;
@@ -24,6 +25,7 @@ export interface DeltaSink {
 }
 
 export class WorldDeltaStore implements DeltaSink {
+  /** li -> (originTag << 8) | blockId. Reading callers that only want the id use `& 0xff`. */
   private chunks = new Map<number, Map<number, number>>();
 
   replaying = false;
@@ -44,7 +46,7 @@ export class WorldDeltaStore implements DeltaSink {
     return id === B.FURNACE_LIT ? B.FURNACE : id;
   }
 
-  recordBlock(x: number, y: number, z: number, id: number): void {
+  recordBlock(x: number, y: number, z: number, id: number, tag = 0): void {
     if (this.replaying) {
       this.stats.ignored++;
       return;
@@ -60,7 +62,7 @@ export class WorldDeltaStore implements DeltaSink {
     }
     const li = localIdxOf(px & 15, y | 0, pz & 15);
     if (!m.has(li)) this.stats.records++;
-    m.set(li, this.canonical(id) & 0xff);
+    m.set(li, ((tag & 0xff) << 8) | (this.canonical(id) & 0xff));
     this.stats.edits++;
   }
 
@@ -71,18 +73,32 @@ export class WorldDeltaStore implements DeltaSink {
     const m = this.chunks.get(packChunk(px >> 4, pz >> 4));
     if (!m) return -1;
     const v = m.get(localIdxOf(px & 15, y | 0, pz & 15));
-    return v === undefined ? -1 : v;
+    return v === undefined ? -1 : v & 0xff;
   }
 
-  applyToChunk(cx: number, cz: number, data: Uint8Array): number {
-    const m = this.chunks.get(packChunk(cx, cz));
+  /** Origin tag of a recorded override, or 0 (untagged) if none is stored. */
+  getOverrideTag(x: number, y: number, z: number): number {
+    if (y < 0 || y >= H) return 0;
+    const px = wrapBlock(Math.floor(x));
+    const pz = wrapBlock(Math.floor(z));
+    const m = this.chunks.get(packChunk(px >> 4, pz >> 4));
+    if (!m) return 0;
+    const v = m.get(localIdxOf(px & 15, y | 0, pz & 15));
+    return v === undefined ? 0 : (v >> 8) & 0xff;
+  }
+
+  applyToChunk(cx: number, cz: number, data: Uint8Array, origins?: { set(ck: number, li: number, tag: number): void }): number {
+    const ck = packChunk(cx, cz);
+    const m = this.chunks.get(ck);
     if (!m || m.size === 0) return 0;
     let n = 0;
-    for (const [li, id] of m) {
+    for (const [li, packed] of m) {
+      const id = packed & 0xff;
       if (data[li] !== id) {
         data[li] = id;
         n++;
       }
+      if (origins) origins.set(ck, li, (packed >> 8) & 0xff);
     }
     if (n > 0) {
       this.stats.applied += n;
@@ -98,8 +114,8 @@ export class WorldDeltaStore implements DeltaSink {
       for (const [ck, m] of this.chunks) {
         const bx = wrapChunk((ck >> 5) & 31) * S;
         const bz = (ck & 31) * S;
-        for (const [li, id] of m) {
-          world.setBlock(bx + lxOf(li), lyOf(li), bz + lzOf(li), id);
+        for (const [li, packed] of m) {
+          world.setBlock(bx + lxOf(li), lyOf(li), bz + lzOf(li), packed & 0xff);
           n++;
         }
       }
@@ -109,11 +125,11 @@ export class WorldDeltaStore implements DeltaSink {
     return n;
   }
 
-  forEachEdit(cb: (x: number, y: number, z: number, id: number) => void): void {
+  forEachEdit(cb: (x: number, y: number, z: number, id: number, tag: number) => void): void {
     for (const [ck, m] of this.chunks) {
       const bx = ((ck >> 5) & 31) * S;
       const bz = (ck & 31) * S;
-      for (const [li, id] of m) cb(bx + lxOf(li), lyOf(li), bz + lzOf(li), id);
+      for (const [li, packed] of m) cb(bx + lxOf(li), lyOf(li), bz + lzOf(li), packed & 0xff, (packed >> 8) & 0xff);
     }
   }
 
@@ -134,8 +150,11 @@ export class WorldDeltaStore implements DeltaSink {
       const m = this.chunks.get(ck);
       if (m) {
         gen.populateChunk(this.scratch, (ck >> 5) & 31, ck & 31);
-        for (const [li, id] of m) {
-          if (this.scratch[li] === id) {
+        for (const [li, packed] of m) {
+          // Only prune when the record matches BOTH freshly-generated id and is untagged —
+          // tagged (foreign-origin) overrides never equal natural generation, so they
+          // conservatively stay recorded (see task 8 notes in persist/planetStore.ts).
+          if (this.scratch[li] === packed) {
             m.delete(li);
             removed++;
             this.stats.records--;
@@ -151,7 +170,7 @@ export class WorldDeltaStore implements DeltaSink {
 
   serialize(): Uint8Array {
     let bytes = 10;
-    for (const m of this.chunks.values()) bytes += 4 + m.size * 3;
+    for (const m of this.chunks.values()) bytes += 4 + m.size * 4;
     const buf = new ArrayBuffer(bytes);
     const dv = new DataView(buf);
     dv.setUint32(0, DELTA_MAGIC);
@@ -162,10 +181,11 @@ export class WorldDeltaStore implements DeltaSink {
       dv.setUint16(o, ck);
       dv.setUint16(o + 2, m.size);
       o += 4;
-      for (const [li, id] of m) {
+      for (const [li, packed] of m) {
         dv.setUint16(o, li);
-        dv.setUint8(o + 2, id);
-        o += 3;
+        dv.setUint8(o + 2, packed & 0xff);
+        dv.setUint8(o + 3, (packed >> 8) & 0xff);
+        o += 4;
       }
     }
     return new Uint8Array(buf);
@@ -175,7 +195,10 @@ export class WorldDeltaStore implements DeltaSink {
     const s = new WorldDeltaStore();
     if (!bytes || bytes.byteLength < 10) return s;
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (dv.getUint32(0) !== DELTA_MAGIC || dv.getUint16(4) !== DELTA_VERSION) return s;
+    if (dv.getUint32(0) !== DELTA_MAGIC) return s;
+    const ver = dv.getUint16(4);
+    if (ver !== 1 && ver !== 2) return s;
+    const recSize = ver === 1 ? 3 : 4; // v1: li(2) id(1). v2: li(2) id(1) tag(1) — no tag byte on v1.
     const chunkCount = dv.getUint32(6);
     let o = 10;
     for (let c = 0; c < chunkCount && o + 4 <= bytes.byteLength; c++) {
@@ -187,12 +210,13 @@ export class WorldDeltaStore implements DeltaSink {
         m = new Map<number, number>();
         s.chunks.set(ck, m);
       }
-      for (let i = 0; i < n && o + 3 <= bytes.byteLength; i++) {
+      for (let i = 0; i < n && o + recSize <= bytes.byteLength; i++) {
         const li = dv.getUint16(o);
         const id = dv.getUint8(o + 2);
-        o += 3;
+        const tag = ver === 2 ? dv.getUint8(o + 3) : 0;
+        o += recSize;
         if (li < S * H * S && !m.has(li)) {
-          m.set(li, id);
+          m.set(li, ((tag & 0xff) << 8) | (id & 0xff));
           s.stats.records++;
         }
       }
