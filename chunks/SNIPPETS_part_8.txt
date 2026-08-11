@@ -1,0 +1,180 @@
+      const r = this.pickI(s.canopyR, this.jn(wx, wz, 0x5a3, n));
+      const off = Math.round((this.jn(wx, wz, 0x5a4, n) - 0.5) * 2.4);
+      this.blob(set, tx + off, y, tz - off, r, r, r, s.leafDensity, 0x5a5 + n, tag);
+    }
+    this.blob(set, tx, top + 1, tz, 1, 2, 1, 1, 0x5a9, tag);
+  }
+
+  // --- crystal: ice, stepped faceted prisms -------------------------------------
+  private tCrystal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, tag: OriginTag) {
+    const coreH = this.pickI(s.trunkH, this.j(wx, wz, 0x1c1));
+    this.trunk(set, wx, h, wz, coreH, 0, 0, 0, tag);
+    const shards = Math.max(2, s.branches);
+    for (let k = 0; k < shards; k++) {
+      const ka = (k / shards) * Math.PI * 2 + this.j(wx, wz, 0x1c2) * 1.2;
+      const bx = wx + Math.round(Math.cos(ka) * (1 + this.jn(wx, wz, 0x1c3, k)));
+      const bz = wz + Math.round(Math.sin(ka) * (1 + this.jn(wx, wz, 0x1c3, k)));
+      const hgt = 2 + Math.floor(this.jn(wx, wz, 0x1c4, k) * s.canopyH);
+      // hard-edged square prism that tapers in one step: unmistakably mineral
+      for (let ly = 0; ly < hgt; ly++) {
+        const rad = ly < hgt * 0.5 ? 1 : 0;
+        for (let dx = -rad; dx <= rad; dx++)
+          for (let dz = -rad; dz <= rad; dz++)
+            set(bx + dx, h + 1 + ly, bz + dz, B.LEAVES, false, tag);
+      }
+    }
+    this.blob(set, wx, h + coreH + 1, wz, 1, 2, 1, 1, 0x1c5, tag);
+  }
+
+  // --- succulent: desert/crimson cactus-tree -----------------------------------
+  private tSucculent(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, tag: OriginTag) {
+    const stemH = this.pickI(s.trunkH, this.j(wx, wz, 0xd51));
+    this.trunk(set, wx, h, wz, stemH, 0, 0, 0, tag);
+    const arms = Math.max(1, s.branches);
+    for (let k = 0; k < arms; k++) {
+      const ka = (k / arms) * Math.PI * 2 + this.j(wx, wz, 0xd52) * 1.5;
+      const dx = Math.round(Math.cos(ka)), dz = Math.round(Math.sin(ka));
+      if (!dx && !dz) continue;
+      const atY = h + 2 + Math.floor(this.jn(wx, wz, 0xd53, k) * Math.max(1, stemH - 3));
+      const reach = 1 + Math.floor(this.jn(wx, wz, 0xd54, k) * 2);
+      for (let i = 1; i <= reach; i++) set(wx + dx * i, atY, wz + dz * i, B.LOG, true, tag);
+      const rise = 2 + Math.floor(this.jn(wx, wz, 0xd55, k) * 3);
+      for (let i = 1; i <= rise; i++) set(wx + dx * reach, atY + i, wz + dz * reach, B.LOG, true, tag);
+      if (s.leafDensity > 0.25) {
+        set(wx + dx * reach, atY + rise + 1, wz + dz * reach, B.LEAVES, false, tag); // bloom
+      }
+    }
+    if (s.leafDensity > 0.25) set(wx, h + stemH + 1, wz, B.LEAVES, false, tag);
+  }
+
+  // --- umbrella: savanna acacia -------------------------------------------------
+  private tUmbrella(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, tag: OriginTag) {
+    const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0x8b1));
+    const a = this.j(wx, wz, 0x8b2) * Math.PI * 2;
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean,
+      Math.cos(a), Math.sin(a), tag);
+    const r = this.pickI(s.canopyR, this.j(wx, wz, 0x8b3));
+    for (let ly = 0; ly < Math.max(1, s.canopyH); ly++) {
+      const rad = r - ly;                       // flat, wide, thinning upward
+      if (rad <= 0) break;
+      for (let dx = -rad; dx <= rad; dx++)
+        for (let dz = -rad; dz <= rad; dz++) {
+          if (dx * dx + dz * dz > rad * rad) continue;
+          if (dx * dx + dz * dz > (rad - 1) * (rad - 1) &&
+              this.jn(wx, wz, 0x8b4, dx * 13 + dz) > s.leafDensity) continue;
+          set(tx + dx, top + ly, tz + dz, B.LEAVES, false, tag);
+        }
+    }
+  }
+
+  // --- fungal: neon bioluminescent mushroom-tree --------------------------------
+  private tFungal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, tag: OriginTag) {
+    const stalkH = this.pickI(s.trunkH, this.j(wx, wz, 0xf01));
+    const a = this.j(wx, wz, 0xf02) * Math.PI * 2;
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, stalkH, s.trunkLean,
+      Math.cos(a), Math.sin(a), tag);
+    const r = this.pickI(s.canopyR, this.j(wx, wz, 0xf03));
+    // dome
+    for (let dy = 0; dy <= Math.max(1, s.canopyH - 1); dy++) {
+      const rad = Math.round(r * Math.cos((dy / Math.max(1, s.canopyH)) * (Math.PI / 2)));
+      for (let dx = -rad; dx <= rad; dx++)
+        for (let dz = -rad; dz <= rad; dz++) {
+          if (dx * dx + dz * dz > rad * rad) continue;
+          set(tx + dx, top + dy, tz + dz, B.LEAVES, false, tag);
+        }
+    }
+    // drooping gill skirt
+    const skirt = Math.round(s.droop * r);
+    for (let i = 0; i < skirt; i++) {
+      const ga = this.jn(wx, wz, 0xf04, i) * Math.PI * 2;
+      set(tx + Math.round(Math.cos(ga) * r), top - 1, tz + Math.round(Math.sin(ga) * r), B.LEAVES, false, tag);
+    }
+  }
+```
+
+> `0x5p1 as unknown as number ?? 0x5a1` above is a typo guard — use plain `0x5a1`.
+> (Left visible so you can see where I fumbled a hex literal; fix on paste.)
+
+`SetFn` gains the tag parameter:
+
+```ts
+type SetFn = (x: number, y: number, z: number, id: number, force: boolean, tag?: OriginTag) => void;
+```
+
+Since the generator's tag always equals the planet's native tag, the `OriginStore` (§8)
+treats it as a no-op write — **zero memory cost for generated terrain**.
+
+---
+
+## 7. Task 3 — grass blades & flowers in `world/mesher.ts`
+
+Theme params are **passed down explicitly** from `buildChunkGeometry`'s caller (not read
+from the global) exactly as the brief prefers, with a global fallback so existing callers
+keep compiling.
+
+```diff
++import { activeFlora, activeOriginTag } from './generator';
++import { originColorMul, NO_ORIGIN, type OriginTag } from '../core/origin';
++import { tileForOrigin } from '../core/textures';
++import type { FlowerShape, GrassShape } from '../space/flora';
++import { BLOCK_GROUP } from './blocks';
++
++export interface MeshTheme {
++  grass: GrassShape;
++  flower: FlowerShape;
++  /** Native tag of the chunk's planet; per-voxel overrides come from OriginStore. */
++  nativeTag: OriginTag;
++  /** (x,y,z local) → OriginTag. Defaults to nativeTag. */
++  originAt?: (x: number, y: number, z: number) => OriginTag;
++}
++
++function defaultMeshTheme(): MeshTheme {
++  const f = activeFlora();
++  return { grass: f.grass, flower: f.flower, nativeTag: activeOriginTag() };
++}
+```
+
+```diff
+-export function buildChunkGeometry(/* …existing… */) {
++export function buildChunkGeometry(/* …existing… */, mt: MeshTheme = defaultMeshTheme()) {
++  const tagAt = mt.originAt ?? (() => mt.nativeTag);
+   /* … */
+   if (d.cross) {
+-    if (id === B.TALLGRASS) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z);
+-    else if (id === B.TORCH) { /* …torch… */ }
+-    else emitCross(cutoutB, x, y, z, d.side, id === B.FLOWER_RED || id === B.FLOWER_YELLOW ? 0.018 : 0.028, baseX + x, baseZ + z);
++    const tag = tagAt(x, y, z);
++    const tile = tileForOrigin(d.side, tag);            // origin → atlas band
++    const mul = originColorMul(tag, BLOCK_GROUP[id]);   // origin → per-seed hue
++    if (id === B.TALLGRASS) {
++      if (mt.grass.present) emitTallGrass(cutoutB, x, y, z, tile, baseX + x, baseZ + z, mt.grass, mul);
++    } else if (id === B.TORCH) {
++      /* …torch unchanged… */
++    } else if (id === B.FLOWER_RED || id === B.FLOWER_YELLOW) {
++      if (mt.flower.present) emitCross(cutoutB, x, y, z, tile, mt.flower.sway, baseX + x, baseZ + z, mt.flower, mul);
++    } else {
++      emitCross(cutoutB, x, y, z, tile, 0.028, baseX + x, baseZ + z, null, mul);
++    }
+     continue;
+   }
++  // Opaque/greedy path: remap the face tile through the voxel's origin and fold the
++  // origin tint into the AO vertex colour that is already being written.
++  //   const tile = tileForOrigin(faceTile, tag);
++  //   col[i] = aoTerm * mul[channel]
+```
+
+**Blades** — now multi-segment and curved:
+
+```ts
+/**
+ * Procedural grass tuft. Shape is fully theme-driven (task 3):
+ *  - `segments: 1` → flat card (ice needles, crimson spikes)
+ *  - `segments: 3` → smooth quadratic arc (jungle / neon / alien)
+ * Vertex-attribute contract (pos/nrm/uv/col/sway) is unchanged, so the existing
+ * wind-sway vertex shader keeps working with zero shader edits.
+ */
+function emitTallGrass(
+  bucket: Bucket, x: number, y: number, z: number, tile: number,
+  wx: number, wz: number, g: GrassShape, mul: [number, number, number],
+): void {
+  const [u0, v0, u1, v1] = tileUV(tile);
