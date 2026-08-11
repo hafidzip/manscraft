@@ -282,12 +282,19 @@ export class MachineRegistry {
 
   tickClock(dt: number): void { this.nowSec += dt; }
 
+  /**
+   * Feature B: injected by PlanetFactorySim. Records the sim claims are machine truth and
+   * must survive chunk unload — pruneDormant no longer erases them while we're away.
+   */
+  retain: ((key: number) => boolean) | null = null;
+
   pruneDormant(maxAgeSec = 120, maxPerCall = 32): number {
     if (!this.stats.dormant) return 0;
     const cutoff = this.nowSec - maxAgeSec;
     let removed = 0;
     for (const rec of this.byKey.values()) {
       if (rec.live || rec.dormantAt > cutoff) continue;
+      if (this.retain?.(rec.key)) continue; // sim-owned: off-render simulation needs it
       this.removeRec(rec);
       if (++removed >= maxPerCall) break;
     }

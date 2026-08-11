@@ -8,6 +8,7 @@ import { B, DEFS, isWaterId } from './blocks';
 import { TerrainGenerator } from './generator';
 import { buildChunkGeometry } from './mesher';
 import { raycastVoxel } from '../player/raycast';
+import type { DeltaSink } from '../persist/worldDelta';
 
 const CLOCK_STRIDE  = 8;
 const CHEAP_ITEM_MS = 0.5;
@@ -78,8 +79,18 @@ export class World {
 
   spawn = new THREE.Vector3(8.5, 45, 8.5);
 
-  constructor(public readonly seed: number, private mats: ChunkMaterials) {
+  constructor(
+    public readonly seed: number,
+    private mats: ChunkMaterials,
+    /** Feature A: per-planet edit overlay, applied to every chunk the moment it generates. */
+    private deltas: DeltaSink | null = null,
+  ) {
     this.gen = new TerrainGenerator(seed);
+  }
+
+  /** Late-bound delta overlay (used when persistence installs after construction). */
+  setDeltas(deltas: DeltaSink | null): void {
+    this.deltas = deltas;
   }
 
   get materials(): ChunkMaterials {
@@ -206,6 +217,11 @@ export class World {
     if (!c) {
       const data = new Uint8Array(S * H * S);
       this.gen.populateChunk(data, cx, cz);
+      // Feature A injection point: replay the per-planet edit overlay BEFORE the derived
+      // column caches are built, so restored chunks are born fully edited. The number of
+      // overwritten voxels decides the fromGenerator flag below — replayed machine blocks
+      // must NOT take MachineRegistry's trust-generator fast path, or they stay unindexed.
+      const appliedEdits = this.deltas?.applyToChunk(cx, cz, data) ?? 0;
       c = {
         cx, cz, data, meshes: [], hasMesh: false, grass: null,
         kx: 0, kz: 0, dirty: false,
@@ -215,7 +231,7 @@ export class World {
       };
       this.chunks.set(k, c);
       this.buildColumnCache(c);
-      this.onChunkData?.(cx, cz, c.data, true);
+      this.onChunkData?.(cx, cz, c.data, appliedEdits === 0);
       if (!this.bulkPreparing) this.markNeighborBorders(cx, cz);
     }
     this.memoKey = k;

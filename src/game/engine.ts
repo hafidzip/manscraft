@@ -12,8 +12,13 @@ import { ChangeBus } from './world/changeBus';
 import { MachineRegistry, MK_GHOST } from './world/machineRegistry';
 import { MachineScheduler } from './fps/machineScheduler';
 import type { CampSite, CampBuild } from './world/camps';
-import { setActivePlanetTheme, planetSeedToWorldSeed } from './world/generator';
+import { setActivePlanetTheme, planetSeedToWorldSeed, TerrainGenerator } from './world/generator';
 import type { PlanetTheme } from './space/theme';
+import { hub, themeToJson } from './persist/planetStore';
+import { universeSim } from './factory/universeSim';
+import type { PlanetFactorySim } from './factory/factorySim';
+import type { WorldDeltaStore } from './persist/worldDelta';
+import type { ItemLedger } from './factory/itemLedger';
 import { FluidSim } from './world/fluid';
 import { WATER_TIME, GRASS_TIME, GRASS_CAM, GRASS_FADE, GRASS_YAW } from './world/mesher';
 import { Player, type InputState } from './player/player';
@@ -122,6 +127,12 @@ export class GameEngine {
   private craftingOpen = false;
   private furnaces = new Map<string, FurnaceState>();
   private openFurnaceKey: string | null = null;
+  /** Feature A/B/C wiring — owned by planetStore/universeSim, referenced here. */
+  private sim: PlanetFactorySim | null = null;
+  private persistDeltas: WorldDeltaStore | null = null;
+  private persistLedger: ItemLedger | null = null;
+  private worldSeed = 0;
+  private themeSea = 30;
   private hitSeq = 0;
   private damageSeq = 0;
   private dmgAngle = 0;
@@ -215,6 +226,8 @@ export class GameEngine {
     theme?: PlanetTheme | null,
     persistentInventory?: Inventory,
     private initialClearedCamps?: number[],
+    /** Feature A: planet identity for the persistence hub (matches App.tsx planetKey). */
+    private worldKey = 'home',
   ) {
     this.theme = theme ?? null;
     this.inventory = persistentInventory ?? new Inventory();
@@ -486,8 +499,29 @@ export class GameEngine {
 
     const seed = this.theme
       ? planetSeedToWorldSeed(this.theme.seed)
-      : (Math.random() * 0x7fffffff) | 0;
-    this.world = new World(seed, mats);
+      : (hub.stableSeed(this.worldKey) ?? ((Math.random() * 0x7fffffff) | 0));
+    this.worldSeed = seed;
+    this.themeSea = this.theme?.seaLevel ?? C.SEA_LEVEL;
+
+    // Feature A/B: planet state must be installed BEFORE chunk data exists, so the whole
+    // loading sequence builds already-edited chunks and restored machines get indexed.
+    await hub.ready;
+    const installed = hub.install(this.worldKey, seed, this.themeSea);
+    const claimed = universeSim.claim({
+      planetKey: this.worldKey,
+      seed,
+      makeGenerator: () => new TerrainGenerator(seed, this.theme),
+      deltas: installed.deltas,
+      ledger: installed.ledger,
+      save: installed.save,
+    });
+    this.sim = claimed.sim;
+    this.persistDeltas = claimed.deltas;
+    this.persistLedger = claimed.ledger;
+    this.furnaces = claimed.sim.furnaces; // shared furnace truth (engine ticks it while live)
+
+    this.world = new World(seed, mats, claimed.deltas);
+    claimed.sim.attachToLive(this.world);
     this.scene.add(this.world.group);
 
     this.camps = [];
@@ -513,6 +547,17 @@ export class GameEngine {
     this.machineRegistry = new MachineRegistry({ indexedKinds: MK_GHOST, trustGenerator: true });
     this.machineRegistry.attach(this.changeBus);
     this.machineRegistry.bootstrap(this.world);
+    // Feature B: the sim owns off-render machine truth — dormant pruning must not erase it.
+    this.machineRegistry.retain = (k) => this.sim?.retain(k) ?? false;
+    // Feature A recorder: every live edit funnels into the per-planet delta overlay; the
+    // sim shadows the machine census from the same stream (deltas are applied inside
+    // World.ensureData, not here — replay must precede the registry's rescan fast path).
+    this.changeBus.add({
+      onBlock: (x, y, z, oldId, newId) => {
+        this.persistDeltas?.recordBlock(x, y, z, newId);
+        this.sim?.onBlock(x, y, z, oldId, newId);
+      },
+    });
 
     if (this.sky) this.sky.applyTheme(this.theme?.skyHex ?? null);
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
@@ -684,7 +729,7 @@ export class GameEngine {
 
     this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio, () => {
       this.syncHotbarMode();
-    }, { bus: this.changeBus, instanced: true });
+    }, { bus: this.changeBus, instanced: true, ledger: this.persistLedger ?? undefined });
     this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
     this.laserMiners = new LaserMinerManager(this.scene, this.world, {
       mineable: (id) => this.laserMinerCanMine(id),
@@ -2115,6 +2160,10 @@ export class GameEngine {
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
     this.machines.update(dt, this.player.pos);
+    // Feature B: the active planet's factory sim ticks at full frame rate, synchronised
+    // with the live scene; inactive planets advance from UniverseSim's background clock.
+    this.sim?.setLivePlayer(this.player.pos.x, this.player.pos.z);
+    universeSim.tickActive(dt);
 
     this.torchLights.update(dt, this.camera.position);
 
@@ -2833,11 +2882,30 @@ export class GameEngine {
     return this.enemies?.getClearedCampIds() ?? [...(this.initialClearedCamps ?? [])];
   }
 
+  /** Feature A/B/C: detach the live view, then snapshot everything BEFORE teardown. */
+  private capturePersistence(): void {
+    if (!this.sim || !this.persistDeltas || !this.persistLedger) return;
+    universeSim.release(this.worldKey);
+    const p = this.player.pos;
+    hub.capture({
+      planetKey: this.worldKey,
+      worldSeed: this.worldSeed,
+      themeSea: this.themeSea,
+      themeJson: this.theme ? themeToJson(this.theme) : null,
+      deltas: this.persistDeltas,
+      ledger: this.persistLedger,
+      sim: this.sim,
+      furnaces: this.furnaces,
+      playerState: () => ({ x: p.x, y: p.y, z: p.z, yaw: this.player.yaw }),
+    });
+  }
+
   dispose(): void {
     this.disposed = true;
     this.renderer.setAnimationLoop(null);
     this.sound.stopShip();
-    this.itemDrops?.clear();
+    this.itemDrops?.clear(); // deposits all physical items into the ledger (Feature C)
+    this.capturePersistence(); // serializes the ledger AFTER the clear above
     this.machines?.dispose();
     this.inserters?.clear();
     this.laserMiners?.clear();

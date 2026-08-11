@@ -6,6 +6,7 @@ import { session } from '../game/session';
 import { HUD } from './HUD';
 import { Minimap } from './Minimap';
 import { Inventory } from '../game/fps/Inventory';
+import { planetKeyOf } from '../game/persist/planetStore';
 
 interface GameCanvasProps {
   home?: PlanetHome | null;
@@ -14,10 +15,13 @@ interface GameCanvasProps {
   initialClearedCamps?: number[];
   onSaveClearedCamps?: (campIds: number[]) => void;
   onReady?: () => void;
+  /** Feature A: world identity for the persistence hub (byte-identical to App planetKey). */
+  planetKey?: string;
 }
 
 export function GameCanvas({
   home, onEnterSpace, persistentInventory, initialClearedCamps, onSaveClearedCamps, onReady,
+  planetKey,
 }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
@@ -78,6 +82,7 @@ export function GameCanvas({
       home ? themeFromPlanet(home.planet, home.star) : undefined,
       persistentInventory ?? undefined,
       initialClearedCamps,
+      planetKey ?? planetKeyOf(home ?? null),
     );
     engineRef.current = engine;
     engine.init().then(() => {

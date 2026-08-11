@@ -90,6 +90,7 @@ export default function App() {
           initialClearedCamps={initialCleared}
           onSaveClearedCamps={saveClearedCamps}
           onReady={onChildReady}
+          planetKey={key}
         />
       ) : (
         <SpaceCanvas
