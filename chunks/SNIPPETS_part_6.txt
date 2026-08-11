@@ -1,0 +1,180 @@
+ function cellsOf(grid: (SlotItem | null)[], size: number): Cell[] | null {
+   const out: Cell[] = [];
+   for (let i = 0; i < grid.length; i++) {
+     const it = grid[i];
+     if (!it) continue;
+     if (it.kind !== 'block') return null;
+-    out.push({ x: i % size, y: (i / size) | 0, ing: { kind: 'block', blockId: it.blockId } });
++    out.push({
++      x: i % size, y: (i / size) | 0,
++      blockId: it.blockId, origin: it.origin ?? NO_ORIGIN,
++    });
+   }
+   return out;
+ }
+```
+
+```diff
+ function matchShaped(cells: Cell[], size: number, pattern: (Ingredient | null)[][]) {
+   /* …existing bounding-box / offset sweep unchanged… */
+-  return sameIngredient(cell.ing, want);
++  return ingredientMatches(want, cell.blockId);
+ }
+
+ function matchShapeless(cells: Cell[], ings: Ingredient[]) {
+-  /* …existing order-independent greedy match, using sameIngredient… */
++  if (cells.length !== ings.length) return false;
++  const used = new Array(cells.length).fill(false);
++  // Exact-id ingredients are matched FIRST so a category ingredient can't greedily
++  // consume the one cell an exact ingredient needed.
++  const order = ings.map((ing, i) => i)
++    .sort((a, bi) => (ings[a].kind === 'block' ? 0 : 1) - (ings[bi].kind === 'block' ? 0 : 1));
++  for (const oi of order) {
++    const k = cells.findIndex((c, i) => !used[i] && ingredientMatches(ings[oi], c.blockId));
++    if (k < 0) return false;
++    used[k] = true;
++  }
++  return true;
+ }
+```
+
+**Origin propagation** — crafting jungle logs must yield jungle planks:
+
+```ts
+/**
+ * The origin a crafted output inherits: the most common origin among the inputs that
+ * satisfied a *category* ingredient (majority vote, lowest tag wins ties for determinism).
+ * Exact-id inputs (machines, coal) never vote.
+ */
+export function craftOutputOrigin(
+  grid: (SlotItem | null)[], size: number, recipe: Recipe,
+): OriginTag {
+  const cells = cellsOf(grid, size);
+  if (!cells) return NO_ORIGIN;
+  const wantsCategory = (recipe.shapeless ?? recipe.shaped?.flat() ?? [])
+    .some((i) => i && i.kind === 'category');
+  if (!wantsCategory) return NO_ORIGIN;
+
+  const votes = new Map<OriginTag, number>();
+  for (const c of cells) {
+    if (!c.origin || !categoryOf(c.blockId)) continue;
+    votes.set(c.origin, (votes.get(c.origin) ?? 0) + 1);
+  }
+  let best = NO_ORIGIN, bestN = 0;
+  for (const [tag, n] of [...votes].sort((a, b) => a[0] - b[0])) {
+    if (n > bestN) { best = tag; bestN = n; }
+  }
+  return best;
+}
+
+/** Output resolved for a specific craft — carries origin when the family is themed. */
+export function resolveOutput(
+  grid: (SlotItem | null)[], size: number, recipe: Recipe,
+): SlotItem {
+  const o = recipe.output;
+  if (o.kind !== 'block') return { ...o };
+  const tag = craftOutputOrigin(grid, size, recipe);
+  return tag ? { ...o, origin: tag } : { ...o };
+}
+```
+
+Call `resolveOutput(...)` instead of reading `recipe.output` directly wherever the craft
+is committed.
+
+> **⚠️ ASSUMPTION** — the commit site is in the crafting UI or `engine.ts`. Find it with
+> `grep -rn "matchCraft" src/`. Also note `canonicalOf` is exported for the recipe-book UI so
+> a `kind:'category'` slot can render a representative icon.
+
+---
+
+## 6. Tasks 2 — trees
+
+### `src/game/world/biomes.ts`
+
+The species decision moves to the theme; the biome only decides *whether* and *how often*.
+
+```diff
+-export type TreeKind = 'oak' | 'spruce' | null;
++/**
++ * Biomes no longer name a species — species/silhouette comes from
++ * `PlanetTheme.tree.silhouette` (14 planet types, 5 biomes: the biome is too coarse).
++ * 'auto' = "this biome supports trees", null = "never".
++ */
++export type TreeKind = 'auto' | null;
++/** @deprecated kept so old call sites compile; both map to 'auto'. */
++export const LEGACY_TREE_KINDS = { oak: 'auto', spruce: 'auto' } as const;
+
+ export const BIOME_DEFS: BiomeDef[] = [
+-  { name: 'Plains', ..., tree: 'oak', ... },
+-  { name: 'Forest', ..., tree: 'oak', ... },
++  { name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0, trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0 },
++  { name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0, trees: 0.05,  tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0 },
+   { name: 'Desert', surface: B.SAND, sub: B.SAND, hill: 1.5, trees: 0, tree: null, flowers: 0, grass: 0, cactus: 0.014 },
+-  { name: 'Mountains', ..., tree: 'oak', ... },
+-  { name: 'Snowy Taiga', ..., tree: 'spruce', ... },
++  { name: 'Mountains', surface: B.GRASS, sub: B.STONE, hill: 7, trees: 0.006, tree: 'auto', flowers: 0.01, grass: 0.32, cactus: 0 },
++  { name: 'Snowy Taiga', surface: B.SNOW, sub: B.DIRT, hill: 4, trees: 0.022, tree: 'auto', flowers: 0, grass: 0.02, cactus: 0 },
+ ];
+```
+
+Note the **Desert biome now grows trees on `desert`/`crimson` planets** because
+`floraFor('desert')` returns `succulent` with `densityMul 0.5` — but `BIOME_DEFS[DESERT].trees`
+is `0`, which would veto it. Fix in the generator by using a per-theme floor:
+
+### `src/game/world/generator.ts`
+
+```diff
+-// NOTE: this is a DIFFERENT, structurally-loose PlanetTheme than space/theme.ts's
+-export interface PlanetTheme {
+-  seed: bigint | string | number;
+-  name?: string; biome?: Biome | null; hillAmp?: number; mountainAmp?: number;
+-  seaLevel?: number; oceanCoverage?: number; [k: string]: unknown;
+-}
++// The duplicate PlanetTheme is GONE. There is now exactly one definition.
++// Import is type-only, so no runtime cycle: generator → space/theme is erased at build.
++import type { PlanetTheme } from '../space/theme';
++import { floraFor, type Flora } from '../space/flora';
++import { NO_ORIGIN, type OriginTag } from '../core/origin';
++
++/** Callers that hand-roll partial themes (tests, the arena, debug tools) still typecheck. */
++export type ThemeInput =
++  Partial<Omit<PlanetTheme, 'seed'>> & { seed: bigint | number | string };
++export type { PlanetTheme };
++
++const FALLBACK_FLORA: Flora = floraFor('terran', 0n);
++const asBigInt = (s: bigint | number | string): bigint => {
++  try { return BigInt(s as never); } catch { return 0n; }
++};
+
+-let ACTIVE_THEME: PlanetTheme | null = null;
+-export function setActivePlanetTheme(t: PlanetTheme | null | undefined): void { ACTIVE_THEME = t ?? null; }
+-export function getActivePlanetTheme(): PlanetTheme | null { return ACTIVE_THEME; }
++let ACTIVE_THEME: ThemeInput | null = null;
++export function setActivePlanetTheme(t: ThemeInput | null | undefined): void { ACTIVE_THEME = t ?? null; }
++export function getActivePlanetTheme(): ThemeInput | null { return ACTIVE_THEME; }
++/** The origin tag every voxel generated on this planet implicitly carries. */
++export function activeOriginTag(): OriginTag {
++  return (ACTIVE_THEME?.originTag as OriginTag | undefined) ?? NO_ORIGIN;
++}
++/** Flora for the active planet, with a safe fallback for partial/legacy themes. */
++export function activeFlora(): Flora {
++  const t = ACTIVE_THEME;
++  if (t?.tree && t.grass && t.flower) {
++    return { tree: t.tree, grass: t.grass, flower: t.flower } as Flora;
++  }
++  return t?.type ? floraFor(t.type, asBigInt(t.seed)) : FALLBACK_FLORA;
++}
+```
+
+Constructor + placement:
+
+```diff
+ export class TerrainGenerator {
+-  readonly theme: PlanetTheme | null;
+-  constructor(public readonly seed: number, theme: PlanetTheme | null = ACTIVE_THEME) {
++  readonly theme: ThemeInput | null;
++  readonly flora: Flora;
++  readonly originTag: OriginTag;
++  constructor(public readonly seed: number, theme: ThemeInput | null = ACTIVE_THEME) {
+     this.theme = theme;
+     this.sea = clamp(Math.round(theme?.seaLevel ?? SEA_LEVEL), 4, H - 24);
