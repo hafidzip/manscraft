@@ -2,7 +2,6 @@ import { PlanetFactorySim, MAX_BACKLOG, type TerrainLike } from './factorySim';
 import { ItemLedger } from './itemLedger';
 import { WorldDeltaStore } from '../persist/worldDelta';
 import { hub, type PlanetSave } from '../persist/planetStore';
-import { runMachineProcessingSelfTests } from './machineProcessing.selftest';
 
 const TICK_MS = 500;
 const CATCHUP_BUDGET_MS = 8;
@@ -153,10 +152,9 @@ declare global {
     __manscraftSim?: {
       hub: typeof hub;
       universeSim: UniverseSim;
-      selfTest: typeof runMachineProcessingSelfTests;
     };
   }
 }
 if (typeof window !== 'undefined') {
-  window.__manscraftSim = { hub, universeSim, selfTest: runMachineProcessingSelfTests };
+  window.__manscraftSim = { hub, universeSim };
 }
