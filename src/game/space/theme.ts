@@ -5,6 +5,16 @@ import { Biome } from '../world/biomes';
 import { SEA_LEVEL } from '../core/constants';
 import type { PlanetSpec, StarSpec } from './galaxy';
 import { PLANET_PALETTES } from './palettes';
+import {
+  hueBucketFromSeed, originGroupHex, originTints, packOrigin, waterHexFor,
+  type OriginTag,
+} from '../core/origin';
+import { floraFor, type Flora, type FlowerShape, type GrassShape, type TreeShape } from './flora';
+
+export interface ThemePalette {
+  grass: number; dirt: number; stone: number; sand: number; log: number;
+  leaf: number; planks: number; snow: number; water: number; cactus: number;
+}
 
 export interface PlanetTheme {
   seed: bigint;
@@ -17,6 +27,25 @@ export interface PlanetTheme {
   spec: PlanetSpec;
   star: StarSpec;
   tint: Record<string, [number, number, number]>;
+
+  originTag: OriginTag;
+  variantId: number;
+  hueBucket: number;
+
+  colors: ThemePalette;
+  waterHex: number;
+
+  tree: TreeShape;
+  grass: GrassShape;
+  flower: FlowerShape;
+
+  fogHex: number;
+  fogDensity: number;
+  ambientHex: number;
+  sunHex: number;
+  particleHex: number;
+  toolTintHex: number;
+
   [k: string]: unknown;
 }
 
@@ -45,20 +74,70 @@ const skyFromAtmo = (hex: number): number => {
   return (ch(16, 0.72, 46) << 16) | (ch(8, 0.72, 52) << 8) | ch(0, 0.78, 60);
 };
 
+function mixHex(a: number, b: number, t: number): number {
+  const ch = (h: number, s: number) => (h >> s) & 0xff;
+  const m = (s: number) => Math.round(ch(a, s) * (1 - t) + ch(b, s) * t) & 0xff;
+  return (m(16) << 16) | (m(8) << 8) | m(0);
+}
+
+function starTintHex(pal: PlanetPalette): number {
+  return mixHex(0xfff6e6, pal.atmoHex, 0.18);
+}
+
+const FOG_SALT = 0x6f0;
+
 export function themeFromPalette(pal: PlanetPalette, seed: bigint): PlanetTheme {
   const rule = RULES[pal.key] ?? RULES.terran;
   const r = new Rng(derive(seed, 0x7e));
+  const f = new Rng(derive(seed, FOG_SALT));
+
+  const hueBucket = hueBucketFromSeed(seed);
+  const originTag = packOrigin(pal.key, hueBucket);
+  const flora: Flora = floraFor(pal.key, seed);
+  const skyHex = rule.sky ?? skyFromAtmo(pal.atmoHex);
+
+  const colors: ThemePalette = {
+    grass: originGroupHex(originTag, 'grass'),
+    dirt: originGroupHex(originTag, 'dirt'),
+    stone: originGroupHex(originTag, 'stone'),
+    sand: originGroupHex(originTag, 'sand'),
+    log: originGroupHex(originTag, 'log'),
+    leaf: originGroupHex(originTag, 'leaves'),
+    planks: originGroupHex(originTag, 'planks'),
+    snow: originGroupHex(originTag, 'snow'),
+    water: waterHexFor(originTag),
+    cactus: originGroupHex(originTag, 'cactus'),
+  };
+
   return {
     seed,
     type: pal.key,
     biome: rule.biome,
     seaLevel: Math.max(2, Math.round(SEA_LEVEL + rule.sea + r.range(-2, 2))),
     hillAmp: rule.hillAmp * r.range(0.92, 1.08),
-    skyHex: rule.sky ?? skyFromAtmo(pal.atmoHex),
+    skyHex,
     lava: rule.lava ?? pal.lava,
     spec: undefined as unknown as PlanetSpec,
     star: undefined as unknown as StarSpec,
-    tint: {},
+    tint: (originTints(originTag) ?? {}) as Record<string, [number, number, number]>,
+
+    originTag,
+    variantId: (originTag & 0x0f) - 1,
+    hueBucket,
+
+    colors,
+    waterHex: colors.water,
+
+    tree: flora.tree,
+    grass: flora.grass,
+    flower: flora.flower,
+
+    fogHex: mixHex(skyHex, pal.atmoHex, 0.45),
+    fogDensity: (pal.lava ? 0.020 : 0.0075) * f.range(0.7, 1.45),
+    ambientHex: mixHex(pal.atmoHex, 0xffffff, 0.35),
+    sunHex: starTintHex(pal),
+    particleHex: colors.dirt,
+    toolTintHex: mixHex(colors.planks, colors.log, 0.4),
   };
 }
 
@@ -72,3 +151,5 @@ export function homeFromTheme(theme: { spec?: PlanetSpec; star?: StarSpec } | nu
   if (theme?.spec && theme.star) return { star: theme.star, planet: theme.spec };
   return null;
 }
+
+export const DEFAULT_THEME_TYPE: PlanetType = 'terran';

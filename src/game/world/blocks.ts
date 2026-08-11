@@ -1,6 +1,7 @@
 
 import { TILES, tintsFromTheme } from '../core/textures';
 import type { PlanetTheme } from '../space/theme';
+import { NO_ORIGIN, originColorMul, type OriginTag } from '../core/origin';
 
 export const B = {
   AIR: 0,
@@ -394,7 +395,7 @@ const STONE_GROUP = [
   B.STONE, B.GRAVEL, B.BEDROCK, B.FURNACE, B.COBBLE,
   ...CONV, ...INS, ...LM,
 ];
-const BLOCK_GROUP: Partial<Record<number, string>> = {
+export const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.GRASS]: 'grass', [B.DIRT]: 'dirt', [B.SAND]: 'sand',
   [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.WATER]: 'water', [B.SNOW]: 'snow',
   [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass',
@@ -402,7 +403,21 @@ const BLOCK_GROUP: Partial<Record<number, string>> = {
   ...Object.fromEntries(STONE_GROUP.map((id) => [id, 'stone'])),
 };
 
+export const THEMED_IDS: ReadonlySet<number> = new Set([
+  B.GRASS, B.DIRT, B.SAND, B.LOG, B.LEAVES, B.PLANKS, B.TALLGRASS,
+  B.FLOWER_RED, B.FLOWER_YELLOW, B.SNOW, B.WATER, B.CACTUS,
+]);
+export const isThemedId = (id: number): boolean => THEMED_IDS.has(id);
+
 const BASE_COLORS: number[][] = DEFS.map((d) => (d ? d.colors.slice() : []));
+
+function tintColors(base: number[], m: readonly [number, number, number] | null | undefined): number[] {
+  if (!m) return base;
+  return base.map((hex) => {
+    const ch = (shift: number, f: number) => Math.max(0, Math.min(255, ((hex >> shift) & 255) * f));
+    return (ch(16, m[0]) << 16) | (ch(8, m[1]) << 8) | ch(0, m[2]);
+  });
+}
 
 export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
   const tints = tintsFromTheme(theme);
@@ -411,10 +426,23 @@ export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
     if (!d) continue;
     const base = BASE_COLORS[id];
     const m = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
-    d.colors = base.map((hex) => {
-      if (!m) return hex;
-      const ch = (shift: number, f: number) => Math.max(0, Math.min(255, ((hex >> shift) & 255) * f));
-      return (ch(16, m[0]) << 16) | (ch(8, m[1]) << 8) | ch(0, m[2]);
-    });
+    d.colors = tintColors(base, m);
   }
+}
+
+const colorCache = new Map<number, number[]>();
+
+export function colorsFor(id: number, tag: OriginTag = NO_ORIGIN): number[] {
+  const d = DEFS[id];
+  if (!d) return [0xffffff];
+  const base = BASE_COLORS[id] ?? d.colors;
+  const group = BLOCK_GROUP[id];
+  if (!tag || !group) return d.colors;
+  const key = (id << 8) | tag;
+  const hit = colorCache.get(key);
+  if (hit) return hit;
+  const m = originColorMul(tag, group);
+  const out = tintColors(base, m);
+  colorCache.set(key, out);
+  return out;
 }

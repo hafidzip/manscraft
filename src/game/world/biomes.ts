@@ -9,7 +9,8 @@ export enum Biome {
   SNOW = 4,
 }
 
-export type TreeKind = 'oak' | 'spruce' | null;
+export type TreeKind = 'auto' | null;
+export const LEGACY_TREE_KINDS = { oak: 'auto', spruce: 'auto' } as const;
 
 export interface BiomeDef {
   name: string;
@@ -26,23 +27,23 @@ export interface BiomeDef {
 export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
-    trees: 0.006, tree: 'oak', flowers: 0.03, grass: 0.58, cactus: 0,
+    trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0,
   },
   {
     name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
-    trees: 0.05, tree: 'oak', flowers: 0.012, grass: 0.64, cactus: 0,
+    trees: 0.05, tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0,
   },
   {
     name: 'Desert', surface: B.SAND, sub: B.SAND, hill: 1.5,
-    trees: 0, tree: null, flowers: 0, grass: 0, cactus: 0.014,
+    trees: 0, tree: 'auto', flowers: 0, grass: 0, cactus: 0.014,
   },
   {
     name: 'Mountains', surface: B.GRASS, sub: B.STONE, hill: 7,
-    trees: 0.006, tree: 'oak', flowers: 0.01, grass: 0.32, cactus: 0,
+    trees: 0.006, tree: 'auto', flowers: 0.01, grass: 0.32, cactus: 0,
   },
   {
     name: 'Snowy Taiga', surface: B.SNOW, sub: B.DIRT, hill: 4,
-    trees: 0.022, tree: 'spruce', flowers: 0, grass: 0.02, cactus: 0,
+    trees: 0.022, tree: 'auto', flowers: 0, grass: 0.02, cactus: 0,
   },
 ];
 

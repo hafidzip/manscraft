@@ -2,9 +2,20 @@
 import * as THREE from 'three';
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, chunkIndex } from '../core/constants';
 import { tileUV } from '../core/textures';
-import { B, DEFS, isWaterId, isInserter, isLaserMiner, isTurret, waterHeight, waterInfo } from './blocks';
+import { B, DEFS, isWaterId, isInserter, isLaserMiner, isTurret, waterHeight, waterInfo, BLOCK_GROUP } from './blocks';
+import { relativeColorMul, type OriginTag } from '../core/origin';
+import { activeFlora, activeOriginTag } from './generator';
 
 export type BlockGetter = (wx: number, wy: number, wz: number) => number;
+
+export interface MeshTheme {
+  nativeTag: OriginTag;
+  originAt?: (x: number, y: number, z: number) => OriginTag;
+}
+
+function defaultMeshTheme(): MeshTheme {
+  return { nativeTag: activeOriginTag() };
+}
 
 interface Face {
   dir: [number, number, number];
@@ -93,13 +104,19 @@ function buildGeom(b: Bucket, withFlow = false, withSway = false): THREE.BufferG
   return g;
 }
 
-export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, data: Uint8Array): ChunkGeoms {
+export function buildChunkGeometry(
+  get: BlockGetter, cx: number, cz: number, data: Uint8Array, mt: MeshTheme = defaultMeshTheme(),
+): ChunkGeoms {
   const opaqueB = newBucket();
   const cutoutB = newBucket();
   const foliageB = newBucket();
   const waterB = newBucket();
   const baseX = cx * S;
   const baseZ = cz * S;
+  const tagAt = mt.originAt ?? (() => mt.nativeTag);
+  const nativeTag = mt.nativeTag;
+  const grassShape = activeFlora().grass;
+  const flowerShape = activeFlora().flower;
 
   const localGet = (lx: number, ly: number, lz: number): number => {
     const id = PAD[pIdx(lx, ly, lz)];
@@ -201,8 +218,11 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
         const d = DEFS[id];
 
         if (d.cross) {
-          if (id === B.TALLGRASS) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z);
-          else if (id === B.TORCH) {
+          const plantTag = tagAt(x, y, z);
+          const plantMul = relativeColorMul(plantTag, nativeTag, BLOCK_GROUP[id]);
+          if (id === B.TALLGRASS) {
+            if (grassShape.present) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z, plantMul);
+          } else if (id === B.TORCH) {
             const below = localGet(x, y - 1, z);
             let supX = 0, supY = -1, supZ = 0;
             if (below !== -1 && below !== B.AIR && DEFS[below]?.solid) {
@@ -221,14 +241,19 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
               }
             }
             emitTorch(cutoutB, x, y, z, d.icon, supX, supY, supZ);
+          } else if (id === B.FLOWER_RED || id === B.FLOWER_YELLOW) {
+            if (flowerShape.present) emitCross(cutoutB, x, y, z, d.side, 0.018, baseX + x, baseZ + z, plantMul);
+          } else {
+            emitCross(cutoutB, x, y, z, d.side, 0.028, baseX + x, baseZ + z, plantMul);
           }
-          else emitCross(cutoutB, x, y, z, d.side, id === B.FLOWER_RED || id === B.FLOWER_YELLOW ? 0.018 : 0.028, baseX + x, baseZ + z);
           continue;
         }
 
         const isWater = !!d.water;
         const isFoliage = id === B.LEAVES;
         const bucket = isWater ? waterB : isFoliage ? foliageB : d.cutout ? cutoutB : opaqueB;
+        const voxelTag = tagAt(x, y, z);
+        const voxelMul = relativeColorMul(voxelTag, nativeTag, BLOCK_GROUP[id]);
 
         let cornerH: [number, number, number, number] = [1, 1, 1, 1];
         let flowX = 0;
@@ -372,7 +397,7 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
               aos[ci] = ao;
               shade *= AO_SHADE[ao];
             }
-            bucket.col.push(shade, shade, shade);
+            bucket.col.push(shade * voxelMul[0], shade * voxelMul[1], shade * voxelMul[2]);
           }
 
           if (doAO && aos[0] + aos[2] < aos[1] + aos[3]) {
@@ -394,7 +419,10 @@ export function buildChunkGeometry(get: BlockGetter, cx: number, cz: number, dat
   };
 }
 
-function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number, swayStrength = 0, wx = x, wz = z): void {
+function emitCross(
+  bucket: Bucket, x: number, y: number, z: number, tile: number, swayStrength = 0,
+  wx = x, wz = z, mul: [number, number, number] = [1, 1, 1],
+): void {
   const m = 0.15;
   const [u0, v0, u1, v1] = tileUV(tile);
   const phase = hashPlant(wx, y, wz, 11) * Math.PI * 2;
@@ -422,10 +450,10 @@ function emitCross(bucket: Bucket, x: number, y: number, z: number, tile: number
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
     const root = 0.62, tip = 0.98;
     bucket.col.push(
-      root, root, root,
-      tip,  tip,  tip,
-      tip,  tip,  tip,
-      root, root, root,
+      root * mul[0], root * mul[1], root * mul[2],
+      tip * mul[0],  tip * mul[1],  tip * mul[2],
+      tip * mul[0],  tip * mul[1],  tip * mul[2],
+      root * mul[0], root * mul[1], root * mul[2],
     );
     bucket.sway.push(
       phase, swayStrength, 0, 0,
@@ -502,7 +530,10 @@ function hashPlant(x: number, y: number, z: number, salt: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number): void {
+function emitTallGrass(
+  bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number,
+  mul: [number, number, number] = [1, 1, 1],
+): void {
   const [u0, v0, u1, v1] = tileUV(tile);
   const seed = hashPlant(wx, y, wz, 101);
   const blades = 5 + Math.floor(seed * 3);
@@ -537,10 +568,10 @@ function emitTallGrass(bucket: Bucket, x: number, y: number, z: number, tile: nu
     for (let k = 0; k < 4; k++) bucket.nrm.push(cx, cz, ang + 100.0);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
     bucket.col.push(
-      rootShade, rootShade, rootShade,
-      tipShade,  tipShade,  tipShade,
-      tipShade,  tipShade,  tipShade,
-      rootShade, rootShade, rootShade,
+      rootShade * mul[0], rootShade * mul[1], rootShade * mul[2],
+      tipShade * mul[0],  tipShade * mul[1],  tipShade * mul[2],
+      tipShade * mul[0],  tipShade * mul[1],  tipShade * mul[2],
+      rootShade * mul[0], rootShade * mul[1], rootShade * mul[2],
     );
     bucket.sway.push(
       phase, strength, 0, h,

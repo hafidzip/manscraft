@@ -362,6 +362,13 @@ function smoothstep(a: number, b: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+const _rampColor = new THREE.Color();
+
+export function rampAt255(stops: Array<[number, [number, number, number]]>, h: number): [number, number, number] {
+  sampleStops(stops, h, _rampColor);
+  return [_rampColor.r * 255, _rampColor.g * 255, _rampColor.b * 255];
+}
+
 export function biomeColorInto(
   h: number, lat: number, pal: PlanetPalette, out: THREE.Color, poleCol: THREE.Color,
 ): void {
