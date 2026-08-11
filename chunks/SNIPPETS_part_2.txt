@@ -1,0 +1,180 @@
+  // ---------------------------------------------------------------------------
+  // Torus handling
+  // ---------------------------------------------------------------------------
+  /** Keep the ship in the player's min-image continuum (render space). Cheap. */
+  rebase(refX: number, refZ: number): void {
+    const nx = refX + minImageF(this.pos.x - refX);
+    const nz = refZ + minImageF(this.pos.z - refZ);
+    if (nx === this.pos.x && nz === this.pos.z) return;
+    this.pos.x = nx;
+    this.pos.z = nz;
+    this.sync();
+  }
+
+  distanceTo(p: THREE.Vector3): number {
+    return Math.hypot(minImageF(this.pos.x - p.x), this.pos.y - p.y, minImageF(this.pos.z - p.z));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------------------
+  getTransform(): ShipTransform {
+    return { x: wrapBlock(this.pos.x), y: this.pos.y, z: wrapBlock(this.pos.z), yaw: this.yaw };
+  }
+
+  setTransform(t: ShipTransform, refX: number, refZ: number): void {
+    this.pos.set(refX + minImageF(t.x - refX), t.y, refZ + minImageF(t.z - refZ));
+    this.yaw = t.yaw;
+    this.vel.set(0, 0, 0);
+    this.bank = 0;
+    this.pitchVis = 0;
+    this.flyPitch = 0;
+    this.baseY = t.y;
+    this.settleT = 0;
+    this.settleHere(true);              // snap-clamp: never restore inside terrain
+  }
+```
+
+`moveAxis`'s `if (d < 0) this.baseY = this.pos.y;` (1f) stays as-is — under the new
+semantics that is now a *bob-free* assignment and is exactly right.
+
+## 1.5 Patch — `src/game/engine.ts:666-685` (ship creation)
+
+```diff
+     this.ship = new Spaceship(this.scene, this.world, this.particles);
+-    this.ship.placeNear(this.world.gen, sx, sz);
+     const startInShip = this.theme !== null;
+     if (startInShip) {
++      this.ship.placeNear(this.world.gen, sx, sz);   // seeds yaw/visual state
+       this.ship.enterAtmosphere(this.world.gen, this.spawn.x, this.spawn.z, this.player.yaw);
+       this.player.setSpawn(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
+       this.player.yaw = this.ship.yaw;
+       this.player.pitch = -0.16;
+       this.menuYaw = this.player.yaw;
++    } else {
++      const saved = planetStore.load(this.shipStoreKey()) as ShipTransform | null;
++      if (saved && isFinite(saved.x) && isFinite(saved.y) && isFinite(saved.z)) {
++        this.ship.setTransform(saved, this.spawn.x, this.spawn.z);
++      } else {
++        this.ship.placeNear(this.world.gen, sx, sz);
++      }
+     }
+```
+
+```ts
+// engine.ts — new private helpers (near dropBlock, ~line 997)
+  private shipStoreKey(): string { return `ship:${this.planetKey}`; }
+
+  /** Persist the parked transform. Cheap; call liberally. */
+  private persistShip(): void {
+    if (!this.ship) return;
+    planetStore.save(this.shipStoreKey(), this.ship.getTransform());
+  }
+```
+
+Call `persistShip()` from: `exitShip()`, `boardShip()`, the planet teardown path
+(`dispose()` / the space-transition handler), and a 5 s timer while parked.
+
+## 1.6 Patch — `src/game/engine.ts:1650-1668` + `2019-2094` (board / exit)
+
+```diff
+       case 'KeyE':
+-        if (this.piloting) this.exitShip();
++        if (this.piloting) { if (!this.exitShip()) this.sound.playClick(); }
+         else if (this.nearMerchantEnemy) this.openShop();
+         else if (this.ship && this.ship.distanceTo(this.player.eye()) < 6) this.boardShip();
+```
+
+```diff
+   private boardShip(resetCamera = false): void {
+-    this.ship.ensureClearance(0.35);
++    // margin 0: a correctly parked ship must not move a millimetre on boarding
++    this.ship.ensureClearance(0);
++    this.persistShip();
+     this.piloting = true;
+```
+
+```diff
+-  private exitShip(): void {
+-    this.piloting = false;
++  /** @returns false if the player is too high to disembark (ship untouched). */
++  private exitShip(): boolean {
++    if (this.ship.altitude() > SHIP_MAX_EXIT_ALTITUDE) return false;   // 40 m
++    this.piloting = false;
+     this.spaceExited = false;
+     this.sound.playDisembark();
+     this.sound.stopShip();
+     const yaw = this.ship.yaw;
+     let placed = false;
++    // Landing is vertical, so the disembark scan can use the ship's final XZ now.
+     for (const sign of [1, -1]) {
+       ...unchanged scan...
+     }
+     if (!placed) {
+       this.player.setSpawn(this.ship.pos.x, this.ship.pos.y + 3, this.ship.pos.z);
+       this.player.yaw = yaw;
+     }
+-    this.ship.settleHere();
++    this.ship.settleHere();            // smooth glide, never a teleport
++    this.persistShip();
+     this.selectSlot(this.sel, true);
+     this.snapCameraToEye();
++    return true;
+   }
+
+   private shipAltitude(): number {
+     if (!this.ship) return 0;
+-    const gy = this.world.highestY(Math.floor(this.ship.pos.x), Math.floor(this.ship.pos.z));
+-    return this.ship.pos.y - gy;
++    return this.ship.altitude();       // footprint-wide, canopy- and seam-correct
+   }
+```
+
+Add to `engine/constants.ts`: `export const SHIP_MAX_EXIT_ALTITUDE = 40;`
+
+## 1.7 Patch — per-frame rebase (`engine.ts`, next to the parked/pilot tick)
+
+```diff
+     if (this.piloting) this.tickPilot(dt);
+-    else if (this.ship) this.ship.updateParked(dt);
++    else if (this.ship) {
++      // Keep the ship in the player's min-image continuum: fixes seam boarding,
++      // the exit side-scan, and float drift after many laps of the torus.
++      this.ship.rebase(this.player.pos.x, this.player.pos.z);
++      this.ship.updateParked(dt);
++      this.shipSaveT -= dt;
++      if (this.shipSaveT <= 0) { this.shipSaveT = 5; this.persistShip(); }
++    }
+```
+
+## 1.8 Acceptance check
+
+1. ✅ Exit no longer clamps from above except as a bounded, time-based glide; >40 m exits are refused.
+2. ✅ Board/exit is a fixed point: `ensureClearance(0)` → `gy+1.35`; `settleHere` clamps to `[gy+1.35, gy+2.55]` → unchanged. The bob can never enter `pos`.
+3. ✅ Restored from `planetStore` through `setTransform` (min-image rebased, snap-clamped).
+4. ✅ All ground sampling goes through `world.isSolid`/`highestY`, which wrap; `pos` is rebased every frame; persistence stores wrapped coordinates.
+
+---
+
+# TASK 2 — Static sun, identical visuals
+
+## 2.0 Design
+
+Split the two things `sunDir()` was conflating:
+
+* **Palette clock** — `time → sin → goldenElevation → sunElev → dayFactor`. *Unchanged, verbatim.*
+  Every colour, intensity, fog, star, cloud, bloom, flashlight and enemy-night decision keeps
+  its exact numeric input, so the golden-hour tuning is bit-identical.
+* **Light rig** — two compile-time constant directions. `Sky` stops touching
+  `sun.position`/`target` entirely; the new shadow controller (Task 4) owns the frusta,
+  which is also where texel snapping lives.
+
+`sunWorldPos`/`moonWorldPos` remain populated as *camera-relative points along the constant
+directions*, exactly as the brief's hint suggests, so **no consumer file changes** (2b, 2c).
+
+## 2.1 Patch — `src/game/vfx/sky.ts` (constants block, after `HEMI_GOLD`)
+
+```ts
+/**
+ * STATIC celestial directions.
+ *

@@ -1,0 +1,179 @@
+| Terrain self-shadow | `shadow.bias` in metres → ndc | 0.072 m (unchanged from today) |
+| Receiver offset | `shadow.normalBias` | 0.16 → **0.12** (texels shrank 1.375×; also stops cutout receivers, whose normal is forced to world-up, from sampling 15 cm away along a low sun) |
+| Cutout caster self-shadow | light-ray push in the depth material | **0.16 m**, zero silhouette cost |
+| Far cascade | world-space bias + normal bias | 0.25 m + 0.55 m (≈3 far texels) |
+| Softness | `shadow.radius` 1.0 → **1.5** | free for `PCFShadowMap` (fixed tap count) |
+
+The existing wrap-translucency floor (`outgoingLight = max(outgoingLight, diffuse*0.22)`,
+3d) remains the safety net: even a mis-biased blade cannot go black, which is exactly the
+golden-hour look the brief protects.
+
+## 3.6 Acceptance check
+
+1. ✅ `TALLGRASS` **and** flowers cast (both are `cross` + `aSway.y > 0`); torches are
+   discarded; casters stop at the 22–28 m dissolve, chunk-culled at 44 m with hysteresis.
+2. ✅ Pixel-stable: the depth pass reads no camera, no clock. Walk, strafe, spin — every
+   input to the shadow map is either a vertex constant or a uniform frozen at bake time;
+   and the frustum only moves in whole texels, only on frames it is rebuilt.
+3. ✅ No acne: casters slide 0.16 m down their own shadow ray; the receiver `normalBias`
+   drops to the like-for-like 0.12; terrain bias is bit-identical in world units.
+4. ✅ Throttling untouched (`autoUpdate = false` + `needsUpdate`); grass adds ≈ +0.45 of a
+   2048 pass to the near cascade only, paid for by the 2 → 1 map saving in 4.9.
+
+**One deliberate approximation:** blades between 22 and 28 m of the anchor dissolve out of
+the shadow map while remaining visible (the visual fade runs 26 → 46 m). That is grass
+shadow *LOD*, matching how Unity gives detail meshes their own shadow distance, and the
+dissolve is smooth so there is nothing to pop. If you ever want shadow and blade to agree
+exactly, set `GRASS_SHADOW_CUT = GRASS_FADE` and raise `GRASS_SHADOW_RADIUS` to 60 — one
+line each, ~2× the grass caster cost.
+
+---
+
+# TASK 5 — Grass and flowers cannot be mined
+
+## 5.0 The bug in one line
+
+`harvestOutcome` returns `null` for anything missing from `TO_FPS`, and `updateMining`
+treats `null` as "try again next frame" — so `breakT` stays ≥ 1, the crack overlay stays
+pinned, and the laser fires forever at an invincible plant. Two defects, not one: a
+**missing mapping** and a **missing failure path**. Fixing only the mapping leaves every
+future unmapped block able to wedge the miner again.
+
+## 5.1 Patch — `src/game/factory/machineProcessing.ts:46-54`
+
+### 5.1a Preferred (imports `DEFS`; no cycle — `blocks.ts` is a leaf data module)
+
+```diff
++/** Sentinel: the block breaks but yields no item. Never passed to itemDrops. */
++export const NO_ITEM = -1;
++
+ export interface HarvestOutcome { itemId: number; destroy: boolean }
+ export function harvestOutcome(
+   worldId: number,
+   toFps: Readonly<Record<number, number>>,
+ ): HarvestOutcome | null {
+   const itemId = toFps[worldId];
+-  if (itemId === undefined) return null;
+-  return { itemId, destroy: !isOreBlock(worldId) };
++  if (itemId !== undefined) return { itemId, destroy: !isOreBlock(worldId) };
++  // Cross-quad plants (tall grass, poppy, dandelion) are breakable but have no
++  // item id. TORCH is also `cross` and never reaches here — it maps to fps 60.
++  const d = DEFS[worldId];
++  if (d && d.cross === true && isFinite(d.hardness)) {
++    return { itemId: NO_ITEM, destroy: true };
++  }
++  return null;
+ }
+```
+
+with `import { DEFS } from '../world/blocks';`.
+
+### 5.1b Cycle-free variant (assumption A6 escape hatch — no new import)
+
+```ts
+/** World block ids that break with no drop. Keep in sync with blocks.ts `cross` defs. */
+const NO_DROP_BREAKABLE: ReadonlySet<number> = new Set([
+  B.TALLGRASS, B.FLOWER_RED, B.FLOWER_YELLOW,
+]);
+// ...
+  if (NO_DROP_BREAKABLE.has(worldId)) return { itemId: NO_ITEM, destroy: true };
+  return null;
+```
+
+5.1a is preferred: it fixes every present *and future* plant at once. 5.1b is the
+one-import-free fallback.
+
+## 5.2 Patch — `src/game/engine.ts:2344-2450` (`updateMining` tail — criterion 2)
+
+The single most important change is that **every** exit path resets breaking state.
+
+```diff
++  /** One place to end a mining attempt. Never leave breakT/crack/charge dangling. */
++  private resetBreak(clearTarget = false): void {
++    this.breakT = 0;
++    this.mineCharge = 0;
++    this.crack.visible = false;
++    if (clearTarget) this.target = null;
++  }
++
+     if (this.breakT < 1) return;
+
+     const { x, y, z, id } = this.target;
+     const outcome = harvestOutcome(id, TO_FPS);
+-    if (!outcome) return;                      // ← plants die here (outcome === null)
++    if (!outcome) {
++      // Genuinely unharvestable (bedrock-like, or a future unmapped block):
++      // stop hammering it instead of firing forever.
++      this.resetBreak();
++      return;
++    }
+ 
+     if (!outcome.destroy) {
+       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 14, 2.4);
+       this.sound.playBreak(d.sound);
+-      this.itemDrops.spawn(outcome.itemId, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+-      this.blocksMined++;
+-      this.breakT = 0;
+-      this.mineCharge = 0;
+-      this.crack.visible = false;
++      if (outcome.itemId !== NO_ITEM) {
++        this.itemDrops.spawn(outcome.itemId, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
++        this.blocksMined++;
++      }
++      this.resetBreak();
+       return;
+     }
+ 
+-    if (!this.world.destroyBlockAt(x, y, z)) return;
++    if (!this.world.destroyBlockAt(x, y, z)) { this.resetBreak(true); return; }
+     if (id === B.TORCH) this.torchLights.remove(x, y, z);
+     this.detachTorchesSupportedBy(x, y, z, true);
+     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
+     this.sound.playBreak(d.sound);
+-    this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+-    this.blocksMined++;
++    this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));  // no-ops for plants
+     this.removeFloatingPlantsAbove(x, y, z);
+     this.spillMachineOnBreak(x, y, z, id);
+     this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+-    this.breakT = 0;
+-    this.mineCharge = 0;
+-    this.crack.visible = false;
+-    this.target = null;
++    this.resetBreak(true);
+```
+
+`blocksMined++` moves into `dropBlock` (which already increments it) so plants do not
+inflate the counter — note the original code double-counted on the ore path
+(`dropBlock` + the explicit `++`); that is fixed as a side effect.
+
+Plants hit the `destroy` branch with `itemId === NO_ITEM`; `dropBlock`'s existing
+`if (fpsId === undefined) return;` makes the drop a silent no-op, so **no new item ids, no
+new icons, no `prewarm` risk**. Hardness 0.05 → `breakT` reaches 1 in 3 frames at 60 fps:
+near-instant ✅, with the existing `d.colors` burst and `playBreak('plant')` ✅.
+
+## 5.3 Drop decision — **Option A: plants drop nothing** (criterion 3)
+
+Chosen deliberately. Option B (real plant items) requires four coordinated edits in two
+different id spaces (`TO_FPS`/`FROM_FPS` world→fps, plus `BLOCK_NAMES` and
+`BLOCK_SELL_PRICES` keyed by *fps* ids) **and** a drawable icon for every new fps id,
+because `itemDrops.prewarm(new Set(Object.values(TO_FPS)))` runs at load and an unknown id
+renders garbage. That is a content task, not a bug fix, and it is the documented risk in
+the brief. If you do want it later, the minimal set is:
+
+```ts
+TO_FPS[B.TALLGRASS] = 66;  TO_FPS[B.FLOWER_RED] = 67;  TO_FPS[B.FLOWER_YELLOW] = 68;
+// FROM_FPS is derived automatically; then BLOCK_NAMES[66..68], BLOCK_SELL_PRICES[66..68] = 0,
+// and an icon for 66/67/68 in the item-drop instancer.
+```
+
+Adding those three entries makes `harvestOutcome`'s first branch win, and 5.1's plant
+branch becomes dead code that harms nothing — the fix is forward-compatible.
+
+## 5.4 `removeFloatingPlantsAbove` (criterion 4)
+
+Unchanged, and now consistent by construction: it already calls `dropBlock`, which no-ops
+for plants, so breaking a supporting block destroys the plants above with particles and
+sound and no drops — the same decision as direct mining ✅.
+
+## 5.5 Optional: automation (criterion 5) — **flagged, default OFF**

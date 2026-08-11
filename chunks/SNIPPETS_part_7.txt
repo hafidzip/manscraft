@@ -1,0 +1,180 @@
+     }
+```
+
+## 4.7 Patch — `src/game/world/world.ts:406-465` (layers, grass casters, dirty version)
+
+```diff
++  /** Bumped whenever chunk geometry changes; the engine uses it to invalidate shadows. */
++  shadowGeometryVersion = 0;
++  private grassCamX = 0;
++  private grassCamZ = 0;
++  private grassRadius = 0;
++
+   private buildMesh(c: Chunk): void {
+     ...
+     const add = (
+       g: THREE.BufferGeometry | undefined, mat: THREE.Material, order: number,
+-      castShadow: boolean,
++      castShadow: boolean, farCaster = false,
+     ): THREE.Mesh | null => {
+       ...
+       mesh.castShadow = castShadow;
+       mesh.receiveShadow = true;
++      // `enable` (not `set`) keeps layer 0, so the main camera still sees it.
++      if (farCaster) mesh.layers.enable(LAYER_FAR_CASTER);
+       ...
+     };
+-    add(geoms.opaque, this.mats.opaque, 0, true);
+-    const grass = add(geoms.cutout, this.mats.cutout, 1, false);
++    add(geoms.opaque, this.mats.opaque, 0, true, true);
++    // A chunk meshed while the player is standing next to it must be born a
++    // caster, otherwise grass shadows pop in on the next 0.25 s tick.
++    const grass = add(geoms.cutout, this.mats.cutout, 1, this.wantsGrassCast(c), false);
+     if (grass && this.mats.cutoutDepth) {
+       grass.customDepthMaterial = this.mats.cutoutDepth;
+     }
+     c.grass = grass;
+-    const foliage = add(geoms.foliage, this.mats.foliage, 1, true);
++    const foliage = add(geoms.foliage, this.mats.foliage, 1, true, true);
+     ...
+     add(geoms.water, this.mats.water, 2, false);
+     c.hasMesh = true;
++    this.shadowGeometryVersion++;
+     this.meshedChunks.add(c);
+     this.dirtySet.delete(c);
+   }
+
++  private wantsGrassCast(c: Chunk): boolean {
++    if (this.grassRadius <= 0) return false;
++    const dx = c.cx * S + c.kx + S * 0.5 - this.grassCamX;
++    const dz = c.cz * S + c.kz + S * 0.5 - this.grassCamZ;
++    return dx * dx + dz * dz <= this.grassRadius * this.grassRadius;
++  }
++
+-  updateGrassShadowCasters(camX: number, camZ: number, radius: number): boolean {
+-    const r2 = radius * radius;
++  /** `hysteresis` defaults to 0, so the existing 3-arg callers are unchanged. */
++  updateGrassShadowCasters(
++    camX: number, camZ: number, radius: number, hysteresis = 0,
++  ): boolean {
++    this.grassCamX = camX;
++    this.grassCamZ = camZ;
++    this.grassRadius = radius;
++    const rOn = radius * radius;
++    const rOff = (radius + hysteresis) * (radius + hysteresis);
+     let changed = false;
+     for (const c of this.meshedChunks) {
+       const g = c.grass;
+       if (!g) continue;
+       const dx = c.cx * S + c.kx + S * 0.5 - camX;
+       const dz = c.cz * S + c.kz + S * 0.5 - camZ;
+-      const want = dx * dx + dz * dz <= r2;
++      const d2 = dx * dx + dz * dz;
++      // ON at R, OFF at R + hysteresis: a player pacing across the boundary
++      // can no longer force a full shadow refresh every 0.25 s.
++      const want = g.castShadow ? d2 <= rOff : d2 <= rOn;
+       if (g.castShadow !== want) {
+         g.castShadow = want;
+         changed = true;
+       }
+     }
+     return changed;
+   }
+```
+
+`setBlock`'s existing dirty notification path should also `shadowGeometryVersion++` — one
+line where it marks the chunk dirty, so a placed block updates the far cascade before its
+chunk is re-meshed.
+
+## 4.8 Patch — `src/game/engine.ts:896-928` (warm-up must prime both cascades)
+
+```diff
+       for (let pass = 0; pass < 2; pass++) {
++        this.shadowLod.markDirty();
++        if (this.sky.sun.intensity > SHADOW_LIGHT_MIN_INTENSITY)
++          this.shadowLod.syncNear(this.sky.sun, this.sky.sunDirWorld, this.camera.position);
++        if (this.sky.moon.intensity > SHADOW_LIGHT_MIN_INTENSITY)
++          this.shadowLod.syncNear(this.sky.moon, this.sky.moonDirWorld, this.camera.position);
++        GRASS_SHADOW_ANCHOR.value.copy(this.camera.position);
++        SHADOW_LIGHT_DIR.value.copy(this.moonIsKey ? this.sky.moonDirWorld : this.sky.sunDirWorld);
++        GRASS_SHADOW_LIGHT_ANG.value = Math.atan2(SHADOW_LIGHT_DIR.value.z, SHADOW_LIGHT_DIR.value.x);
++        this.shadowLod.update(this.renderer, this.scene,
++          SHADOW_LIGHT_DIR.value, this.camera.position);
+         this.renderer.shadowMap.needsUpdate = true;
+         this.renderer.setRenderTarget(this.mainRT);
+         this.renderer.render(this.scene, this.camera);
+```
+
+The final `this.renderer.shadowMap.needsUpdate = true;` before `await this.nextFrame()`
+gets the same three-line prelude (`syncNear` for active lights). Without it the first real
+frame renders a shadow map for an *unsnapped* frustum still sitting at the origin.
+
+## 4.9 Range and cost accounting
+
+**Range.** `uFarFogEnd = (5 + 0.75)·16·0.92 = 84.6 m`, `VIEW_DISTANCE = 5` → 80 m of
+meshed chunks. Far cascade covers 96 m and dissolves 72 → 88 m, i.e. it ends inside
+opaque fog. Effective stable shadow range **32 m → 88 m = 2.75×** ✅ criterion 1.
+Raising it is one line (`SHADOW_FAR_HALF_EXTENT`) *if* `VIEW_DISTANCE` ever grows.
+
+> **Frustum geometry worth knowing.** With the static sun at elevation 0.22 (12.7°) the
+> ortho box's local-Y axis is only 12.7° off world-up, so a half-extent of *H* metres buys
+> ≈ *H* metres of ground radius **across** the sun azimuth and far more **along** it —
+> bounded by the depth range, which is why `CELESTIAL_SHADOW_FAR` goes 180 → 260.
+> Sizing by "half-extent = radius" is therefore conservative, never optimistic.
+
+**Cost**, in units of one 2048² depth pass, per refresh:
+
+| | today | after |
+|---|---|---|
+| Near, day | 2.00 (sun **+** moon, both always rendered — `castShadow` alone decides) | **1.00** (sun only) |
+| Near, twilight (~40 s / 300 s) | 2.00 | 1.25 (2048 sun + 1024 moon) |
+| Near, night | 2.00 | 0.25 (moon 1024 only) |
+| Far cascade | — | 0.25 per render, ~1 render per 8 m walked ≈ **0.05** amortised |
+| Grass casters (Task 3) | 0 | +0.4…0.5 on the near pass only |
+| **Typical daytime total** | **2.00** | **≈ 1.05** |
+
+Net **≈ 0.53× today**, and ≈ 0.75× worst case in twilight — comfortably inside the ≤1.6×
+budget ✅ criterion 3, with the headroom spent on grass. Two structural savings made this
+possible: (a) `shadow.autoUpdate = false` per light so zero-intensity lights stop
+re-rendering, (b) the elevation trigger from 2.4 is gone.
+
+**Blend correctness.** The far term multiplies `reflectedLight.direct*` *after*
+`<lights_fragment_begin>`, so it is conjunctive with three's near cascade rather than
+selective: in the 18–32 m overlap a penumbra edge can darken slightly more than either
+cascade alone. Fully-lit (1×1) and fully-shadowed (0×0) are exact; only PCF edges differ,
+and the blend completes at 28 m — inside the near box's 32 m inscribed circle — so there
+is no gap and no hard seam ✅. A selective split would require replacing three's
+`getShadow` call site, which is a much larger blast radius for an invisible gain.
+
+**Residual limitation, stated plainly:** during twilight both lights are lit, and the far
+cascade attenuates the *summed* direct term using only the key light's map. Worst case is
+a ~40 s window per 300 s day where far shadows are attributed to one light too many. The
+honest fix is a second far map; it is not worth 0.25 units for that window.
+
+## 4.10 Acceptance check
+
+1. ✅ 88 m of stable shadows (2.75×), dissolved 72 → 88 m under fog; cascade handover 18 → 28 m.
+2. ✅ 3.125 cm near texels vs 4.30 cm today (1.375× sharper).
+3. ✅ ≈ 0.53× typical daytime shadow cost; `autoUpdate = false` + `needsUpdate` throttle untouched.
+4. ✅ Grass never enters the far cascade (layer filter); the static sun is what makes texel snapping and a 10–40 s far-map cache legal.
+5. ✅ Near cascade still uses `customDepthMaterial` + `shadowSide`; the far pass uses one atlas-alpha-tested `MeshDepthMaterial` override; both sun and moon snap and refresh.
+
+---
+
+# TASK 3 — Grass blades cast stable shadows
+
+## 3.0 Design — four independent sources of instability, four fixes
+
+| # | Instability | Fix |
+|---|---|---|
+| S1 | Blades billboard toward **`uGrassCam`** in the *depth* material → every shadow silhouette reshapes as the player walks | Billboard toward the **constant light azimuth** instead. Same functional form, but the target angle is a session constant, so each blade has exactly **one** shadow silhouette forever. |
+| S2 | Sway is driven by `uGrassTime`, but the map re-renders on demand → shadows twitch at refresh cadence | **Freeze** sway at `t = 0`: `sin(aSway.x)` is still a per-blade random lean, just time-invariant. (The brief's "cheaper + more stable" option.) |
+| S3 | The distance-fade **collapse** (`gP.y -= …(1 - gCol)`) is camera-relative, so blades rise/sink in the shadow map continuously | Replace with a dissolve around **`GRASS_SHADOW_ANCHOR`**, frozen at the exact moment the map is baked. |
+| S4 | The light frustum tracks the camera every frame with no texel snapping → whole-scene swim | Task 4's `snapShadowLight` + "only move the frustum on the frames you re-render it". |
+
+S4 is why Task 4 merges first. S1–S3 are the same principle three times: **nothing the
+shadow pass reads may vary with the view.** After these, the only inputs to the cutout
+depth pass are per-vertex constants and uniforms that change solely on the frames the map
+is rebuilt.
+
+## 3.1 Patch — `src/game/world/mesher.ts:69-73` (shared uniforms)

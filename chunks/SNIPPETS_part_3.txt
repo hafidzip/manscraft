@@ -1,0 +1,179 @@
+ * Derived from the OLD `sunDir()` evaluated at `time = 0.16` (mid-morning), the
+ * frame the golden-hour palette was tuned against:
+ *   a      = 0.16 * 2PI              = 1.00531
+ *   elev   = goldenElevation(sin a)  = GOLDEN_ELEV = 0.22   (plateau)
+ *   horiz  = sqrt(1 - 0.22^2)        = 0.97550
+ *   hx     = cos a = 0.53583, hz = 0.35 -> normalised (0.83683, 0.54756)
+ *   dir    = (0.81632, 0.22, 0.53415)                      (already unit length)
+ *
+ * These are `const` for the whole session: the shadow direction can never change,
+ * which is the precondition for texel snapping (Task 4) and for the frozen,
+ * view-independent grass pose (Task 3).
+ */
+export const SUN_DIR  = new THREE.Vector3( 0.81632, 0.22, 0.53415).normalize();
+/** Moon: mirrored azimuth, lifted to 0.34 so night shadows have usable length. */
+export const MOON_DIR = new THREE.Vector3(-0.81632, 0.34, -0.53415).normalize();
+/** Distance the light rigs are pushed back along their direction. */
+export const CELESTIAL_DISTANCE = 140;
+```
+
+## 2.2 Patch — `src/game/vfx/sky.ts` (class surface + constructor)
+
+```diff
+   readonly sunColor = new THREE.Color(0xfff3d0);
+   readonly moonColor = new THREE.Color(0x9fb8ff);
+   sunElev = 1;
++  /** Constant light directions (scene -> light). Exposed for the shadow rig. */
++  readonly sunDirWorld = SUN_DIR.clone();
++  readonly moonDirWorld = MOON_DIR.clone();
+```
+
+```diff
+     this.sun = new THREE.DirectionalLight(0xfff3d0, 1.1);
++    // Direction is set ONCE, here, and never again.
++    this.sun.position.copy(SUN_DIR).multiplyScalar(CELESTIAL_DISTANCE);
++    this.sun.target.position.set(0, 0, 0);
+     scene.add(this.sun);
+     scene.add(this.sun.target);
+     this.moon = new THREE.DirectionalLight(0x9fb8ff, 0);
++    this.moon.position.copy(MOON_DIR).multiplyScalar(CELESTIAL_DISTANCE);
++    this.moon.target.position.set(0, 0, 0);
+     scene.add(this.moon);
+     scene.add(this.moon.target);
+```
+
+## 2.3 Replacement — `src/game/vfx/sky.ts:~805-880` (`sunDir` + `update`)
+
+```ts
+  // `sunDir()` is DELETED. The elevation it used to produce is now purely a
+  // palette clock and is computed inline below; nothing derives a direction from it.
+
+  get isDay(): boolean {
+    return this.dayFactor > 0.5;
+  }
+
+  update(dt: number, camPos: THREE.Vector3): void {
+    this.time = (this.time + dt / DAY_LENGTH) % 1;
+
+    // ---- PALETTE CLOCK (byte-for-byte identical maths to the old code) -------
+    const elev = goldenElevation(Math.sin(this.time * Math.PI * 2));
+    this.sunElev = elev;
+    this.dayFactor = smoother((elev + 0.06) / 0.24);
+    const day = this.dayFactor;
+    const plateau = clamp01(elev / GOLDEN_ELEV);
+    const warmth = day * (0.72 - 0.30 * plateau);
+
+    this.skyColor.copy(this.skyNight).lerp(this.daySky, day);
+    this.skyColor.lerp(this.duskSky, warmth * 0.5);
+    this.fog.color.copy(this.skyColor);
+    this.fog.near = this.fogNear;
+    this.fog.far = this.fogFar;
+
+    const moonFade = 1 - smoother((elev + 0.02) / 0.18);
+    this.sunColor.copy(SUN_GOLD_LOW).lerp(SUN_GOLD_HIGH, plateau);
+    this.sun.color.copy(this.sunColor);
+    const sunBoost = 1.0 + THREE.MathUtils.smoothstep(elev, 0.05, 0.45) * 0.08;
+    this.sun.intensity = day * (4.8 * sunBoost);
+    this.moonColor.setHex(0x7f9ad0).lerp(this.tmp.setHex(0x9fb6e6), Math.min(1, moonFade * 0.5));
+    this.moon.color.copy(this.moonColor);
+    this.moon.intensity = moonFade * 0.95;
+    this.hemi.intensity = 0.02 + day * 0.45;
+    this.hemi.groundColor.setHex(0x8a6f4d).lerp(this.tmp.setHex(0x0b1018), 1 - day);
+    this.hemi.color.copy(this.daySky).lerp(HEMI_GOLD, 0.30 + warmth * 0.35);
+
+    // ---- STATIC RIG ---------------------------------------------------------
+    // NO position/target animation here any more. The shadow controller centres
+    // (and texel-snaps) the frusta along these fixed directions once per frame.
+    // The published world positions are constant offsets from the camera, which
+    // is all every consumer actually reads (`pos - cameraPosition`).
+    this.sunWorldPos.copy(camPos).addScaledVector(SUN_DIR, CELESTIAL_DISTANCE);
+    this.moonWorldPos.copy(camPos).addScaledVector(MOON_DIR, CELESTIAL_DISTANCE);
+
+    // ---- DECORATIVE SPRITES: pinned, faded (never moved) --------------------
+    // A sprite that arcs across the sky would imply a moving key light, so the
+    // discs sit on their light's axis and only their opacity animates — the
+    // exact same opacity curves as before.
+    this.sunSprite.position.copy(camPos).addScaledVector(SUN_DIR, 420);
+    (this.sunSprite.material as THREE.SpriteMaterial).opacity = smoother((elev + 0.10) / 0.16);
+    this.moonSprite.position.copy(camPos).addScaledVector(MOON_DIR, 400);
+    (this.moonSprite.material as THREE.SpriteMaterial).opacity = moonFade;
+
+    this.stars.position.copy(camPos);
+    this.stars.rotation.y += dt * 0.004;         // star rotation kept (allowed)
+    this.starMat.opacity = (1 - day) * 0.95;
+
+    this.clouds.position.set(camPos.x, 100, camPos.z);
+    this.cloudTex.offset.x += dt * 0.0035;
+    this.cloudTex.offset.y += dt * 0.0009;
+    this.cloudMat.color.setHex(0xffe4c2).lerp(this.tmp.setHex(0x2c3350), 1 - day);
+    this.cloudMat.opacity = 0.25 + day * 0.35;
+  }
+```
+
+`skipToMorning()` and `DAY_LENGTH` untouched. ✅ criterion 4.
+
+## 2.4 Consequential engine tweak — `engine.ts:1916-1938`
+
+The elevation-driven shadow refresh is now dead weight (the direction never moves), so
+delete it and let geometry/movement drive refreshes. Full replacement in **4.6**.
+
+```diff
+-      const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
+-      const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087;
++      // Sun/moon directions are session constants (Task 2) — elevation can no
++      // longer invalidate the shadow map. Saves ~2 refreshes/second at noon.
+```
+
+## 2.5 What changes visually, and what does not
+
+| Preserved (numerically identical inputs) | Changed by design |
+|---|---|
+| sky/fog colour, dusk tint, night, star opacity + rotation, cloud drift/colour/opacity, hemi/sun/moon colour + intensity, bloom ramp, flashlight ramp, `enemies.setNight`, volumetric intensity/tint/discScale, `moonAsKey`, `skipToMorning` | Shadows have a fixed length/azimuth all day; the sun/moon discs and the god-ray anchor sit at a fixed point on the sky dome and cross-fade instead of arcing |
+
+All 2b/2c consumers keep compiling untouched. ✅ criterion 3.
+
+---
+
+# TASK 4 — Shadow LOD (done before Task 3, because Task 3 depends on its constants)
+
+## 4.0 Design
+
+Two cascades, **not** two lights:
+
+| | Near cascade | Far cascade |
+|---|---|---|
+| Owner | existing `sun`/`moon` `DirectionalLight` (three renders it) | new manual RT pass (`ShadowLod`) |
+| Size | 2048² | 1024² |
+| Half-extent | **32 m** (was 44) | **96 m** |
+| Texel | **3.125 cm** (was 4.30 cm → **1.4× sharper**) ✅ crit. 2 | 18.75 cm |
+| Casters | terrain + leaves + **grass** | terrain + leaves only (layer-filtered) |
+| Refresh | existing throttle + geometry-dirty | only when the player leaves an 8 m cell, or geometry changes |
+| Applied | three's own `getShadow` | custom 4-tap PCF, weighted by view depth |
+
+Why a **manual** far pass rather than a second `DirectionalLight`:
+`WebGLShadowMap.renderObject` tests `object.layers` against the **view camera**, not the
+shadow camera — so a second light *cannot* be made to skip grass. A manual pass uses its
+own camera, so `farCam.layers.set(LAYER_FAR_CASTER)` gives exact caster control, avoids a
+wasted per-fragment PCF for a zero-intensity light, avoids depending on directional-light
+array ordering, and lets the far map be **cached for tens of seconds** (the payoff of the
+static sun).
+
+**Range reality check.** `uFarFogEnd = (VIEW_DISTANCE+0.75)·16·0.92 = 84.6 m`, and only
+`VIEW_DISTANCE = 5` (80 m) of chunks are meshed. Shadows past ~85 m are behind opaque fog
+and have no casters. So the far cascade is sized 96 m and faded out **72 → 88 m**: that is
+**2.7× today's 32 m effective near range** and 100 % of what is physically visible. Raising
+it further is a one-line change to `SHADOW_FAR_HALF_EXTENT` *if* `VIEW_DISTANCE` is raised.
+
+## 4.1 New file — `src/game/vfx/shadowSnap.ts`
+
+```ts
+import * as THREE from 'three';
+
+const _q = new THREE.Quaternion();
+const _qi = new THREE.Quaternion();
+const _m = new THREE.Matrix4();
+const _v = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const _zero = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
+const _altUp = new THREE.Vector3(0, 0, 1);

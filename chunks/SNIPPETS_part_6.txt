@@ -1,0 +1,180 @@
++export const CELESTIAL_SHADOW_NEAR = 0.5;
++/** 260 (was 180): with a 12.7 deg sun most ground distance maps to DEPTH, not
++ *  to the ortho box's XY. 140 back + 260 far covers -120..+139 m of casters. */
++export const CELESTIAL_SHADOW_FAR = 260;
++/** Moon: half-res near map. 6.25 cm texels, invisible at moonlight contrast. */
++export const CELESTIAL_SHADOW_SIZE_MOON = 1024;
++
++export const SHADOW_FAR_NEAR = 0.5;
++export const SHADOW_FAR_FAR = 420;
++/** 18.75 cm far texels need a bigger constant bias than the near cascade. */
++export const SHADOW_FAR_BIAS_METRES = 0.25;
++/** A light contributing less than this gets no shadow refresh (its map freezes). */
++export const SHADOW_LIGHT_MIN_INTENSITY = 0.05;
++/** Per-blade caster dissolve, metres from the FROZEN anchor. See Task 3. */
++export const GRASS_SHADOW_CUT: [number, number] = [22, 28];
++/** Metres each cutout caster is slid DOWN its own shadow ray (acne fix, Task 3). */
++export const CUTOUT_SHADOW_PUSH = 0.16;
+```
+
+## 4.5 Patch — `src/game/engine.ts:590-603` (light rig + receiver patching)
+
+```diff
+-    for (const light of [this.sky.sun, this.sky.moon]) {
+-      light.castShadow = true;
+-      light.shadow.mapSize.set(CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_SIZE);
++    this.shadowLod = new ShadowLod(this.textures.atlas);
++    const nearBias = -SHADOW_BIAS_METRES / (CELESTIAL_SHADOW_FAR - CELESTIAL_SHADOW_NEAR);
++    for (const [light, size] of [
++      [this.sky.sun,  CELESTIAL_SHADOW_SIZE] as const,
++      [this.sky.moon, CELESTIAL_SHADOW_SIZE_MOON] as const,
++    ]) {
++      light.castShadow = true;
++      light.shadow.mapSize.set(size, size);
+       light.shadow.camera.left = -CELESTIAL_SHADOW_HALF_EXTENT;
+       light.shadow.camera.right = CELESTIAL_SHADOW_HALF_EXTENT;
+       light.shadow.camera.top = CELESTIAL_SHADOW_HALF_EXTENT;
+       light.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
+-      light.shadow.camera.near = 0.5;
+-      light.shadow.camera.far = 180;
+-      light.shadow.bias = -0.0004;
+-      light.shadow.normalBias = 0.16;
+-      light.shadow.radius = 1.0;
++      light.shadow.camera.near = CELESTIAL_SHADOW_NEAR;
++      light.shadow.camera.far = CELESTIAL_SHADOW_FAR;
++      light.shadow.bias = nearBias;              // same 0.072 m as before
++      // Texels shrank 1.375x (44 -> 32 m), so the like-for-like normalBias is
++      // 0.16 / 1.375 = 0.116. Smaller is also better for cutout receivers,
++      // whose normal is forced to world-up: with a 12.7 deg sun a 0.16 m
++      // offset displaced their shadow lookup ~15 cm.
++      light.shadow.normalBias = 0.12;
++      // PCFShadowMap's tap count is fixed, so radius is FREE. Spend it: at
++      // 3.125 cm texels the penumbra had become too crisp for grass.
++      light.shadow.radius = 1.5;
++      // Per-light gating: only the light(s) that actually contribute re-render.
++      light.shadow.autoUpdate = false;
+       light.shadow.camera.updateProjectionMatrix();
+     }
++
++    // ---- far cascade receivers ----------------------------------------------
++    // Compose with any existing onBeforeCompile instead of replacing it.
++    const withFarCascade = (mat: THREE.Material): void => {
++      const prev = mat.onBeforeCompile;
++      mat.onBeforeCompile = (shader, renderer) => {
++        prev?.call(mat, shader, renderer);
++        patchReceiver(shader);     // injects at <project_vertex> / <packing> /
++      };                           // <lights_fragment_begin> — no overlap with
++      const prevKey = mat.customProgramCacheKey?.bind(mat);   // the cutout patch
++      mat.customProgramCacheKey = () => `${prevKey ? prevKey() : ''}|farCsm`;
++      mat.needsUpdate = true;
++    };
++    withFarCascade(mats.opaque);
++    withFarCascade(mats.cutout);
++    withFarCascade(mats.foliage);
+```
+
+> **Ordering note.** `mats.cutout.onBeforeCompile` (3d) also replaces
+> `#include <common>`. `String.prototype.replace` with a string pattern hits the *first*
+> occurrence, and that occurrence survives inside the cutout patch's own replacement, so
+> `patchReceiver` injects immediately after it regardless of which patch runs first. No
+> ordering constraint, verified against both orders.
+>
+> Water is deliberately **not** patched: `castShadow = false`, and its custom material is
+> not in the Lambert chunk family (assumption A4).
+
+## 4.6 Patch — `src/game/engine.ts:1916-1938` (FULL replacement of the shadow controller)
+
+This block already runs in the update phase, before the render call. **Keep it there** —
+`shadowLod.update()` binds its own render target.
+
+```ts
+    if (this.locked) {
+      // ---- 1. grass casters (NEAR cascade only) -----------------------------
+      this.grassShadowT -= dt;
+      if (this.grassShadowT <= 0) {
+        this.grassShadowT = this.fps < 40 ? 0.5 : 0.25;
+        const radius = this.piloting ? 0
+          : (this.fps < 32 ? GRASS_SHADOW_RADIUS * 0.5 : GRASS_SHADOW_RADIUS);
+        if (this.world.updateGrassShadowCasters(
+              this.camera.position.x, this.camera.position.z,
+              radius, GRASS_SHADOW_HYSTERESIS)) {
+          this.shadowCooldown = 0;
+          this.shadowDirty = true;
+        }
+      }
+
+      // ---- 2. geometry changes invalidate BOTH cascades ---------------------
+      if (this.world.shadowGeometryVersion !== this.lastShadowGeometry) {
+        this.lastShadowGeometry = this.world.shadowGeometryVersion;
+        this.shadowDirty = true;
+        this.shadowLod.markDirty();
+      }
+
+      // ---- 3. which light is the key? --------------------------------------
+      // Sun/moon DIRECTIONS are session constants now (Task 2), so elevation
+      // can no longer invalidate a shadow map: ~2 wasted refreshes/second at
+      // noon are gone, and `lastSunElev` is deleted.
+      const keyDir = this.moonIsKey ? this.sky.moonDirWorld : this.sky.sunDirWorld;
+
+      // ---- 4. near cascade: re-snap + re-render only on real movement ------
+      const p = this.player.pos;
+      const moved = Math.abs(p.x - this.lastShadowX) > 2
+                 || Math.abs(p.z - this.lastShadowZ) > 2
+                 || Math.abs(p.y - this.lastShadowY) > 3;
+      this.shadowCooldown -= dt;
+      if (this.renderer.shadowMap && (moved || this.shadowDirty) && this.shadowCooldown <= 0) {
+        this.lastShadowX = p.x;
+        this.lastShadowZ = p.z;
+        this.lastShadowY = p.y;
+        this.shadowCooldown = this.piloting ? 0.75 : (this.fps < 40 ? 0.45 : 0.2);
+        this.shadowDirty = false;
+
+        // Refresh every light that actually contributes. Outside the ~40 s
+        // twilight windows that is exactly ONE light, so the near cascade now
+        // costs HALF of today's two-2048-maps-per-refresh.
+        let any = false;
+        if (this.sky.sun.intensity > SHADOW_LIGHT_MIN_INTENSITY) {
+          this.shadowLod.syncNear(this.sky.sun, this.sky.sunDirWorld, this.camera.position);
+          any = true;
+        }
+        if (this.sky.moon.intensity > SHADOW_LIGHT_MIN_INTENSITY) {
+          this.shadowLod.syncNear(this.sky.moon, this.sky.moonDirWorld, this.camera.position);
+          any = true;
+        }
+        if (any) {
+          // Freeze the grass caster pose at EXACTLY what we are about to bake
+          // (Task 3): the depth pass must never read a live camera.
+          GRASS_SHADOW_ANCHOR.value.copy(this.camera.position);
+          SHADOW_LIGHT_DIR.value.copy(keyDir);
+          GRASS_SHADOW_LIGHT_ANG.value = Math.atan2(keyDir.z, keyDir.x);
+          this.renderer.shadowMap.needsUpdate = true;   // global gate
+        }
+      }
+
+      // ---- 5. far cascade: manual, cached, layer-filtered ------------------
+      this.shadowLod.update(this.renderer, this.scene, keyDir, this.camera.position);
+    }
+```
+
+New engine fields, and one deletion:
+
+```diff
+   private lastShadowX = 0;
+   private lastShadowZ = 0;
+-  private lastSunElev = 0;
++  private lastShadowY = 0;
++  private shadowDirty = true;
++  private lastShadowGeometry = -1;
++  private shadowLod!: ShadowLod;
++  private shipSaveT = 5;            // Task 1
+```
+
+And in **2b** (`engine.ts:1840-1845`), the key-light swap must invalidate both cascades:
+
+```diff
+     if (moonAsKey !== this.moonIsKey) {
+       this.moonIsKey = moonAsKey;
+       this.shadowCooldown = 0;
+-      if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
++      this.shadowDirty = true;
++      this.shadowLod.markDirty();       // far cascade direction changed
