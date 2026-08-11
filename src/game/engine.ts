@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import * as C from './core/constants';
 import { createTextures, tileUV, animateConveyorTiles, type TextureSet } from './core/textures';
-import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter, isLaserMiner, isOreBlock } from './world/blocks';
+import { B, DEFS, isWaterId, applyThemeToBlockColors, conveyorDir, isConveyor, isInserter, isLaserMiner, isOreBlock, canLaserBreak, isLaserProtected } from './world/blocks';
 import { World, type ChunkMaterials } from './world/world';
 import { InserterManager, type InserterAutomation } from './fps/Inserter';
 import { LaserMinerManager } from './fps/LaserMiner';
@@ -20,7 +20,7 @@ import type { PlanetFactorySim } from './factory/factorySim';
 import type { WorldDeltaStore } from './persist/worldDelta';
 import type { ItemLedger } from './factory/itemLedger';
 import { FluidSim } from './world/fluid';
-import { WATER_TIME, GRASS_TIME, GRASS_CAM, GRASS_FADE, GRASS_YAW } from './world/mesher';
+import { WATER_TIME } from './world/mesher';
 import { Player, type InputState } from './player/player';
 import { raycastVoxel, type RayHit } from './player/raycast';
 import { Particles } from './vfx/particles';
@@ -124,10 +124,8 @@ export class GameEngine {
   private flashlightTarget = new THREE.Object3D();
   private lastShadowX = 1e9;
   private lastShadowZ = 1e9;
-  private lastSunElev = 1e9;
   private shadowCooldown = 0;
   private grassShadowT = 0;
-  private moonIsKey = false;
   private inventoryOpen = false;
   private craftingOpen = false;
   private furnaces = new Map<string, FurnaceState>();
@@ -206,6 +204,7 @@ export class GameEngine {
   private flyCam = new THREE.Vector3();
   private tmpSeat = new THREE.Vector3();
   private tmpCam = new THREE.Vector3();
+  private tmpShipImg = new THREE.Vector3();
 
   private aimPoint = new THREE.Vector3();
   private aimDir = new THREE.Vector3();
@@ -237,7 +236,6 @@ export class GameEngine {
   private wasInWater = false;
   private disposed = false;
   private fogScratch = new THREE.Color();
-  private lumenSunDir = new THREE.Vector3();
   private snapCanvas: HTMLCanvasElement | null = null;
   private snapT = 0;
   private cachedBiomeName = '';
@@ -335,19 +333,11 @@ export class GameEngine {
         );
     };
     mats.cutout.onBeforeCompile = (shader) => {
-      shader.uniforms.uGrassTime = GRASS_TIME;
-      shader.uniforms.uGrassCam = GRASS_CAM;
-      shader.uniforms.uGrassFade = GRASS_FADE;
-      shader.uniforms.uGrassYaw = GRASS_YAW;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
           `#include <common>
            attribute vec4 aSway;
-           uniform float uGrassTime;
-           uniform vec3 uGrassCam;
-           uniform vec2 uGrassFade;
-           uniform float uGrassYaw;
            varying float vTorchUnlit;
            varying float vIsGrass;`
         )
@@ -366,53 +356,11 @@ export class GameEngine {
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
-           // aSway.y = -1 → torch (unlit); aSway.y > 0 → grass/foliage sway
+            // aSway.y = -1 -> torch (unlit). Grass geometry is now static.
            vTorchUnlit = step(aSway.y, -0.5);
            // Grass blades: normal.z > 10 (encoded as ang+100 by mesher)
            float gBlade = step(10.0, normal.z);
-           float gPlant = step(0.001, aSway.y);
-           vIsGrass = gBlade;
-
-           // ---- billboard rotation (grass blades only) ----
-           // The normal attribute stores (bladeCentreX, bladeCentreZ, bladeAngle+100)
-           // for grass verts. We rotate the vertex's XZ offset from the blade
-           // centre so the quad partially faces the camera.
-           if (gBlade > 0.5) {
-             float bCx = normal.x;   // blade centre X (chunk-local)
-             float bCz = normal.y;   // blade centre Z (chunk-local)
-             float bAng = normal.z - 100.0;  // original blade angle
-
-             // World-space blade centre for camera direction
-             vec3 bWorld = (modelMatrix * vec4(bCx, 0.0, bCz, 1.0)).xyz;
-             // Direction from blade to camera (XZ only)
-             vec2 toCamera = normalize(uGrassCam.xz - bWorld.xz);
-             // Target angle: face the camera
-             float camAng = atan(toCamera.y, toCamera.x);
-             // Blend 60% toward camera facing for a natural partial billboard
-             float blendedAng = bAng + 0.6 * sin(camAng - bAng);
-
-             float dAng = blendedAng - bAng;
-             float cosD = cos(dAng);
-             float sinD = sin(dAng);
-
-             // Rotate the vertex position offset from blade centre around Y
-             float offX = position.x - bCx;
-             float offZ = position.z - bCz;
-             transformed.x = bCx + offX * cosD - offZ * sinD;
-             transformed.z = bCz + offX * sinD + offZ * cosD;
-             transformed.y = position.y;
-           }
-
-           float gTw = aSway.z;
-           float gH = aSway.w;
-           float gDist = distance((modelMatrix * vec4(transformed, 1.0)).xz, uGrassCam.xz);
-           float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
-           vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
-           float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
-           vec3 gP = transformed;
-           gP += gWind * (gSw * gTw) * gPlant;
-           gP.y -= gTw * gH * (1.0 - gCol) * gPlant;
-           transformed = mix(transformed, gP, gPlant);`
+            vIsGrass = gBlade;`
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
@@ -467,58 +415,6 @@ export class GameEngine {
       alphaTest: 0.4,
       side: THREE.DoubleSide,
     });
-    mats.cutoutDepth.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
-      shader.uniforms.uGrassTime = GRASS_TIME;
-      shader.uniforms.uGrassCam = GRASS_CAM;
-      shader.uniforms.uGrassFade = GRASS_FADE;
-      shader.uniforms.uGrassYaw = GRASS_YAW;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-           attribute vec4 aSway;
-           uniform float uGrassTime;
-           uniform vec3 uGrassCam;
-           uniform vec2 uGrassFade;
-           uniform float uGrassYaw;`
-        )
-        .replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-           float gPlant = step(0.001, aSway.y);
-           float gBlade = step(10.0, normal.z);
-
-           // Billboard rotation (grass blades only — must match main shader)
-           if (gBlade > 0.5) {
-             float bCx = normal.x;
-             float bCz = normal.y;
-             float bAng = normal.z - 100.0;
-             vec3 bWorld = (modelMatrix * vec4(bCx, 0.0, bCz, 1.0)).xyz;
-             vec2 toCamera = normalize(uGrassCam.xz - bWorld.xz);
-             float camAng = atan(toCamera.y, toCamera.x);
-             float blendedAng = bAng + 0.6 * sin(camAng - bAng);
-             float dAng = blendedAng - bAng;
-             float cosD = cos(dAng);
-             float sinD = sin(dAng);
-             float offX = position.x - bCx;
-             float offZ = position.z - bCz;
-             transformed.x = bCx + offX * cosD - offZ * sinD;
-             transformed.z = bCz + offX * sinD + offZ * cosD;
-             transformed.y = position.y;
-           }
-
-           float gTw = aSway.z;
-           float gH = aSway.w;
-           float gDist = distance((modelMatrix * vec4(transformed, 1.0)).xz, uGrassCam.xz);
-           float gCol = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gDist);
-           vec3 gWind = vec3(cos(aSway.x * 1.7), 0.0, sin(aSway.x * 1.3));
-           float gSw = sin(uGrassTime * 1.9 + aSway.x) * aSway.y;
-           vec3 gP = transformed;
-           gP += gWind * (gSw * gTw) * gPlant;
-           gP.y -= gTw * gH * (1.0 - gCol) * gPlant;
-           transformed = mix(transformed, gP, gPlant);`
-        );
-    };
 
     mats.foliageDepth = new THREE.MeshDepthMaterial({
       depthPacking: THREE.RGBADepthPacking,
@@ -587,20 +483,19 @@ export class GameEngine {
     if (this.sky) this.sky.applyTheme(this.theme?.skyHex ?? null);
     else this.sky = new Sky(this.scene, this.theme?.skyHex ?? null);
 
-    for (const light of [this.sky.sun, this.sky.moon]) {
-      light.castShadow = true;
-      light.shadow.mapSize.set(CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_SIZE);
-      light.shadow.camera.left = -CELESTIAL_SHADOW_HALF_EXTENT;
-      light.shadow.camera.right = CELESTIAL_SHADOW_HALF_EXTENT;
-      light.shadow.camera.top = CELESTIAL_SHADOW_HALF_EXTENT;
-      light.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
-      light.shadow.camera.near = 0.5;
-      light.shadow.camera.far = 180;
-      light.shadow.bias = -0.0004;
-      light.shadow.normalBias = 0.16;
-      light.shadow.radius = 1.0;
-      light.shadow.camera.updateProjectionMatrix();
-    }
+    const key = this.sky.sun;
+    key.castShadow = true;
+    key.shadow.mapSize.set(CELESTIAL_SHADOW_SIZE, CELESTIAL_SHADOW_SIZE);
+    key.shadow.camera.left = -CELESTIAL_SHADOW_HALF_EXTENT;
+    key.shadow.camera.right = CELESTIAL_SHADOW_HALF_EXTENT;
+    key.shadow.camera.top = CELESTIAL_SHADOW_HALF_EXTENT;
+    key.shadow.camera.bottom = -CELESTIAL_SHADOW_HALF_EXTENT;
+    key.shadow.camera.near = 0.5;
+    key.shadow.camera.far = 180;
+    key.shadow.bias = -0.0004;
+    key.shadow.normalBias = 0.16;
+    key.shadow.radius = 1.0;
+    key.shadow.camera.updateProjectionMatrix();
 
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
 
@@ -901,7 +796,7 @@ export class GameEngine {
         this.lumenLite!.configure(
           this.sky.skyColor,
           this.sky.sunColor,
-          this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
+          this.sky.sunDirection,
           this.sky.dayFactor,
           this.world.gen.sea,
         );
@@ -1005,9 +900,12 @@ export class GameEngine {
     if (id === B.AIR || id < 0) return false;
     if (isWaterId(id)) return false;
     if (isConveyor(id) || isInserter(id) || isLaserMiner(id) || id === B.TURRET) return false;
+    if (isLaserProtected(id)) return false;
     if (isOreBlock(id)) return TO_FPS[id] !== undefined;
     const d = DEFS[id];
-    if (!d || !d.solid || !isFinite(d.hardness)) return false;
+    if (!d || !isFinite(d.hardness)) return false;
+    if (d.cross === true) return true;
+    if (!d.solid) return false;
     return TO_FPS[id] !== undefined;
   }
 
@@ -1016,12 +914,17 @@ export class GameEngine {
     if (id < 0 || !this.laserMinerCanMine(id)) return;
     const d = DEFS[id];
     const outcome = harvestOutcome(id, TO_FPS);
-    if (!outcome) return;
+    if (!outcome) {
+      if (!this.world.destroyBlockAt(x, y, z)) return;
+      this.finalizeBlockRemoval(x, y, z, id, true);
+      this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 20, 3.2);
+      this.sound.playBreak(d.sound);
+      this.blocksMined++;
+      return;
+    }
     if (outcome.destroy) {
       if (!this.world.destroyBlockAt(x, y, z)) return;
-      if (id === B.TORCH) this.torchLights.remove(x, y, z);
-      this.detachTorchesSupportedBy(x, y, z, true);
-      this.removeFloatingPlantsAbove(x, y, z);
+      this.finalizeBlockRemoval(x, y, z, id, true);
     }
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 20, 3.2);
 
@@ -1040,9 +943,6 @@ export class GameEngine {
       (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4));
     this.sound.playBreak(d.sound);
     this.blocksMined++;
-    if (outcome.destroy) {
-      this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
-    }
   }
 
   private removeFloatingPlantsAbove(x: number, y: number, z: number): void {
@@ -1069,6 +969,14 @@ export class GameEngine {
       this.sound.playBreak('wood');
       if (drop) this.dropBlock(B.TORCH, new THREE.Vector3(tx + 0.5, ty + 0.5, tz + 0.5));
     }
+  }
+
+  private finalizeBlockRemoval(x: number, y: number, z: number, id: number, drop = true): void {
+    if (id === B.TORCH) this.torchLights.remove(x, y, z);
+    this.detachTorchesSupportedBy(x, y, z, drop);
+    this.removeFloatingPlantsAbove(x, y, z);
+    this.spillMachineOnBreak(x, y, z, id);
+    this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
   }
 
 
@@ -1807,6 +1715,7 @@ export class GameEngine {
       const frameBudget = Math.max(1.0, Math.min(5.5, simLeft));
       this.world.update(streamX, streamZ, frameBudget);
       this.world.syncChunkOffsets(this.camera.position.x, this.camera.position.z);
+      if (this.ship) this.ship.syncRender(this.camera.position);
 
       const fpx = this.player.pos.x, fpy = this.player.pos.y, fpz = this.player.pos.z;
       const mdx = C.wrapDelta(fpx - this.lastFieldX, C.WORLD_SIZE);
@@ -1837,12 +1746,6 @@ export class GameEngine {
         this.sky.update(this.dtSky, this.camera.position); this.dtSky = 0;
       }
     }
-    const moonAsKey = this.sky.dayFactor < 0.32;
-    if (moonAsKey !== this.moonIsKey) {
-      this.moonIsKey = moonAsKey;
-      this.shadowCooldown = 0;
-      if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
-    }
     this.sound.update(dt, this.sky.isDay);
     if (this.locked) {
       this.enemies.setNight(this.sky.sunElev < 0.02);
@@ -1851,7 +1754,6 @@ export class GameEngine {
     if (this.locked) {
       const nightFog = 1 - THREE.MathUtils.smoothstep(this.sky.sunElev, -0.05, 0.11);
       const directT = THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.18, 0.45);
-      const directPos = directT > 0.5 ? this.sky.sunWorldPos : this.sky.moonWorldPos;
 
       const mistK = nightFog * 0.85;
       const mist = this.fogScratch.copy(NIGHT_MIST).lerp(this.sky.skyColor, 0.25);
@@ -1860,8 +1762,7 @@ export class GameEngine {
       FOG_UNIFORMS.uFogColor.value.copy(this.sky.skyColor).lerp(mist, mistK);
 
       FOG_UNIFORMS.uFogSunColor.value.copy(this.sky.moonColor).lerp(this.sky.sunColor, directT);
-      FOG_UNIFORMS.uFogSunDir.value.copy(directPos)
-        .sub(this.camera.position).normalize();
+      FOG_UNIFORMS.uFogSunDir.value.copy(this.sky.sunDirection);
 
       FOG_UNIFORMS.uFogDensity.value = 0.012 + nightFog * 0.072;
       FOG_UNIFORMS.uFogHeight.value = this.world.gen.sea + 2;
@@ -1880,27 +1781,19 @@ export class GameEngine {
       this.applyUnderwaterFx();
     }
 
-    if (this.locked) {
-      GRASS_TIME.value += dt;
-      GRASS_CAM.value.copy(this.camera.position);
-      GRASS_YAW.value = this.player.yaw;
-    }
-
     if (this.locked && this.volumetricLight) {
-      if (moonAsKey) {
-        this.volumetricLight.lightWorldPosition.copy(this.sky.moonWorldPos);
-        const moonUp = THREE.MathUtils.clamp(-this.sky.sunElev, 0, 1);
-        this.volumetricLight.intensity = 0.05 + moonUp * 0.09;
-        this.volumetricLight.discScale = 18;
-        this.volumetricLight.tint.copy(this.sky.moonColor);
-      } else {
-        this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
-        const elev = this.sky.sunElev;
-        const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
-        this.volumetricLight.intensity = angleFactor * 0.85;
-        this.volumetricLight.discScale = 85;
-        this.volumetricLight.tint.copy(this.sky.sunColor);
-      }
+      this.volumetricLight.lightWorldPosition.copy(this.sky.sunWorldPos);
+
+      const elev = this.sky.sunElev;
+      const moonUp = THREE.MathUtils.clamp(-elev, 0, 1);
+      const angleFactor = THREE.MathUtils.clamp(0.75 - Math.abs(elev - 0.15) * 0.9, 0, 0.75);
+      const sunI = angleFactor * 0.85;
+      const moonI = 0.05 + moonUp * 0.09;
+
+      const night = 1 - THREE.MathUtils.smoothstep(this.sky.dayFactor, 0.20, 0.44);
+      this.volumetricLight.intensity = THREE.MathUtils.lerp(sunI, moonI, night);
+      this.volumetricLight.discScale = THREE.MathUtils.lerp(85, 18, night);
+      this.volumetricLight.tint.copy(this.sky.sunColor).lerp(this.sky.moonColor, night);
     }
 
     if (this.locked && this.bloom) {
@@ -1926,13 +1819,10 @@ export class GameEngine {
 
       const p = this.player.pos;
       const moved = Math.abs(p.x - this.lastShadowX) > 2 || Math.abs(p.z - this.lastShadowZ) > 2;
-      const activeElev = this.sky.dayFactor > 0.35 ? this.sky.sunElev : -this.sky.sunElev;
-      const lightMoved = Math.abs(activeElev - this.lastSunElev) > 0.0087;
       this.shadowCooldown -= dt;
-      if (this.renderer.shadowMap && (moved || lightMoved) && this.shadowCooldown <= 0) {
+      if (this.renderer.shadowMap && moved && this.shadowCooldown <= 0) {
         this.lastShadowX = p.x;
         this.lastShadowZ = p.z;
-        this.lastSunElev = activeElev;
         this.shadowCooldown = this.piloting ? 0.75 : (this.fps < 40 ? 0.45 : 0.2);
         this.renderer.shadowMap.needsUpdate = true;
       }
@@ -1966,7 +1856,7 @@ export class GameEngine {
       this.lumenLite!.configure(
         this.sky.skyColor,
         this.sky.sunColor,
-        this.lumenSunDir.copy(this.sky.sunWorldPos).sub(this.camera.position).normalize(),
+        this.sky.sunDirection,
         this.sky.dayFactor,
         this.world.gen.sea,
       );
@@ -2026,16 +1916,17 @@ export class GameEngine {
     this.bodyGroup.visible = false;
     if (resetCamera) {
       const yaw = this.player.yaw;
+      const s = this.ship.imageNear(this.camera.position, this.tmpShipImg);
       this.flyCam.set(
-        this.ship.pos.x + Math.sin(yaw) * 11,
-        this.ship.pos.y + 2.3,
-        this.ship.pos.z + Math.cos(yaw) * 11,
+        s.x + Math.sin(yaw) * 11,
+        s.y + 2.3,
+        s.z + Math.cos(yaw) * 11,
       );
       this.camera.position.copy(this.flyCam);
       this.tmpSeat.set(
-        this.ship.pos.x - Math.sin(yaw) * 3.2,
-        this.ship.pos.y + 1.0,
-        this.ship.pos.z - Math.cos(yaw) * 3.2,
+        s.x - Math.sin(yaw) * 3.2,
+        s.y + 1.0,
+        s.z - Math.cos(yaw) * 3.2,
       );
       this.camera.lookAt(this.tmpSeat);
       this.fov = 75;
@@ -2057,15 +1948,19 @@ export class GameEngine {
     this.spaceExited = false;
     this.sound.playDisembark();
     this.sound.stopShip();
+
+    this.ship.recenter();
+
     const yaw = this.ship.yaw;
+    const sx = this.ship.pos.x, sy = this.ship.pos.y, sz = this.ship.pos.z;
     let placed = false;
     for (const sign of [1, -1]) {
       if (placed) break;
-      const px = this.ship.pos.x + Math.cos(yaw) * 4.2 * sign;
-      const pz = this.ship.pos.z - Math.sin(yaw) * 4.2 * sign;
-      for (let y = Math.min(this.ship.pos.y + 8, 95); y > 2; y--) {
-        const bx = Math.floor(px);
-        const bz = Math.floor(pz);
+      const px = C.wrapBlock(sx + Math.cos(yaw) * 4.2 * sign);
+      const pz = C.wrapBlock(sz - Math.sin(yaw) * 4.2 * sign);
+      const bx = Math.floor(px);
+      const bz = Math.floor(pz);
+      for (let y = Math.min(Math.floor(sy) + 8, 95); y > 2; y--) {
         if (this.world.isSolid(bx, y, bz)) continue;
         if (
           !this.world.isSolid(bx, y + 1, bz) &&
@@ -2079,12 +1974,13 @@ export class GameEngine {
       }
     }
     if (!placed) {
-      this.player.setSpawn(this.ship.pos.x, this.ship.pos.y + 3, this.ship.pos.z);
+      this.player.setSpawn(C.wrapBlock(sx), sy + 3, C.wrapBlock(sz));
       this.player.yaw = yaw;
     }
     this.ship.settleHere();
     this.selectSlot(this.sel, true);
     this.snapCameraToEye();
+    this.ship.syncRender(this.camera.position);
   }
 
   private shipAltitude(): number {
@@ -2112,6 +2008,11 @@ export class GameEngine {
       up: this.input.jump,
       down: this.input.sprint,
     }, this.sound);
+
+    if (this.ship.lastWrap.x !== 0 || this.ship.lastWrap.z !== 0) {
+      this.flyCam.x += this.ship.lastWrap.x;  this.flyCam.z += this.ship.lastWrap.z;
+      this.camera.position.x += this.ship.lastWrap.x;  this.camera.position.z += this.ship.lastWrap.z;
+    }
 
     p.pos.set(this.ship.pos.x, this.ship.pos.y - 0.2, this.ship.pos.z);
     p.vel.set(0, 0, 0);
@@ -2381,7 +2282,9 @@ export class GameEngine {
     }
 
     const d = DEFS[this.target.id];
-    if (!isFinite(d.hardness)) {
+    if (!d || !canLaserBreak(this.target.id)) {
+      this.breakT = 0;
+      this.mineCharge = 0;
       this.crack.visible = false;
       this.laser.update(dt, { visible: true, firing: false, target: this.aimPoint, charge: 0, speed });
       return;
@@ -2417,7 +2320,19 @@ export class GameEngine {
 
     const { x, y, z, id } = this.target;
     const outcome = harvestOutcome(id, TO_FPS);
-    if (!outcome) return;
+    if (!outcome) {
+      if (!this.world.destroyBlockAt(x, y, z)) return;
+      this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 18, 2.6);
+      this.sound.playBreak(d.sound);
+      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      this.blocksMined++;
+      this.finalizeBlockRemoval(x, y, z, id, true);
+      this.breakT = 0;
+      this.mineCharge = 0;
+      this.crack.visible = false;
+      this.target = null;
+      return;
+    }
 
     if (!outcome.destroy) {
       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 14, 2.4);
@@ -2431,18 +2346,12 @@ export class GameEngine {
     }
 
     if (!this.world.destroyBlockAt(x, y, z)) return;
-    if (id === B.TORCH) this.torchLights.remove(x, y, z);
-    this.detachTorchesSupportedBy(x, y, z, true);
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
     this.sound.playBreak(d.sound);
     this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
     this.blocksMined++;
 
-    this.removeFloatingPlantsAbove(x, y, z);
-
-    this.spillMachineOnBreak(x, y, z, id);
-
-    this.enemies.notifyWorldChanged(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    this.finalizeBlockRemoval(x, y, z, id, true);
     this.breakT = 0;
     this.mineCharge = 0;
     this.crack.visible = false;

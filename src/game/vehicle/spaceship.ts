@@ -6,6 +6,7 @@ import type { World } from '../world/world';
 import type { TerrainGenerator } from '../world/generator';
 import type { SoundEngine } from '../audio/sound';
 import { HULL_PARTS, GLOW_PARTS } from './hullParts';
+import { minImageF, wrapBlock } from '../core/constants';
 
 export interface FlightInput {
   forward: boolean;
@@ -62,6 +63,11 @@ export class Spaceship {
 
   private tmpA = new THREE.Vector3();
   private tmpB = new THREE.Vector3();
+
+  private renderRef = new THREE.Vector3();
+  private hasRenderRef = false;
+  private tmpImg = new THREE.Vector3();
+  readonly lastWrap = new THREE.Vector3();
 
   constructor(
     scene: THREE.Scene,
@@ -121,12 +127,13 @@ export class Spaceship {
     this.flyPitch = 0;
     this.bank = 0;
     this.load = 0;
+    this.recenter();
     this.sync();
   }
 
   enterAtmosphere(gen: TerrainGenerator, cx: number, cz: number, yaw: number): void {
     const h = this.footprintHeights(gen, cx, cz).maxH;
-    this.pos.set(cx, Math.min(155, Math.max(118, h + 86)), cz);
+    this.pos.set(wrapBlock(cx), Math.min(155, Math.max(118, h + 86)), wrapBlock(cz));
     this.baseY = this.pos.y;
     this.yaw = yaw;
     this.vel.set(0, 0, 0);
@@ -136,14 +143,48 @@ export class Spaceship {
     this.sync();
   }
 
+  recenter(): void {
+    const nx = wrapBlock(this.pos.x);
+    const nz = wrapBlock(this.pos.z);
+    this.lastWrap.set(nx - this.pos.x, 0, nz - this.pos.z);
+    this.pos.x = nx;
+    this.pos.z = nz;
+  }
+
+  imageNear(ref: THREE.Vector3, out: THREE.Vector3 = this.tmpImg): THREE.Vector3 {
+    return out.set(
+      ref.x + minImageF(this.pos.x - ref.x),
+      this.pos.y,
+      ref.z + minImageF(this.pos.z - ref.z),
+    );
+  }
+
+  syncRender(ref: THREE.Vector3): void {
+    this.renderRef.copy(ref);
+    this.hasRenderRef = true;
+    this.applyRenderImage();
+  }
+
+  private applyRenderImage(): void {
+    if (!this.hasRenderRef) { this.group.position.copy(this.pos); return; }
+    this.group.position.copy(this.imageNear(this.renderRef, this.tmpImg));
+  }
+
   distanceTo(p: THREE.Vector3): number {
-    return this.pos.distanceTo(p);
+    const dx = minImageF(this.pos.x - p.x);
+    const dy = this.pos.y - p.y;
+    const dz = minImageF(this.pos.z - p.z);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
   seatWorld(out: THREE.Vector3, lookPitch: number): THREE.Vector3 {
     out.set(0, 1.78, -0.8).applyAxisAngle(UP_AXIS, this.yaw);
     out.add(this.pos);
     out.y += Math.sin(-lookPitch) * 0.1;
+    if (this.hasRenderRef) {
+      out.x = this.renderRef.x + minImageF(out.x - this.renderRef.x);
+      out.z = this.renderRef.z + minImageF(out.z - this.renderRef.z);
+    }
     return out;
   }
 
@@ -178,12 +219,13 @@ export class Spaceship {
   }
 
   private sync(): void {
-    this.group.position.copy(this.pos);
+    this.applyRenderImage();
     this.group.rotation.set(this.pitchVis, this.yaw, this.bank, 'YXZ');
     this.flame.scale.setScalar(0.6 + this.load * 2.6 + Math.sin(this.bobT * 31) * 0.12 * this.load);
   }
 
   settleHere(): void {
+    this.recenter();
     const gy = this.footprintGroundY();
     this.pos.y = Math.max(gy + 1.35, Math.min(this.pos.y, gy + HY + 1.4));
     this.baseY = this.pos.y;
@@ -204,7 +246,7 @@ export class Spaceship {
     this.light.intensity = 1.5 + Math.sin(this.bobT * 6) * 0.4;
     this.flame.material.opacity = 0.16 + 0.06 * Math.sin(this.bobT * 9);
     this.flame.scale.setScalar(0.5 + Math.sin(this.bobT * 7) * 0.05);
-    this.group.position.copy(this.pos);
+    this.applyRenderImage();
     this.group.rotation.set(0, this.yaw, 0);
   }
 
@@ -256,6 +298,8 @@ export class Spaceship {
     this.moveAxis(2, this.vel.z * dt);
     if (this.pos.y < 2) { this.pos.y = 2; this.vel.y = Math.max(0, this.vel.y); }
     if (this.pos.y > 420) { this.pos.y = 420; this.vel.y = Math.min(0, this.vel.y); }
+
+    this.recenter();
 
     const spd = this.speed();
     const loadTarget = Math.min(1, spd / MAX_SPEED + (ay !== 0 ? 0.15 : 0));

@@ -314,6 +314,23 @@ export const oreHarvestTime = (id: number): number => {
   return Number.isFinite(h) && h > 0 ? h : 1.6;
 };
 
+export const isCrossPlant = (id: number): boolean => DEFS[id]?.cross === true;
+
+export const isLaserProtected = (id: number): boolean => {
+  if (id === B.TORCH) return true;
+  const d = DEFS[id];
+  if (!d) return true;
+  return false;
+};
+
+export const canLaserBreak = (id: number): boolean => {
+  if (id < 0 || id === B.AIR) return false;
+  if (isLaserProtected(id)) return false;
+  const d = DEFS[id];
+  if (!d) return false;
+  return Number.isFinite(d.hardness);
+};
+
 export const isMachine = (id: number): boolean =>
   CONV_DIR.has(id) || INS_DIR.has(id) || LM_DIR.has(id) || id === B.TURRET;
 export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;

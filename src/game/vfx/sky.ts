@@ -11,7 +11,6 @@ const TINT_DAY = 0.78;
 const TINT_DUSK = 0.42;
 const TINT_NIGHT = 0.22;
 
-
 const GOLDEN_ELEV = 0.22;
 const GOLDEN_RISE = 0.38;
 const NIGHT_DEPTH = 0.55;
@@ -20,6 +19,19 @@ const NIGHT_FALL = 0.55;
 const SUN_GOLD_LOW = new THREE.Color(0xffa870);
 const SUN_GOLD_HIGH = new THREE.Color(0xffddb0);
 const HEMI_GOLD = new THREE.Color(0xffe0c0);
+
+const STATIC_DIR = new THREE.Vector3(0.42, 0.46, 0.58).normalize();
+
+const LIGHT_DISTANCE = 140;
+const DISC_DISTANCE = 420;
+const MOON_DISC_DISTANCE = 400;
+
+const DAY_GAIN = 0.7;
+const NIGHT_GAIN = 0.7;
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const SHADOW_RIGHT = new THREE.Vector3().crossVectors(WORLD_UP, STATIC_DIR).normalize();
+const SHADOW_UP = new THREE.Vector3().crossVectors(STATIC_DIR, SHADOW_RIGHT).normalize();
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -103,14 +115,18 @@ export class Sky {
   fogNear = 44;
   fogFar: number;
   readonly skyColor = new THREE.Color();
+
   readonly sunWorldPos = new THREE.Vector3(0, 120, 0);
   readonly moonWorldPos = new THREE.Vector3(0, 120, 0);
+
+  readonly sunDirection = STATIC_DIR.clone();
+
   readonly sunColor = new THREE.Color(0xfff3d0);
   readonly moonColor = new THREE.Color(0x9fb8ff);
   sunElev = 1;
 
   readonly sun: THREE.DirectionalLight;
-  readonly moon: THREE.DirectionalLight;
+
   private hemi: THREE.HemisphereLight;
   private sunSprite: THREE.Sprite;
   private moonSprite: THREE.Sprite;
@@ -124,7 +140,7 @@ export class Sky {
   private duskSky = DUSK_SKY_BASE.clone();
   private skyNight = NIGHT_SKY_BASE.clone();
   private tmp = new THREE.Color();
-  private tmpV = new THREE.Vector3();
+  private snapped = new THREE.Vector3();
 
   constructor(scene: THREE.Scene, skyHex?: number | null) {
     this.applyTheme(skyHex ?? null);
@@ -134,11 +150,10 @@ export class Sky {
     scene.background = this.skyColor;
 
     this.sun = new THREE.DirectionalLight(0xfff3d0, 1.1);
+    this.sun.position.copy(STATIC_DIR).multiplyScalar(LIGHT_DISTANCE);
     scene.add(this.sun);
     scene.add(this.sun.target);
-    this.moon = new THREE.DirectionalLight(0x9fb8ff, 0);
-    scene.add(this.moon);
-    scene.add(this.moon.target);
+
     this.hemi = new THREE.HemisphereLight(0xbdd7ff, 0x8a6f4d, 0.7);
     scene.add(this.hemi);
 
@@ -212,14 +227,29 @@ export class Sky {
     this.time = 0.045;
   }
 
-  private sunDir(): THREE.Vector3 {
-    const a = this.time * Math.PI * 2;
-    const elev = goldenElevation(Math.sin(a));
-    const horiz = Math.sqrt(Math.max(0, 1 - elev * elev));
-    const hx = Math.cos(a);
-    const hz = 0.35;
-    const hl = Math.hypot(hx, hz) || 1;
-    return new THREE.Vector3((hx / hl) * horiz, elev, (hz / hl) * horiz);
+  private sunElevation(): number {
+    return goldenElevation(Math.sin(this.time * Math.PI * 2));
+  }
+
+  private snapShadowCenter(camPos: THREE.Vector3): THREE.Vector3 {
+    const shadow = this.sun.shadow;
+    const cam = shadow.camera;
+    const w = cam.right - cam.left;
+    const h = cam.top - cam.bottom;
+    const mx = shadow.mapSize.x;
+    const my = shadow.mapSize.y;
+    if (!this.sun.castShadow || w <= 0 || h <= 0 || mx <= 0 || my <= 0) {
+      return this.snapped.copy(camPos);
+    }
+    const tx = w / mx;
+    const ty = h / my;
+    const px = Math.round(camPos.dot(SHADOW_RIGHT) / tx) * tx;
+    const py = Math.round(camPos.dot(SHADOW_UP) / ty) * ty;
+    const pz = camPos.dot(STATIC_DIR);
+    return this.snapped
+      .copy(SHADOW_RIGHT).multiplyScalar(px)
+      .addScaledVector(SHADOW_UP, py)
+      .addScaledVector(STATIC_DIR, pz);
   }
 
   get isDay(): boolean {
@@ -228,15 +258,14 @@ export class Sky {
 
   update(dt: number, camPos: THREE.Vector3): void {
     this.time = (this.time + dt / DAY_LENGTH) % 1;
-    const dir = this.sunDir();
-    const elev = dir.y;
-    this.sunElev = elev;
 
+    const elev = this.sunElevation();
+    this.sunElev = elev;
     this.dayFactor = smoother((elev + 0.06) / 0.24);
     const day = this.dayFactor;
     const plateau = clamp01(elev / GOLDEN_ELEV);
-
     const warmth = day * (0.72 - 0.30 * plateau);
+    const moonFade = 1 - smoother((elev + 0.02) / 0.18);
 
     this.skyColor.copy(this.skyNight).lerp(this.daySky, day);
     this.skyColor.lerp(this.duskSky, warmth * 0.5);
@@ -244,31 +273,42 @@ export class Sky {
     this.fog.near = this.fogNear;
     this.fog.far = this.fogFar;
 
-    const moonFade = 1 - smoother((elev + 0.02) / 0.18);
-    const moonDir = this.tmpV.copy(dir).multiplyScalar(-1);
     this.sunColor.copy(SUN_GOLD_LOW).lerp(SUN_GOLD_HIGH, plateau);
-    this.sun.color.copy(this.sunColor);
-    const sunBoost = 1.0 + THREE.MathUtils.smoothstep(elev, 0.05, 0.45) * 0.08;
-    this.sun.intensity = day * (4.8 * sunBoost);
     this.moonColor.setHex(0x7f9ad0).lerp(this.tmp.setHex(0x9fb6e6), Math.min(1, moonFade * 0.5));
-    this.moon.color.copy(this.moonColor);
-    this.moon.intensity = moonFade * 0.95;
+
+    const sunBoost = 1.0 + THREE.MathUtils.smoothstep(elev, 0.05, 0.45) * 0.08;
+    const sunI = day * (4.8 * sunBoost) * DAY_GAIN;
+    const moonI = moonFade * 0.95 * NIGHT_GAIN;
+    const total = sunI + moonI;
+    this.sun.intensity = total;
+    if (total > 1e-4) {
+      this.sun.color.setRGB(
+        (this.sunColor.r * sunI + this.moonColor.r * moonI) / total,
+        (this.sunColor.g * sunI + this.moonColor.g * moonI) / total,
+        (this.sunColor.b * sunI + this.moonColor.b * moonI) / total,
+      );
+    } else {
+      this.sun.color.copy(this.moonColor);
+    }
+
     this.hemi.intensity = 0.02 + day * 0.45;
     this.hemi.groundColor.setHex(0x8a6f4d).lerp(this.tmp.setHex(0x0b1018), 1 - day);
     this.hemi.color.copy(this.daySky).lerp(HEMI_GOLD, 0.30 + warmth * 0.35);
-    this.sun.position.copy(camPos).addScaledVector(dir, 140);
-    this.sun.target.position.copy(camPos);
-    this.sun.target.updateMatrixWorld();
-    this.sunWorldPos.copy(this.sun.position);
-    this.moon.position.copy(camPos).addScaledVector(moonDir, 140);
-    this.moon.target.position.copy(camPos);
-    this.moon.target.updateMatrixWorld();
-    this.moonWorldPos.copy(this.moon.position);
 
-    this.sunSprite.position.copy(camPos).addScaledVector(dir, 420);
-    (this.sunSprite.material as THREE.SpriteMaterial).opacity = smoother((elev + 0.10) / 0.16);
-    this.moonSprite.position.copy(camPos).addScaledVector(moonDir, 400);
-    (this.moonSprite.material as THREE.SpriteMaterial).opacity = moonFade;
+    const center = this.snapShadowCenter(camPos);
+    this.sun.position.copy(center).addScaledVector(STATIC_DIR, LIGHT_DISTANCE);
+    this.sun.target.position.copy(center);
+    this.sun.target.updateMatrixWorld();
+
+    this.sunWorldPos.copy(camPos).addScaledVector(STATIC_DIR, LIGHT_DISTANCE);
+    this.moonWorldPos.copy(this.sunWorldPos);
+
+    const sunOpacity = smoother((elev + 0.10) / 0.16);
+    this.sunSprite.position.copy(camPos).addScaledVector(STATIC_DIR, DISC_DISTANCE);
+    (this.sunSprite.material as THREE.SpriteMaterial).opacity = sunOpacity;
+    this.moonSprite.position.copy(camPos).addScaledVector(STATIC_DIR, MOON_DISC_DISTANCE);
+    (this.moonSprite.material as THREE.SpriteMaterial).opacity = moonFade * (1 - sunOpacity);
+
     this.stars.position.copy(camPos);
     this.stars.rotation.y += dt * 0.004;
     this.starMat.opacity = (1 - day) * 0.95;

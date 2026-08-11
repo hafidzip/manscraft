@@ -432,10 +432,11 @@ export class World {
       return mesh;
     };
     add(geoms.opaque, this.mats.opaque, 0, true);
-    const grass = add(geoms.cutout, this.mats.cutout, 1, false);
+    const grass = add(geoms.cutout, this.mats.cutout, 1, true);
     if (grass && this.mats.cutoutDepth) {
       grass.customDepthMaterial = this.mats.cutoutDepth;
     }
+    if (grass) grass.userData.grassShadowRegistered = false;
     c.grass = grass;
     const foliage = add(geoms.foliage, this.mats.foliage, 1, true);
     if (foliage && this.mats.foliageDepth) {
@@ -447,17 +448,17 @@ export class World {
     this.dirtySet.delete(c);
   }
 
-  updateGrassShadowCasters(camX: number, camZ: number, radius: number): boolean {
-    const r2 = radius * radius;
+  updateGrassShadowCasters(_camX: number, _camZ: number, _radius: number): boolean {
     let changed = false;
     for (const c of this.meshedChunks) {
       const g = c.grass;
       if (!g) continue;
-      const dx = c.cx * S + c.kx + S * 0.5 - camX;
-      const dz = c.cz * S + c.kz + S * 0.5 - camZ;
-      const want = dx * dx + dz * dz <= r2;
-      if (g.castShadow !== want) {
-        g.castShadow = want;
+      if (g.userData.grassShadowRegistered !== true) {
+        g.userData.grassShadowRegistered = true;
+        changed = true;
+      }
+      if (!g.castShadow) {
+        g.castShadow = true;
         changed = true;
       }
     }
