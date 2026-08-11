@@ -127,7 +127,6 @@ export class GameEngine {
   private craftingOpen = false;
   private furnaces = new Map<string, FurnaceState>();
   private openFurnaceKey: string | null = null;
-  /** Feature A/B/C wiring — owned by planetStore/universeSim, referenced here. */
   private sim: PlanetFactorySim | null = null;
   private persistDeltas: WorldDeltaStore | null = null;
   private persistLedger: ItemLedger | null = null;
@@ -226,7 +225,6 @@ export class GameEngine {
     theme?: PlanetTheme | null,
     persistentInventory?: Inventory,
     private initialClearedCamps?: number[],
-    /** Feature A: planet identity for the persistence hub (matches App.tsx planetKey). */
     private worldKey = 'home',
   ) {
     this.theme = theme ?? null;
@@ -503,8 +501,6 @@ export class GameEngine {
     this.worldSeed = seed;
     this.themeSea = this.theme?.seaLevel ?? C.SEA_LEVEL;
 
-    // Feature A/B: planet state must be installed BEFORE chunk data exists, so the whole
-    // loading sequence builds already-edited chunks and restored machines get indexed.
     await hub.ready;
     const installed = hub.install(this.worldKey, seed, this.themeSea);
     const claimed = universeSim.claim({
@@ -518,7 +514,7 @@ export class GameEngine {
     this.sim = claimed.sim;
     this.persistDeltas = claimed.deltas;
     this.persistLedger = claimed.ledger;
-    this.furnaces = claimed.sim.furnaces; // shared furnace truth (engine ticks it while live)
+    this.furnaces = claimed.sim.furnaces;
 
     this.world = new World(seed, mats, claimed.deltas);
     claimed.sim.attachToLive(this.world);
@@ -547,11 +543,7 @@ export class GameEngine {
     this.machineRegistry = new MachineRegistry({ indexedKinds: MK_GHOST, trustGenerator: true });
     this.machineRegistry.attach(this.changeBus);
     this.machineRegistry.bootstrap(this.world);
-    // Feature B: the sim owns off-render machine truth — dormant pruning must not erase it.
     this.machineRegistry.retain = (k) => this.sim?.retain(k) ?? false;
-    // Feature A recorder: every live edit funnels into the per-planet delta overlay; the
-    // sim shadows the machine census from the same stream (deltas are applied inside
-    // World.ensureData, not here — replay must precede the registry's rescan fast path).
     this.changeBus.add({
       onBlock: (x, y, z, oldId, newId) => {
         this.persistDeltas?.recordBlock(x, y, z, newId);
@@ -2160,8 +2152,6 @@ export class GameEngine {
     this.fx.update(dt);
     this.itemDrops.update(dt, this.player.pos);
     this.machines.update(dt, this.player.pos);
-    // Feature B: the active planet's factory sim ticks at full frame rate, synchronised
-    // with the live scene; inactive planets advance from UniverseSim's background clock.
     this.sim?.setLivePlayer(this.player.pos.x, this.player.pos.z);
     universeSim.tickActive(dt);
 
@@ -2882,7 +2872,6 @@ export class GameEngine {
     return this.enemies?.getClearedCampIds() ?? [...(this.initialClearedCamps ?? [])];
   }
 
-  /** Feature A/B/C: detach the live view, then snapshot everything BEFORE teardown. */
   private capturePersistence(): void {
     if (!this.sim || !this.persistDeltas || !this.persistLedger) return;
     universeSim.release(this.worldKey);
@@ -2904,8 +2893,8 @@ export class GameEngine {
     this.disposed = true;
     this.renderer.setAnimationLoop(null);
     this.sound.stopShip();
-    this.itemDrops?.clear(); // deposits all physical items into the ledger (Feature C)
-    this.capturePersistence(); // serializes the ledger AFTER the clear above
+    this.itemDrops?.clear();
+    this.capturePersistence();
     this.machines?.dispose();
     this.inserters?.clear();
     this.laserMiners?.clear();

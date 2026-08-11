@@ -1,24 +1,10 @@
 /* eslint-disable no-bitwise */
-/**
- * src/game/persist/worldDelta.ts
- *
- * Feature A core — the per-planet edit overlay. Base terrain is deterministic from the
- * planet seed (TerrainGenerator), so ONLY player/sim edits are stored, as sparse per-chunk
- * maps: Map<chunkKey, Map<localIdx, blockId>>.
- * localIdx === chunkIndex(x,y,z) = (y*16+z)*16+x → fits in 15 bits for H=80.
- *
- * Replay happens inside `World.ensureData` (see world.ts integration) — i.e. BEFORE
- * buildColumnCache and onChunkData — so derived column caches and the MachineRegistry
- * rescan both see the edited voxels.
- *
- * NO three.js imports.
- */
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, wrapBlock, wrapChunk } from '../core/constants';
 import { packChunk, cellX, cellY, cellZ } from '../core/cellKey';
 import { B } from '../world/blocks';
 import type { FurnaceState } from '../crafting/smelting';
 
-export const DELTA_MAGIC = 0x4d435744; // 'MCWD'
+export const DELTA_MAGIC = 0x4d435744;
 export const DELTA_VERSION = 1;
 
 const localIdxOf = (lx: number, y: number, lz: number): number => (y * S + lz) * S + lx;
@@ -26,20 +12,17 @@ const lxOf = (i: number): number => i & 15;
 const lzOf = (i: number): number => (i >> 4) & 15;
 const lyOf = (i: number): number => i >> 8;
 
-/** Structural view of the world, so this module never imports three via world.ts. */
 export interface DeltaWorldLike {
   setBlock(x: number, y: number, z: number, id: number): void;
 }
 
 export interface DeltaSink {
-  /** Apply stored edits onto freshly generated chunk data. Returns edits applied. */
   applyToChunk(cx: number, cz: number, data: Uint8Array): number;
 }
 
 export class WorldDeltaStore implements DeltaSink {
   private chunks = new Map<number, Map<number, number>>();
 
-  /** Set while replaying/hydrating so the ChangeBus recorder ignores its own writes. */
   replaying = false;
 
   readonly stats = { edits: 0, records: 0, pruned: 0, applied: 0, chunksTouched: 0, ignored: 0 };
@@ -54,15 +37,10 @@ export class WorldDeltaStore implements DeltaSink {
     return this.chunks.size;
   }
 
-  /**
-   * Lit furnaces are a *derived* state owned by FurnaceState — canonicalise so a burning
-   * furnace does not rewrite the delta twice per smelt and bloat the store.
-   */
   private canonical(id: number): number {
     return id === B.FURNACE_LIT ? B.FURNACE : id;
   }
 
-  /** ChangeBus onBlock sink. `x,z` must already be wrapped (World passes wrapped px/pz). */
   recordBlock(x: number, y: number, z: number, id: number): void {
     if (this.replaying) {
       this.stats.ignored++;
@@ -83,7 +61,6 @@ export class WorldDeltaStore implements DeltaSink {
     this.stats.edits++;
   }
 
-  /** -1 = no override (caller must consult the generator). */
   getOverride(x: number, y: number, z: number): number {
     if (y < 0 || y >= H) return -1;
     const px = wrapBlock(Math.floor(x));
@@ -94,13 +71,6 @@ export class WorldDeltaStore implements DeltaSink {
     return v === undefined ? -1 : v;
   }
 
-  /**
-   * CRITICAL INJECTION POINT (world.ts / ensureData): call right after
-   * gen.populateChunk() and BEFORE buildColumnCache()/onChunkData.
-   * Returns the number of voxels overwritten — the caller MUST pass
-   * `fromGenerator = (returned === 0)` to onChunkData, otherwise MachineRegistry's
-   * trust-generator fast path skips the rescan and restored machines stay unindexed.
-   */
   applyToChunk(cx: number, cz: number, data: Uint8Array): number {
     const m = this.chunks.get(packChunk(cx, cz));
     if (!m || m.size === 0) return 0;
@@ -118,7 +88,6 @@ export class WorldDeltaStore implements DeltaSink {
     return n;
   }
 
-  /** Bulk replay into a live world (used on restore while data is already generated). */
   replayInto(world: DeltaWorldLike): number {
     this.replaying = true;
     let n = 0;
@@ -145,10 +114,6 @@ export class WorldDeltaStore implements DeltaSink {
     }
   }
 
-  /**
-   * Self-shrink: an edit that restored the GENERATED value is deleted.
-   * Budgeted; call from an idle path (UniverseSim background tick), never per frame.
-   */
   pruneStep(
     gen: { populateChunk(d: Uint8Array, cx: number, cz: number): void },
     budgetMs = 4,
@@ -181,7 +146,6 @@ export class WorldDeltaStore implements DeltaSink {
     return removed;
   }
 
-  // ---- persistence ------------------------------------------------------
   serialize(): Uint8Array {
     let bytes = 10;
     for (const m of this.chunks.values()) bytes += 4 + m.size * 3;
@@ -234,14 +198,7 @@ export class WorldDeltaStore implements DeltaSink {
   }
 }
 
-/* ====================================================================== */
-/* Furnace serialization — engine keys furnaces "x,y,z" (furnaceKey).      */
-/* ====================================================================== */
 
-/**
- * Flat tuple per furnace:
- * [x, y, z, inId, inN, fuelId, fuelN, outId, outN, burn, burnMax, cook]
- */
 export type FurnaceTuple = [
   number, number, number,
   number, number,
@@ -284,7 +241,6 @@ export function deserializeFurnaces(a: FurnaceTuple[] | null | undefined): Map<s
   return m;
 }
 
-/** Cell-space position helpers reused by the sim (kept here next to packCell users). */
 export const editCellX = cellX;
 export const editCellY = cellY;
 export const editCellZ = cellZ;

@@ -15,7 +15,6 @@ interface GameCanvasProps {
   initialClearedCamps?: number[];
   onSaveClearedCamps?: (campIds: number[]) => void;
   onReady?: () => void;
-  /** Feature A: world identity for the persistence hub (byte-identical to App planetKey). */
   planetKey?: string;
 }
 

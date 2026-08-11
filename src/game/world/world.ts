@@ -82,13 +82,11 @@ export class World {
   constructor(
     public readonly seed: number,
     private mats: ChunkMaterials,
-    /** Feature A: per-planet edit overlay, applied to every chunk the moment it generates. */
     private deltas: DeltaSink | null = null,
   ) {
     this.gen = new TerrainGenerator(seed);
   }
 
-  /** Late-bound delta overlay (used when persistence installs after construction). */
   setDeltas(deltas: DeltaSink | null): void {
     this.deltas = deltas;
   }
@@ -217,10 +215,6 @@ export class World {
     if (!c) {
       const data = new Uint8Array(S * H * S);
       this.gen.populateChunk(data, cx, cz);
-      // Feature A injection point: replay the per-planet edit overlay BEFORE the derived
-      // column caches are built, so restored chunks are born fully edited. The number of
-      // overwritten voxels decides the fromGenerator flag below — replayed machine blocks
-      // must NOT take MachineRegistry's trust-generator fast path, or they stay unindexed.
       const appliedEdits = this.deltas?.applyToChunk(cx, cz, data) ?? 0;
       c = {
         cx, cz, data, meshes: [], hasMesh: false, grass: null,

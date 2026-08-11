@@ -1,13 +1,4 @@
 /* eslint-disable no-bitwise */
-/**
- * src/game/persist/planetStore.ts
- *
- * PlanetPersistenceHub — module-scope singleton, independent of GameEngine lifetime
- * (same spirit as session.ts). In-memory Map + async IndexedDB flush, with a
- * localStorage fallback for private-mode / blocked-IDB environments.
- *
- * NO three.js imports.
- */
 import {
   WorldDeltaStore, serializeFurnaces, deserializeFurnaces, type FurnaceTuple,
 } from './worldDelta';
@@ -24,10 +15,8 @@ export const SAVE_VERSION = 1;
 export interface PlanetSave {
   v: number;
   key: string;
-  /** Determinism guard — refuse to replay onto a mismatching world. */
   seed: number;
   themeSea: number;
-  /** bigint-safe serialized PlanetTheme (for headless generation). */
   themeJson: string | null;
   savedAtMs: number;
   deltas: Uint8Array;
@@ -37,12 +26,10 @@ export interface PlanetSave {
   player: { x: number; y: number; z: number; yaw: number } | null;
 }
 
-/** planetKeyOf — byte-identical to App.tsx's planetKey(). */
 export const planetKeyOf = (
   home: { star: { seed: bigint }; planet: { seed: bigint } } | null,
 ): string => (home ? `${home.star.seed.toString(16)}-${home.planet.seed.toString(16)}` : 'home');
 
-/* bigint-safe JSON so PlanetTheme/PlanetSpec/StarSpec survive a page reload */
 export const themeToJson = (t: unknown): string =>
   JSON.stringify(t, (_k, v) => (typeof v === 'bigint' ? { __big: v.toString(16) } : v));
 
@@ -94,13 +81,12 @@ class PlanetPersistenceHub {
         r.onerror = () => rej(r.error);
       });
       for (const s of all) {
-        // revive typed arrays (structured clone preserves them, but guard anyway)
         this.mem.set(s.key, s);
         this.stats.loads++;
       }
     } catch {
       this.stats.errors++;
-      this.loadFromLocalStorage(); // private-mode / blocked-IDB fallback
+      this.loadFromLocalStorage();
     }
     this.loaded = true;
     if (typeof window !== 'undefined') {
@@ -125,20 +111,10 @@ class PlanetPersistenceHub {
     return Array.from(this.mem.keys());
   }
 
-  /**
-   * Stable terrain seed for worlds whose seed is otherwise random (the no-theme home
-   * world): once a save exists, the terrain MUST regenerate identically or the determinism
-   * guard would rightly reject the overlay. Returns null when nothing is stored yet.
-   */
   stableSeed(key: string): number | null {
     return this.mem.get(key)?.seed ?? null;
   }
 
-  /**
-   * Called right before `new GameEngine(...)`. Returns a hydrated delta store + ledger that
-   * the engine hands to `new World(seed, mats, deltas)` — so the very first ensureData()
-   * already builds edited chunks and the loading screen never shows stale terrain.
-   */
   install(
     key: string,
     seed: number,
@@ -148,7 +124,6 @@ class PlanetPersistenceHub {
     const save = this.mem.get(key) ?? null;
     if (!save) return { deltas: new WorldDeltaStore(), ledger: new ItemLedger(), save: null };
     if (save.seed !== seed || Math.abs(save.themeSea - themeSea) > 1e-6 || save.v !== SAVE_VERSION) {
-      // Determinism guard: the world underneath changed; replaying would corrupt terrain.
       this.stats.rejects++;
       console.warn('[manscraft] planet save rejected (seed/theme mismatch)', key, save.seed, seed);
       return { deltas: new WorldDeltaStore(), ledger: new ItemLedger(), save: null };
@@ -160,7 +135,6 @@ class PlanetPersistenceHub {
     };
   }
 
-  /** Called in engine dispose path, before the world is torn down. */
   capture(engine: EngineLike): void {
     this.stats.captures++;
     const save: PlanetSave = {
@@ -180,7 +154,6 @@ class PlanetPersistenceHub {
     this.markDirty(save.key);
   }
 
-  /** Used by UniverseSim so off-planet production is persisted too. */
   captureSim(key: string, sim: PlanetFactorySim): void {
     const prev = this.mem.get(key);
     if (!prev) return;
@@ -230,14 +203,13 @@ class PlanetPersistenceHub {
     this.saveToLocalStorage(keys);
   }
 
-  // ---- localStorage fallback (base64; skips oversize saves rather than throwing) ----
   private saveToLocalStorage(keys: string[]): void {
     for (const k of keys) {
       const s = this.mem.get(k);
       if (!s) continue;
       try {
         const json = JSON.stringify({ ...s, deltas: b64(s.deltas), ledger: b64(s.ledger) });
-        if (json.length > 2_000_000) continue; // too big for LS; IDB-only planet
+        if (json.length > 2_000_000) continue;
         localStorage.setItem(LS_PREFIX + k, json);
       } catch {
         this.stats.errors++;
@@ -263,14 +235,12 @@ class PlanetPersistenceHub {
     }
   }
 
-  /** Debug/test helper — wipes every stored planet. */
   clearAll(): void {
     this.mem.clear();
     this.dirty.clear();
     try {
       this.db?.transaction(STORE, 'readwrite').objectStore(STORE).clear();
     } catch {
-      /* noop */
     }
     try {
       for (let i = localStorage.length - 1; i >= 0; i--) {
@@ -278,7 +248,6 @@ class PlanetPersistenceHub {
         if (k?.startsWith(LS_PREFIX)) localStorage.removeItem(k);
       }
     } catch {
-      /* noop */
     }
   }
 }
@@ -296,5 +265,4 @@ const unb64 = (s: string): Uint8Array => {
   return u;
 };
 
-/** Singleton — survives engine remounts, mirrors session.ts. */
 export const hub = new PlanetPersistenceHub();

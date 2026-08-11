@@ -1,26 +1,12 @@
 /* eslint-disable no-bitwise */
-/**
- * src/game/factory/itemLedger.ts
- *
- * Virtualized item storage (Feature C core). Items are AGGREGATE STACKS (itemId, count)
- * bound to a cell key, held in SoA typed arrays with a free list. 1e6 items typically
- * = a few thousand stacks (~20 bytes each) instead of 1e6 * ~200 bytes + 1e6 meshes.
- *
- * Ids stored here are FPS/ITEM ids (the id space `ItemDropManager.spawn` receives), see
- * TO_FPS/FROM_FPS in engine/constants.ts. NEVER world block ids.
- *
- * NO three.js imports. Safe to run headless / in a worker.
- */
 import { WORLD_HEIGHT, CHUNK_LOG2, wrapBlock, minImageF } from '../core/constants';
 import { packCell, cellX, cellY, cellZ, packChunk, chunkRadiusFor } from '../core/cellKey';
 import { DEFS, isConveyor } from '../world/blocks';
 
-export const LEDGER_MAGIC = 0x4d43494c; // 'MCIL'
+export const LEDGER_MAGIC = 0x4d43494c;
 export const LEDGER_VERSION = 1;
 
-/** Must stay in sync with ItemDrop.ts BELT_SPEED. */
 export const BELT_SPEED = 2.6;
-/** Items that may rest on ONE belt cell before the lane back-pressures. */
 export const BELT_CELL_CAP = 8;
 
 const NIL = -1;
@@ -28,11 +14,9 @@ const NIL = -1;
 export const clampCellY = (y: number): number =>
   y < 0 ? 0 : y >= WORLD_HEIGHT ? WORLD_HEIGHT - 1 : y | 0;
 
-/** Wrap-safe cell key for a world position (accepts floats). */
 export const ledgerCell = (x: number, y: number, z: number): number =>
   packCell(wrapBlock(Math.floor(x)), clampCellY(Math.floor(y)), wrapBlock(Math.floor(z)));
 
-/** Pooled out-param so hot paths never allocate. */
 export interface TakeResult {
   id: number;
   count: number;
@@ -40,24 +24,21 @@ export interface TakeResult {
 }
 
 export class ItemLedger {
-  // ---- SoA slot storage -------------------------------------------------
   private cap: number;
   private sCell: Int32Array;
   private sId: Int32Array;
-  private sCount: Float64Array; // f64: a single stack may legitimately hold >2^31 units
-  private sNext: Int32Array; // intra-cell chain, doubles as free-list chain
-  private head = new Map<number, number>(); // cellKey -> head slot
-  private byChunk = new Map<number, Set<number>>(); // chunkKey -> occupied cellKeys
+  private sCount: Float64Array;
+  private sNext: Int32Array;
+  private head = new Map<number, number>();
+  private byChunk = new Map<number, Set<number>>();
   private freeHead = NIL;
   private top = 0;
   private liveSlots = 0;
 
-  /** Total units currently ledgered (physical window items are checked OUT, not counted). */
   total = 0;
 
   readonly stats = { added: 0, removed: 0, moved: 0, grows: 0, peakStacks: 0, voided: 0 };
 
-  /** Pooled result object; valid until the next take* call. */
   readonly out: TakeResult = { id: 0, count: 0, cell: 0 };
 
   constructor(initialCapacity = 1024) {
@@ -75,10 +56,9 @@ export class ItemLedger {
     return this.head.size;
   }
   get bytes(): number {
-    return this.cap * 20 + this.head.size * 48; // rough
+    return this.cap * 20 + this.head.size * 48;
   }
 
-  // ---- slot management --------------------------------------------------
   private grow(): void {
     const n = this.cap * 2;
     const c = new Int32Array(n);
@@ -136,7 +116,6 @@ export class ItemLedger {
     if (set.size === 0) this.byChunk.delete(ck);
   }
 
-  /** Detach a slot from its cell chain (does not release it). */
   private unlink(cell: number, slot: number): void {
     const p = this.head.get(cell) ?? NIL;
     if (p === slot) {
@@ -158,11 +137,9 @@ export class ItemLedger {
     }
   }
 
-  // ---- add --------------------------------------------------------------
   addAtCell(cell: number, itemId: number, n = 1): void {
     if (n <= 0 || itemId <= 0) return;
     let remaining = n;
-    // merge-on-arrival into existing stacks of the same id (top of chain first)
     for (let p = this.head.get(cell) ?? NIL; p !== NIL && remaining > 0; p = this.sNext[p]) {
       if (this.sId[p] !== itemId) continue;
       this.sCount[p] += remaining;
@@ -186,8 +163,6 @@ export class ItemLedger {
     this.addAtCell(ledgerCell(x, y, z), itemId, n);
   }
 
-  // ---- take -------------------------------------------------------------
-  /** Take up to `n` units (of any id) from a cell. Returns units taken; `out` holds id/count. */
   takeAnyFromCell(cell: number, n = 1): number {
     const p = this.head.get(cell) ?? NIL;
     if (p === NIL) {
@@ -210,7 +185,6 @@ export class ItemLedger {
     return take;
   }
 
-  /** Take up to `n` units of a SPECIFIC id from a cell. Returns units taken. */
   takeFromCell(cell: number, itemId: number, n = 1): number {
     for (let p = this.head.get(cell) ?? NIL; p !== NIL; p = this.sNext[p]) {
       if (this.sId[p] !== itemId) continue;
@@ -239,11 +213,6 @@ export class ItemLedger {
     return n;
   }
 
-  /**
-   * Radius query backing `ItemDropManager.takeAt` at the window edge. Checks the cell one
-   * ABOVE first (an item resting on a belt at the queried level), then the queried cell,
-   * then XZ neighbors within `radius`, then the cell below. Returns the fps item id (0 = none).
-   */
   takeOneAt(x: number, y: number, z: number, radius = 0.55): number {
     const bx = wrapBlock(Math.floor(x));
     const by = clampCellY(Math.floor(y));
@@ -264,7 +233,6 @@ export class ItemLedger {
     return 0;
   }
 
-  /** Bulk vacuum for player pickup — drains a whole cell, `cb` receives (id, count). */
   drainCell(cell: number, cb: (id: number, count: number) => void, maxUnits = Infinity): number {
     let drained = 0;
     let p = this.head.get(cell) ?? NIL;
@@ -285,7 +253,6 @@ export class ItemLedger {
     return drained;
   }
 
-  /** Remove and DISCARD all units in a cell (belt exit into the void). Returns units lost. */
   voidCell(cell: number): number {
     let lost = 0;
     let p = this.head.get(cell) ?? NIL;
@@ -304,7 +271,6 @@ export class ItemLedger {
     return lost;
   }
 
-  /** Move up to `max` units between two cells. Returns units actually moved. */
   moveCell(from: number, to: number, max: number): number {
     if (from === to || max <= 0) return 0;
     let moved = 0;
@@ -318,17 +284,12 @@ export class ItemLedger {
     return moved;
   }
 
-  // ---- iteration --------------------------------------------------------
   forEachStackInCell(cell: number, cb: (id: number, count: number) => void): void {
     for (let p = this.head.get(cell) ?? NIL; p !== NIL; p = this.sNext[p]) {
       cb(this.sId[p], this.sCount[p]);
     }
   }
 
-  /**
-   * Wrap-safe iteration over occupied cells near (px,pz). Used by the ItemDropManager window
-   * and by HUD counters. Visits only chunks that actually hold stacks.
-   */
   forEachOccupiedNear(
     px: number,
     pz: number,
@@ -353,7 +314,6 @@ export class ItemLedger {
     }
   }
 
-  /** Aggregate id->count for HUD readouts. Wrap-safe in XZ, plain distance in Y. */
   countsInRadius(
     px: number,
     py: number,
@@ -378,7 +338,6 @@ export class ItemLedger {
     this.total = 0;
   }
 
-  // ---- persistence ------------------------------------------------------
   serialize(): Uint8Array {
     const buf = new ArrayBuffer(12 + this.liveSlots * 14);
     const dv = new DataView(buf);
@@ -418,9 +377,6 @@ export class ItemLedger {
   }
 }
 
-/* ====================================================================== */
-/* BeltNetwork — aggregate conveyor transport at scale                     */
-/* ====================================================================== */
 
 export interface BeltBlockView {
   getBlock(x: number, y: number, z: number): number;
@@ -438,18 +394,12 @@ interface Lane {
   looped: boolean;
 }
 
-/**
- * Groups conveyor blocks into lanes and shifts aggregate counts one cell per 1/BELT_SPEED s.
- * Items ride ONE CELL ABOVE the belt block (ItemDrop.update reads the block under the feet),
- * so a belt at (x,y,z) transports the ledger cell (x, y+1, z).
- */
 export class BeltNetwork {
   private lanes: Lane[] = [];
-  private isBelt = new Map<number, number>(); // beltCell -> 1
+  private isBelt = new Map<number, number>();
 
   readonly stats = { lanes: 0, cells: 0, shifts: 0, moved: 0, jammed: 0, voided: 0 };
 
-  /** Rebuild lanes from the conveyor census. O(belts); call when the belt set changes. */
   rebuild(src: BeltSource, view: BeltBlockView): void {
     const dirs = new Map<number, [number, number]>();
     src.forEachConveyor((key, dx, dz) => {
@@ -495,26 +445,25 @@ export class BeltNetwork {
       });
     };
 
-    for (const key of dirs.keys()) if (!hasPred.has(key)) walk(key); // lane heads
-    for (const key of dirs.keys()) if (!visited.has(key)) walk(key); // pure loops
+    for (const key of dirs.keys()) if (!hasPred.has(key)) walk(key);
+    for (const key of dirs.keys()) if (!visited.has(key)) walk(key);
 
     this.stats.lanes = this.lanes.length;
     this.stats.cells = dirs.size;
-    void view; // reserved: terminus support probing is done in step()
+    void view;
   }
 
-  /** Deterministic, dt-quantized transport. Safe with dt up to MAX_STEP (1 s). */
   step(dt: number, ledger: ItemLedger, view: BeltBlockView): void {
     const shiftsF = dt * BELT_SPEED;
     for (let i = 0; i < this.lanes.length; i++) {
       const lane = this.lanes[i];
       lane.acc += shiftsF;
-      let guard = 4; // never shift more than 4 cells in one 1s step
+      let guard = 4;
       while (lane.acc >= 1 && guard-- > 0) {
         lane.acc -= 1;
         this.shift(lane, ledger, view);
       }
-      if (lane.acc > 1) lane.acc = 1; // clamp: a jammed lane must not bank infinite shifts
+      if (lane.acc > 1) lane.acc = 1;
     }
   }
 
@@ -522,7 +471,6 @@ export class BeltNetwork {
     this.stats.shifts++;
     const n = lane.len;
 
-    // Terminus first so capacity frees up before upstream cells push.
     const lastBelt = lane.cells[n - 1];
     const lastItem = packCell(cellX(lastBelt), clampCellY(cellY(lastBelt) + 1), cellZ(lastBelt));
     const exitItem = this.settle(lane.exit, view);
@@ -544,7 +492,6 @@ export class BeltNetwork {
     }
   }
 
-  /** Where an item leaving the lane comes to rest (gravity, ≤4 blocks). NIL = void it. */
   private settle(exitBelt: number, view: BeltBlockView): number {
     const x = cellX(exitBelt);
     const z = cellZ(exitBelt);

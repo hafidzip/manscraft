@@ -27,13 +27,9 @@ const WAKE_CHECKS_PER_FRAME = 32;
 const MAX_ITEMS_DEFAULT = 512;
 const EVICT_KEEP_DIST2 = 8 * 8;
 
-/**
- * Feature C: physical items are only a rendering/pickup WINDOW onto the ItemLedger.
- * A unit is EITHER a ledger count OR a physical DroppedItem — never both, never neither.
- */
-const LEDGER_WINDOW_DIST = 40; // beyond this, spawns go straight into the ledger
+const LEDGER_WINDOW_DIST = 40;
 const LEDGER_WINDOW_DIST2 = LEDGER_WINDOW_DIST * LEDGER_WINDOW_DIST;
-const MATERIALIZE_DIST = SLEEP_DIST - 2; // 2-block hysteresis against sleep/check-in thrash
+const MATERIALIZE_DIST = SLEEP_DIST - 2;
 const MATERIALIZE_PER_FRAME = 8;
 const MATERIALIZE_SCAN_CELLS = 96;
 
@@ -59,7 +55,6 @@ export interface ItemDropOptions {
   instanced?: boolean;
   maxItems?: number;
   sleep?: boolean;
-  /** Feature C: when set, drop storage is virtualized into this aggregate ledger. */
   ledger?: ItemLedger;
 }
 
@@ -146,8 +141,6 @@ export class ItemDropManager {
   spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
     if (blockId === B.AIR || blockId === B.BEDROCK) return;
     if (this.ledger) {
-      // Windowed storage: outside the live window (or when it is full) the aggregate
-      // count IS the storage — no physical entity is materialized and none is evicted.
       const dxw = minImageF(pos.x - this.lastPx);
       const dzw = minImageF(pos.z - this.lastPz);
       if (dxw * dxw + dzw * dzw > LEDGER_WINDOW_DIST2 || this.items.length >= this.maxItems) {
@@ -282,7 +275,6 @@ export class ItemDropManager {
       }
     }
     if (victim) {
-      // Feature C: eviction checks the unit back INTO the ledger — never destroys it.
       if (this.ledger) this.ledger.add(victim.pos.x, victim.pos.y, victim.pos.z, victim.blockId, 1);
       this.despawn(victim);
       this.stats.evicted++;
@@ -356,12 +348,10 @@ export class ItemDropManager {
       this.stats.takeHits++;
       return it;
     }
-    // Feature C: the window edge — consult the ledger for checked-in aggregate stacks.
     if (this.ledger) {
       const id = this.ledger.takeOneAt(x, y, z, radius);
       if (id > 0) {
         this.stats.takeHits++;
-        // Transient record: alive=false/index=-1/cell=-1 so callers' recycle() re-pools it.
         let rec = this.recPool.pop();
         if (!rec) {
           rec = {
@@ -389,7 +379,6 @@ export class ItemDropManager {
     return null;
   }
 
-  /** Feature C: materialize ledger stacks INTO physical entities inside the window. */
   private matVisit = (cell: number): void => {
     if (this.matScanLeft <= 0 || this.matCount >= MATERIALIZE_PER_FRAME) return;
     this.matScanLeft--;
@@ -408,7 +397,6 @@ export class ItemDropManager {
     for (let i = 0; i < n; i++) {
       const cell = this.matCellsBuf[i];
       if (ledger.takeAnyFromCell(cell, 1) <= 0) continue;
-      // Pre-grounded at the ledger cell's rest position; spawn() applies its own guardrails.
       this.matVec.set(cellX(cell) + 0.5, cellY(cell) + 0.06, cellZ(cell) + 0.5);
       this.spawn(ledger.out.id, this.matVec, this.matZero);
     }
@@ -479,7 +467,6 @@ export class ItemDropManager {
           const dx = minImageF(p.x - px);
           const dz = minImageF(p.z - pz);
           if (dx * dx + dz * dz > SLEEP_DIST2) {
-            // Feature C: leaving the window returns the resting unit to the ledger.
             if (this.ledger) {
               this.ledger.add(p.x, p.y, p.z, item.blockId, 1);
               this.despawn(item);
@@ -558,8 +545,6 @@ export class ItemDropManager {
   }
 
   clear(): void {
-    // Feature C: teardown never destroys counts — every live entity returns to the ledger
-    // BEFORE the hub captures it (engine dispose calls clear() first).
     if (this.ledger) {
       for (const it of this.items) {
         if (it.blockId > 0) this.ledger.add(it.pos.x, it.pos.y, it.pos.z, it.blockId, 1);
