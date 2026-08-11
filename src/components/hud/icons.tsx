@@ -101,7 +101,7 @@ export const WEAPON_TITLES: Record<string, string> = {
   sniper: "LW-50 'LONGSTAR'", bazooka: "RPG-9 'HAMMER'", laser: "MK-7 'PROSPECTOR'",
 };
 
-export const LABELS: Record<string, string> = { handgun: 'P9', smg: 'KV-9', rifle: 'AR-77', sniper: 'LW-50', bazooka: 'RPG-9', laser: 'MK-7' };
+export const LABELS: Record<string, string> = { handgun: 'P9', smg: 'KV-9', rifle: 'AR-77', sniper: 'LW-50', bazooka: 'RPG-9', laser: 'MK-7', barehand: 'BARE HANDS' };
 
 export function itemName(item: SlotItem | null): string {
   if (!item) return '';

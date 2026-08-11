@@ -18,10 +18,10 @@ export const NIGHT_MIST = new THREE.Color(0x39465e);
 export const LASER_NAME = "MK-7 'PROSPECTOR'";
 export const DEATH_DURATION = 4;
 
-export const CELESTIAL_SHADOW_SIZE = 2048;
+export const CELESTIAL_SHADOW_SIZE = 1024;
 export const CELESTIAL_SHADOW_HALF_EXTENT = 44;
 
-export const GRASS_SHADOW_RADIUS = 0;
+export const GRASS_SHADOW_RADIUS = 40;
 
 export const TO_FPS: Record<number, number> = {
   [B.GRASS]: 1, [B.DIRT]: 2, [B.STONE]: 3, [B.SAND]: 4,

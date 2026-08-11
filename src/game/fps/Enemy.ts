@@ -5,17 +5,10 @@ import { Effects } from './effects';
 import { AudioSynth } from './audio';
 import { box, MATS } from './models';
 import { pixelTexture } from './textures';
-import type { CampBuild } from '../world/camps';
 import type { Tier } from './tiers';
 import type { FlowField, FlowSample } from './FlowField';
 
-export const CAMP_CONFIG = {
-  squadSize: [3, 5] as [number, number],
-  respawnDelay: 20,
-  repopulateDelay: 90,
-  patrolSpeedFactor: 0.55,
-  maxLeash: 70,
-};
+const PATROL_SPEED_FACTOR = 0.55;
 
 export type EnemyState = 'spawn' | 'idle' | 'patrol' | 'chase' | 'attack' | 'dead';
 
@@ -447,19 +440,7 @@ export class Enemy {
     this.invalidatePath();
   }
 
-  standDown() {
-    this.alerted = false;
-    this.alertT = 0;
-    this.weaponDrawT = 0;
-    this.hasTarget = false;
-    this.lastKnown.set(0, 0, 0);
-    this.searchT = 0;
-    this.returning = true;
-    this.burstLeft = 0;
-    this.invalidatePath();
-  }
-
-  standDownToCamp(cooldownSec = 0, teleport?: THREE.Vector3) {
+  standDown(cooldownSec = 0, teleport?: THREE.Vector3) {
     this.cooldownUntil = Math.max(this.cooldownUntil, cooldownSec);
     this.alerted = false;
     this.alertT = 0;
@@ -470,7 +451,7 @@ export class Enemy {
     this.burstLeft = 0;
     this.cooldown = Math.max(this.cooldown, this.cfg.attackCooldown);
     this.invalidatePath();
-    this.returning = false;
+    this.returning = true;
     this.leashT = 0;
     this.dwellT = 0;
     this.state = this.cfg.behavior;
@@ -488,24 +469,6 @@ export class Enemy {
   }
 
   get navigating(): boolean { return this.hasTarget; }
-
-  assignCamp(build: CampBuild): void {
-    this.patrolPoints = (build.patrolPoints.length ? build.patrolPoints : build.posts).slice();
-    this.home = { x: build.site.cx, z: build.site.cz };
-    this.maxLeash = Math.max(CAMP_CONFIG.maxLeash, build.site.radius * 3);
-    let best = 0, bd = Infinity;
-    for (let i = 0; i < this.patrolPoints.length; i++) {
-      const d = this.planarDist(this.patrolPoints[i].x, this.patrolPoints[i].z);
-      if (d < bd) { bd = d; best = i; }
-    }
-    this.patrolIdx = best;
-    this.returning = false;
-    this.leashT = 0;
-    if (this.cfg.behavior === 'idle' && this.patrolPoints.length) {
-      this.home = { ...this.patrolPoints[best] };
-    }
-    if (this.state === 'spawn') this.state = this.cfg.behavior;
-  }
 
   private planarDist(x: number, z: number): number {
     return Math.hypot(x - this.pos.x, z - this.pos.z);
@@ -727,8 +690,8 @@ export class Enemy {
         const pdz = patrolSteerGoal.z - this.pos.z;
         this.steerContext(pdx, pdz, steerOut);
         const paceF = this.state === 'idle'
-          ? CAMP_CONFIG.patrolSpeedFactor * 0.55
-          : CAMP_CONFIG.patrolSpeedFactor;
+          ? PATROL_SPEED_FACTOR * 0.55
+          : PATROL_SPEED_FACTOR;
         wx = steerOut.x * paceF;
         wz = steerOut.z * paceF;
         if (steerOut.jump) wantJump = true;

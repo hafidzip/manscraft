@@ -1,84 +1,12 @@
 
 import { useEffect, useRef, type RefObject } from 'react';
 import type { GameEngine } from '../game/engine';
-import { SEA_LEVEL, WORLD_SIZE, wrapDelta } from '../game/core/constants';
+import { SEA_LEVEL } from '../game/core/constants';
 
 const SIZE = 176;
 const SAMPLES = 96;
 const HALF = SAMPLES / 2;
 const REFRESH_MS = 180;
-
-const CELL = SIZE / SAMPLES;
-const MAP_R = SIZE / 2;
-const MARKER_R = 5.5;
-const EDGE_HINTS = true;
-
-function campGlyph(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
-  ctx.beginPath();
-  ctx.moveTo(x, y - r);
-  ctx.lineTo(x + r * 0.92, y + r * 0.78);
-  ctx.lineTo(x - r * 0.92, y + r * 0.78);
-  ctx.closePath();
-}
-
-function drawCamps(
-  ctx: CanvasRenderingContext2D,
-  camps: { x: number; z: number; cleared: boolean }[],
-  px: number, pz: number, now: number,
-) {
-  if (!camps.length) return;
-  const lim = MAP_R - 4;
-  let nx = 0, ny = 0, nearD = Infinity;
-
-  ctx.save();
-  ctx.lineJoin = 'round';
-  for (const c of camps) {
-    const dx = wrapDelta(c.x - px, WORLD_SIZE);
-    const dz = wrapDelta(c.z - pz, WORLD_SIZE);
-    let mx = (dx + HALF) * CELL + CELL / 2;
-    let my = (dz + HALF) * CELL + CELL / 2;
-
-    const ox = mx - MAP_R, oy = my - MAP_R;
-    const d = Math.hypot(ox, oy);
-    let edge = false;
-    if (d > lim) {
-      if (!EDGE_HINTS) continue;
-      edge = true;
-      const k = lim / (d || 1);
-      mx = MAP_R + ox * k; my = MAP_R + oy * k;
-    }
-    const r = edge ? MARKER_R * 0.7 : MARKER_R;
-
-    campGlyph(ctx, mx, my, r);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-    ctx.stroke();
-    ctx.fillStyle = c.cleared
-      ? 'rgba(120,120,120,0.6)'
-      : edge ? 'rgba(255,120,60,0.75)' : '#ff6a3c';
-    ctx.fill();
-
-    if (c.cleared) {
-      ctx.beginPath();
-      ctx.moveTo(mx - r * 0.5, my + r * 0.15);
-      ctx.lineTo(mx - r * 0.1, my + r * 0.55);
-      ctx.lineTo(mx + r * 0.6, my - r * 0.35);
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = 'rgba(220,255,220,0.8)';
-      ctx.stroke();
-    } else if (!edge && d < nearD) { nearD = d; nx = mx; ny = my; }
-  }
-
-  if (nearD < Infinity) {
-    const t = 0.5 + 0.5 * Math.sin(now / 380);
-    ctx.beginPath();
-    ctx.arc(nx, ny, MARKER_R + 3 + t * 3, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255,120,60,${0.45 - t * 0.3})`;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-  ctx.restore();
-}
 
 export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -142,8 +70,6 @@ export function Minimap({ engineRef }: { engineRef: RefObject<GameEngine | null>
       ctx.clip();
       ctx.putImageData(img, 0, 0);
       ctx.drawImage(canvas, 0, 0, SAMPLES, SAMPLES, 0, 0, SIZE, SIZE);
-
-      drawCamps(ctx, engine.getCamps?.() ?? [], px, pz, performance.now());
 
       const yaw = player.yaw;
       const fx = -Math.sin(yaw);

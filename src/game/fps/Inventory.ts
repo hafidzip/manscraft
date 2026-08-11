@@ -129,8 +129,20 @@ export class Inventory {
   }
 
   addItem(item: SlotItem): boolean {
+    if (item.kind === 'weapon') return this.addWeapon(item.weaponId);
     if (item.kind === 'block') return this.addBlock(item.blockId, item.count);
     if (item.kind === 'food') return stackItem(this.hotbar, this.mainInv, item);
+    return false;
+  }
+
+  addWeapon(weaponId: string): boolean {
+    for (const arr of [this.hotbar, this.mainInv]) {
+      const idx = arr.findIndex((s) => !s);
+      if (idx !== -1) {
+        arr[idx] = { kind: 'weapon', weaponId };
+        return true;
+      }
+    }
     return false;
   }
 

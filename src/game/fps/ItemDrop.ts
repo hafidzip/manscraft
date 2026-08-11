@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { B, type WorldLike } from './World';
-import { Inventory } from './Inventory';
+import { Inventory, type SlotItem } from './Inventory';
 import { AudioSynth } from './audio';
-import { getAtlas, blockCubeGeometry } from './textures';
+import { getAtlas, blockCubeGeometry, buildExtrudedItem, paintDrumstick } from './textures';
 import { minImageF, WORLD_HALF } from '../core/constants';
 import { packCell } from '../core/cellKey';
 import { DEFS } from '../world/blocks';
@@ -12,6 +12,31 @@ import { ItemInstancer } from './ItemInstancer';
 import { ItemLedger } from '../factory/itemLedger';
 import { cellX, cellY, cellZ } from '../core/cellKey';
 import type { ChangeBus } from '../world/changeBus';
+import { buildWeapon, MATS, box } from './models';
+import { deg } from './anim';
+
+export type DropKind = 'block' | 'weapon' | 'food';
+
+export interface DroppedItem {
+  mesh: THREE.Mesh | null;
+  group: THREE.Group | null;
+  kind: DropKind;
+  blockId: number;
+  weaponId: string;
+  foodId: string;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  time: number;
+  grounded: boolean;
+  spin: number;
+  cell: number;
+  slot: number;
+  index: number;
+  awakeSlot: number;
+  sleeping: boolean;
+  inst: number;
+  alive: boolean;
+}
 
 const POP_TIME = 0.28;
 const PICKUP_DIST = 1.25;
@@ -73,6 +98,8 @@ export class ItemDropManager {
   private meshPool: THREE.Mesh[] = [];
   private geoCache = new Map<number, THREE.BufferGeometry>();
   private mat: THREE.MeshLambertMaterial | null = null;
+  private weaponTemplates = new Map<string, THREE.Group>();
+  private foodTemplate: THREE.Group | null = null;
 
   private bus: ChangeBus | null = null;
   private instancer: ItemInstancer | null = null;
@@ -138,6 +165,26 @@ export class ItemDropManager {
     }
   }
 
+  private newItemRecord(): DroppedItem {
+    return this.recPool.pop() ?? ({
+      mesh: null, group: null, kind: 'block',
+      blockId: 0, weaponId: '', foodId: '',
+      pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+      time: 0, grounded: false, spin: 0,
+      cell: -1, slot: -1, index: -1, awakeSlot: -1,
+      sleeping: false, inst: -1, alive: false,
+    } as DroppedItem);
+  }
+
+  private finishSpawn(it: DroppedItem): void {
+    it.index = this.items.length;
+    this.items.push(it);
+    this.grid.insert(it);
+    this.pushAwake(it);
+    this.stats.spawned++;
+    this.stats.live = this.items.length;
+  }
+
   spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
     if (blockId === B.AIR || blockId === B.BEDROCK) return;
     if (this.ledger) {
@@ -151,20 +198,14 @@ export class ItemDropManager {
     }
     if (this.items.length >= this.maxItems) this.evictOne();
 
-    const it = this.recPool.pop() ?? ({
-      mesh: null, blockId: 0,
-      pos: new THREE.Vector3(), vel: new THREE.Vector3(),
-      time: 0, grounded: false, spin: 0,
-      cell: -1, slot: -1, index: -1, awakeSlot: -1,
-      sleeping: false, inst: -1, alive: false,
-    } as DroppedItem);
-
+    const it = this.newItemRecord();
+    it.kind = 'block'; it.weaponId = ''; it.foodId = '';
     it.blockId = blockId;
     it.pos.copy(pos);
     if (velocity) it.vel.copy(velocity);
     else it.vel.set((Math.random() - 0.5) * 2.6, 2.4 + Math.random() * 1.4, (Math.random() - 0.5) * 2.6);
     it.time = 0; it.grounded = false; it.spin = Math.random() * Math.PI * 2;
-    it.sleeping = false; it.alive = true; it.inst = -1;
+    it.sleeping = false; it.alive = true; it.inst = -1; it.group = null;
 
     if (this.instancer) {
       it.mesh = null;
@@ -180,12 +221,97 @@ export class ItemDropManager {
       it.mesh = mesh;
     }
 
-    it.index = this.items.length;
-    this.items.push(it);
-    this.grid.insert(it);
-    this.pushAwake(it);
-    this.stats.spawned++;
-    this.stats.live = this.items.length;
+    this.finishSpawn(it);
+  }
+
+  spawnItem(item: SlotItem, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+    if (item.kind === 'block') { this.spawn(item.blockId, pos, velocity); return; }
+    if (item.kind === 'weapon') this.spawnWeaponDrop(item.weaponId, pos, velocity);
+    else if (item.kind === 'food') this.spawnFoodDrop(item.foodId, pos, velocity);
+  }
+
+  private bakeGroundRest(group: THREE.Group): void {
+    const box = new THREE.Box3().setFromObject(group);
+    const raise = -0.11 - box.min.y;
+    if (raise <= 0.001) return;
+    const inner = new THREE.Group();
+    while (group.children.length) inner.add(group.children[0]);
+    inner.position.y = raise;
+    group.add(inner);
+  }
+
+  private getWeaponDropTemplate(weaponId: string): THREE.Group {
+    const cached = this.weaponTemplates.get(weaponId);
+    if (cached) return cached;
+    const tpl = weaponId === 'laser'
+      ? this.buildLaserDropModel()
+      : buildWeapon(weaponId).gun.clone(true);
+    tpl.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.frustumCulled = false; }
+    });
+    this.bakeGroundRest(tpl);
+    this.weaponTemplates.set(weaponId, tpl);
+    return tpl;
+  }
+
+  private getFoodDropTemplate(): THREE.Group {
+    if (!this.foodTemplate) {
+      this.foodTemplate = buildExtrudedItem(paintDrumstick, 0.017, 0.034);
+      this.foodTemplate.scale.setScalar(1.15);
+      this.foodTemplate.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.frustumCulled = false; }
+      });
+      this.bakeGroundRest(this.foodTemplate);
+    }
+    return this.foodTemplate;
+  }
+
+  private spawnWeaponDrop(weaponId: string, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+    if (this.items.length >= this.maxItems) this.evictOne();
+    const it = this.newItemRecord();
+    it.kind = 'weapon'; it.weaponId = weaponId; it.foodId = ''; it.blockId = 0;
+    it.pos.copy(pos);
+    if (velocity) it.vel.copy(velocity);
+    else it.vel.set((Math.random() - 0.5) * 2.6, 2.4 + Math.random() * 1.4, (Math.random() - 0.5) * 2.6);
+    it.time = 0; it.grounded = false; it.spin = Math.random() * Math.PI * 2;
+    it.sleeping = false; it.alive = true; it.inst = -1; it.mesh = null;
+
+    const group = this.getWeaponDropTemplate(weaponId).clone();
+    group.position.copy(it.pos);
+    group.rotation.set(0, it.spin, 0);
+    this.scene.add(group);
+    it.group = group;
+
+    this.finishSpawn(it);
+  }
+
+  private spawnFoodDrop(foodId: string, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+    if (this.items.length >= this.maxItems) this.evictOne();
+    const it = this.newItemRecord();
+    it.kind = 'food'; it.foodId = foodId; it.weaponId = ''; it.blockId = 0;
+    it.pos.copy(pos);
+    if (velocity) it.vel.copy(velocity);
+    else it.vel.set((Math.random() - 0.5) * 2.6, 2.4 + Math.random() * 1.4, (Math.random() - 0.5) * 2.6);
+    it.time = 0; it.grounded = false; it.spin = Math.random() * Math.PI * 2;
+    it.sleeping = false; it.alive = true; it.inst = -1; it.mesh = null;
+
+    const group = this.getFoodDropTemplate().clone();
+    group.position.copy(it.pos);
+    group.rotation.set(0, it.spin, 0);
+    this.scene.add(group);
+    it.group = group;
+
+    this.finishSpawn(it);
+  }
+
+  private buildLaserDropModel(): THREE.Group {
+    const g = new THREE.Group();
+    box(g, 0.05, 0.04, 0.13, 0, 0, 0, MATS.gun);
+    box(g, 0.064, 0.064, 0.07, 0, 0.022, -0.02, MATS.black);
+    box(g, 0.03, 0.03, 0.03, 0, 0.022, -0.02, MATS.whiteGlow);
+    box(g, 0.032, 0.09, 0.05, 0, -0.058, 0.035, MATS.poly, deg(-12));
+    box(g, 0.036, 0.012, 0.05, 0, -0.106, 0.045, MATS.black, deg(-12));
+    return g;
   }
 
   private pushAwake(it: DroppedItem): void {
@@ -232,6 +358,10 @@ export class ItemDropManager {
       this.meshPool.push(it.mesh);
       it.mesh = null;
     }
+    else if (it.group) {
+      this.scene.remove(it.group);
+      it.group = null;
+    }
     this.stats.live = this.items.length;
     this.stats.awake = this.awake.length;
     this.stats.sleeping = this.sleepers.length;
@@ -275,7 +405,9 @@ export class ItemDropManager {
       }
     }
     if (victim) {
-      if (this.ledger) this.ledger.add(victim.pos.x, victim.pos.y, victim.pos.z, victim.blockId, 1);
+      if (this.ledger && victim.kind === 'block') {
+        this.ledger.add(victim.pos.x, victim.pos.y, victim.pos.z, victim.blockId, 1);
+      }
       this.despawn(victim);
       this.stats.evicted++;
     }
@@ -322,6 +454,7 @@ export class ItemDropManager {
   private takeBestD2 = 0;
 
   private takeVisit = (it: DroppedItem): void => {
+    if (it.kind !== 'block') return;
     if (!it.grounded || it.time < POP_TIME) return;
     const dy = it.pos.y - this.takeY;
     if (dy > 0.6 || dy < -0.6) return;
@@ -352,14 +485,9 @@ export class ItemDropManager {
       const id = this.ledger.takeOneAt(x, y, z, radius);
       if (id > 0) {
         this.stats.takeHits++;
-        let rec = this.recPool.pop();
-        if (!rec) {
-          rec = {
-            mesh: null, blockId: 0, pos: new THREE.Vector3(), vel: new THREE.Vector3(),
-            time: 0, grounded: true, spin: 0, cell: -1, slot: -1, index: -1,
-            awakeSlot: -1, sleeping: false, inst: -1, alive: false,
-          } as DroppedItem;
-        }
+        const rec = this.newItemRecord();
+        rec.kind = 'block'; rec.weaponId = ''; rec.foodId = '';
+        rec.group = null;
         rec.blockId = id;
         rec.pos.set(x, y, z);
         rec.vel.set(0, 0, 0);
@@ -468,8 +596,9 @@ export class ItemDropManager {
 
       item.spin += step * 2.4;
       const vy = p.y + 0.12 + Math.sin(item.time * 3 + item.spin) * 0.035;
-      if (this.instancer) this.instancer.set(item, p.x, vy, p.z, item.spin);
+      if (item.inst >= 0 && this.instancer) this.instancer.set(item, p.x, vy, p.z, item.spin);
       else if (item.mesh) { item.mesh.position.set(p.x, vy, p.z); item.mesh.rotation.y = item.spin; }
+      else if (item.group) { item.group.position.set(p.x, vy, p.z); item.group.rotation.y = item.spin; }
 
       this.grid.move(item);
 
@@ -479,7 +608,7 @@ export class ItemDropManager {
           const dx = minImageF(p.x - px);
           const dz = minImageF(p.z - pz);
           if (dx * dx + dz * dz > SLEEP_DIST2) {
-            if (this.ledger) {
+            if (this.ledger && item.kind === 'block') {
               this.ledger.add(p.x, p.y, p.z, item.blockId, 1);
               this.despawn(item);
             } else {
@@ -550,9 +679,15 @@ export class ItemDropManager {
       );
       const it = this.consumePickBest();
       if (it === null) return;
-      if (!this.inv.addBlock(it.blockId, 1)) return;
+      if (it.kind === 'weapon') {
+        if (!this.inv.addWeapon(it.weaponId)) return;
+      } else if (it.kind === 'food') {
+        if (!this.inv.addItem({ kind: 'food', foodId: it.foodId, count: 1 })) return;
+      } else {
+        if (!this.inv.addBlock(it.blockId, 1)) return;
+      }
       this.audio.foley('snap');
-      this.onPickup?.(it.blockId);
+      this.onPickup?.(it.kind === 'block' ? it.blockId : -1);
       this.stats.pickups++;
       this.despawn(it);
     }
@@ -571,7 +706,10 @@ export class ItemDropManager {
         it.mesh.visible = false;
         this.meshPool.push(it.mesh);
       }
-      it.mesh = null; it.inst = -1; it.cell = -1; it.index = -1; it.alive = false;
+      else if (it.group) {
+        this.scene.remove(it.group);
+      }
+      it.mesh = null; it.group = null; it.inst = -1; it.cell = -1; it.index = -1; it.alive = false;
     }
     this.items = [];
     this.awake.length = 0;

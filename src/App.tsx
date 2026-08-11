@@ -25,8 +25,6 @@ export default function App() {
     inventoryRef.current = new Inventory();
   }
 
-  const clearedRef = useRef<Map<string, number[]>>(new Map());
-
   const [transition, setTransition] = useState<Transition | null>(null);
   const [fading, setFading] = useState(false);
   const transRef = useRef<Transition | null>(null);
@@ -56,14 +54,6 @@ export default function App() {
   }, []);
 
   const key = planetKey(home);
-  const initialCleared = clearedRef.current.get(key) ?? [];
-
-  const saveClearedCamps = useCallback(
-    (campIds: number[]) => {
-      clearedRef.current.set(key, campIds);
-    },
-    [key],
-  );
 
   const switchMode = useCallback((next: Mode, h: PlanetHome, snapshot: string | null | undefined, label: string, accent: string) => {
     armTransition(snapshot, label, accent);
@@ -87,8 +77,6 @@ export default function App() {
           home={home}
           onEnterSpace={enterSpace}
           persistentInventory={inventoryRef.current}
-          initialClearedCamps={initialCleared}
-          onSaveClearedCamps={saveClearedCamps}
           onReady={onChildReady}
           planetKey={key}
         />

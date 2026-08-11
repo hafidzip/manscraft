@@ -448,17 +448,24 @@ export class World {
     this.dirtySet.delete(c);
   }
 
-  updateGrassShadowCasters(_camX: number, _camZ: number, _radius: number): boolean {
+  updateGrassShadowCasters(camX: number, camZ: number, radius: number): boolean {
     let changed = false;
+    const r2 = radius * radius;
     for (const c of this.meshedChunks) {
       const g = c.grass;
       if (!g) continue;
+      let want = false;
+      if (radius > 0) {
+        const dx = c.cx * S + c.kx + S / 2 - camX;
+        const dz = c.cz * S + c.kz + S / 2 - camZ;
+        want = dx * dx + dz * dz <= r2;
+      }
       if (g.userData.grassShadowRegistered !== true) {
         g.userData.grassShadowRegistered = true;
         changed = true;
       }
-      if (!g.castShadow) {
-        g.castShadow = true;
+      if (g.castShadow !== want) {
+        g.castShadow = want;
         changed = true;
       }
     }

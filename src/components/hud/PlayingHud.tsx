@@ -22,16 +22,16 @@ export function PlayingHud({ stats, game }: { stats: HudStats; game: () => GameE
 
           <div className="absolute right-4 bottom-4 z-20 pointer-events-none flex flex-col items-end gap-1">
             <div className="px-font text-[8px] px-shadow-sm text-white/60 tracking-widest">{toolLabel}</div>
-            {stats.weaponId === 'laser' ? (
+            {stats.weaponId === 'laser' || stats.toolMode === 'barehand' ? (
               <>
                 <div className="px-font px-shadow text-[26px] leading-none text-[#ff8b4e]">
-                  ∞<span className="text-[11px] text-white/50"> CELL</span>
+                  ∞<span className="text-[11px] text-white/50"> {stats.toolMode === 'barehand' ? 'HAND' : 'CELL'}</span>
                 </div>
                 <div className="reload-bar-track w-28 h-[10px] relative overflow-hidden mt-0.5">
                   <div className="absolute inset-y-[3px] left-[3px] bg-[#ff5a1e]"
                     style={{ width: `${(stats.mineCharge ?? 0) * 96}%`, boxShadow: '0 0 8px #ff5a1e' }} />
                 </div>
-                <div className="px-font text-[7px] px-shadow-sm text-white/45 tracking-widest">HOLD LMB TO CUT</div>
+                <div className="px-font text-[7px] px-shadow-sm text-white/45 tracking-widest">{stats.toolMode === 'barehand' ? 'HOLD LMB TO MINE' : 'HOLD LMB TO CUT'}</div>
               </>
             ) : isFoodHud || stats.heldBlockId !== null ? (
               <>

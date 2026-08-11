@@ -11,7 +11,6 @@ import { FlowField } from './fps/FlowField';
 import { ChangeBus } from './world/changeBus';
 import { MachineRegistry, MK_GHOST } from './world/machineRegistry';
 import { MachineScheduler } from './fps/machineScheduler';
-import type { CampSite, CampBuild } from './world/camps';
 import { setActivePlanetTheme, planetSeedToWorldSeed, TerrainGenerator } from './world/generator';
 import type { PlanetTheme } from './space/theme';
 import { hub, themeToJson } from './persist/planetStore';
@@ -88,11 +87,10 @@ export class GameEngine {
   private fpsAudio = new AudioSynth();
   private weapons!: WeaponSystem;
   private enemies!: EnemyManager;
-  camps: { site: CampSite; build: CampBuild }[] = [];
   private fx!: Effects;
   private heldBlock!: HeldBlockTool;
   private torchLights!: TorchLights;
-  private toolMode: 'weapon' | 'laser' | 'block' | 'food' = 'weapon';
+  private toolMode: 'weapon' | 'laser' | 'barehand' | 'block' | 'food' = 'weapon';
   public inventory!: Inventory;
   private inserters!: InserterManager;
   private laserMiners!: LaserMinerManager;
@@ -108,6 +106,10 @@ export class GameEngine {
   private triggerDown = false;
   private prevLeft = false;
   private placeCd = 0;
+  private throwCd = 0;
+  private dropPos = new THREE.Vector3();
+  private dropVel = new THREE.Vector3();
+  private dropLift = new THREE.Vector3(0, 1.4, 0);
 
   private mainRT: THREE.WebGLRenderTarget | null = null;
   private lightingRT: THREE.WebGLRenderTarget | null = null;
@@ -254,7 +256,6 @@ export class GameEngine {
     private events: EngineEvents,
     theme?: PlanetTheme | null,
     persistentInventory?: Inventory,
-    private initialClearedCamps?: number[],
     private worldKey = 'home',
   ) {
     this.theme = theme ?? null;
@@ -449,8 +450,6 @@ export class GameEngine {
     claimed.sim.attachToLive(this.world);
     this.scene.add(this.world.group);
 
-    this.camps = [];
-
     this.fluid = new FluidSim(this.world);
     this.world.onChanged = (x, y, z, oldId, newId) => {
       this.flow.markColumnDirty(x, z);
@@ -621,10 +620,7 @@ export class GameEngine {
       onPlayerHit: (dmg, from) => this.damagePlayer(dmg, from),
       onEnemyKilled: (e) => { this.kills++; this.rewardCoins(e); },
       flowField: this.flow,
-    }, this.camps);
-    if (this.initialClearedCamps?.length) {
-      this.enemies.markCampsCleared(this.initialClearedCamps);
-    }
+    });
     this.enemies.addScene(this.scene);
 
     for (const cfg of Object.values(ENEMY_PRESETS)) {
@@ -661,7 +657,7 @@ export class GameEngine {
       damage: (t, amount, point) => {
         const e = t as Enemy;
         e.takeDamage(amount, point, false);
-        this.enemies.alertSquadOf(e);
+        this.enemies.alertAlliesOf(e);
       },
       muzzle: (pos) => this.fx.muzzleFlash(pos, 0.42),
       tracer: (from, to) => this.fx.tracer(from, to),
@@ -1447,9 +1443,8 @@ export class GameEngine {
       this.toolMode = 'food';
       this.weapons.setHolstered(true);
     } else {
-      this.toolMode = 'weapon';
-      this.weapons.setHolstered(false);
-      this.weapons.switchTo('handgun');
+      this.toolMode = 'barehand';
+      this.weapons.setHolstered(true);
     }
     this.target = null;
     this.breakT = 0;
@@ -1457,6 +1452,35 @@ export class GameEngine {
     this.statT = 0;
   }
 
+
+  private throwHeldItem(): void {
+    if (this.dead || this.piloting || this.spaceExited || this.throwCd > 0) return;
+    const item = this.inventory.hotbar[this.sel];
+    if (!item) { this.sound.playClick(); return; }
+    this.throwCd = 0.35;
+
+    const eye = this.player.eye();
+    this.camera.getWorldDirection(this.aimDir);
+    this.dropPos.set(
+      eye.x + this.aimDir.x * 0.6,
+      eye.y - 0.12 + this.aimDir.y * 0.4,
+      eye.z + this.aimDir.z * 0.6,
+    );
+    this.dropVel.copy(this.aimDir).multiplyScalar(6.8).add(this.player.vel).add(this.dropLift);
+    this.fpsAudio.whoosh();
+
+    if (item.kind === 'weapon') {
+      this.inventory.hotbar[this.sel] = null;
+      this.itemDrops.spawnItem({ kind: 'weapon', weaponId: item.weaponId }, this.dropPos, this.dropVel);
+    } else if (item.kind === 'block') {
+      this.inventory.consumeBlock({ isHotbar: true, index: this.sel });
+      this.itemDrops.spawn(item.blockId, this.dropPos, this.dropVel);
+    } else if (item.kind === 'food') {
+      this.inventory.consumeAt({ isHotbar: true, index: this.sel }, 1);
+      this.itemDrops.spawnItem({ kind: 'food', foodId: item.foodId, count: 1 }, this.dropPos, this.dropVel);
+    }
+    this.syncHotbarMode();
+  }
 
   private hitTarget(t: Target, dir: THREE.Vector3) {
     t.wobbleX.impulse(THREE.MathUtils.clamp(-dir.y * 30, -8, 8) + THREE.MathUtils.randFloatSpread(4));
@@ -1552,6 +1576,10 @@ export class GameEngine {
       case 'ShiftLeft': case 'ShiftRight': this.input.sprint = true; break;
       case 'ControlLeft': case 'ControlRight': this.input.crouch = true; e.preventDefault(); break;
       case 'KeyM': this.sound.setMuted(!this.sound.muted); break;
+      case 'KeyQ':
+        e.preventDefault();
+        this.throwHeldItem();
+        break;
       case 'KeyR':
         if (this.toolMode === 'weapon') this.weapons.startReload();
         break;
@@ -1610,7 +1638,7 @@ export class GameEngine {
     if (!this.locked || this.piloting) return;
     if (e.button === 0) {
       this.mouse.left = true;
-      if (this.toolMode === 'laser') this.breakT = 0;
+      if (this.toolMode === 'laser' || this.toolMode === 'barehand') this.breakT = 0;
     } else if (e.button === 2) {
       const eye = this.player.eye();
       this.camera.getWorldDirection(this.aimDir);
@@ -1681,6 +1709,7 @@ export class GameEngine {
     if (this.locked) this.tickPlay(dt);
     else this.tickMenuCamera(dt);
     if (this.dmgFollowT > 0) this.dmgFollowT = Math.max(0, this.dmgFollowT - dt);
+    if (this.throwCd > 0) this.throwCd -= dt;
 
     if (!this.spaceExited && this.piloting && this.ship.pos.y > SPACE_ALTITUDE) {
       this.spaceExited = true;
@@ -2149,7 +2178,7 @@ export class GameEngine {
       this.crack.visible = false;
       this.heldFood.visible = false;
       this.laser.update(dt, { visible: false, firing: false, target: null, charge: 0, speed: hs });
-    } else if (this.toolMode === 'laser') {
+    } else if (this.toolMode === 'laser' || this.toolMode === 'barehand') {
       this.triggerDown = false;
       this.adsHeld = false;
       this.heldFood.visible = false;
@@ -2266,15 +2295,17 @@ export class GameEngine {
   }
 
   private updateMining(dt: number): void {
-    const active = this.toolMode === 'laser' && !this.dead;
+    const isLaser = this.toolMode === 'laser';
+    const active = (isLaser || this.toolMode === 'barehand') && !this.dead;
     const speed = this.player.horizontalSpeed();
+    const mineRate = isLaser ? 4 : 1;
 
     if (!active || !this.mouse.left || !this.target) {
       if (!this.target) this.crack.visible = false;
       this.breakT = 0;
       this.mineCharge = Math.max(0, this.mineCharge - dt * 1.6);
       this.laser.update(dt, {
-        visible: active, firing: false,
+        visible: active && isLaser, firing: false,
         target: this.target ? this.aimPoint : null,
         charge: 0, speed,
       });
@@ -2286,25 +2317,26 @@ export class GameEngine {
       this.breakT = 0;
       this.mineCharge = 0;
       this.crack.visible = false;
-      this.laser.update(dt, { visible: true, firing: false, target: this.aimPoint, charge: 0, speed });
+      this.laser.update(dt, { visible: isLaser, firing: false, target: this.aimPoint, charge: 0, speed });
       return;
     }
 
     this.mineCharge = Math.min(1, this.mineCharge + dt * 1.9);
-    this.breakT += dt / Math.max(0.05, d.hardness);
+    this.breakT += (dt / Math.max(0.05, d.hardness)) * mineRate;
 
     this.digSoundT -= dt;
     if (this.digSoundT <= 0) {
       this.digSoundT = 0.12;
-      this.fpsAudio.laserSizzle();
+      if (isLaser) this.fpsAudio.laserSizzle();
+      else this.fpsAudio.foley('slap');
       this.particles.burst(
         this.aimPoint.x, this.aimPoint.y, this.aimPoint.z,
-        d.colors, 2, 1.4,
+        d.colors, isLaser ? 2 : 1, isLaser ? 1.4 : 1.1,
       );
     }
 
     this.laser.update(dt, {
-      visible: true, firing: true, target: this.aimPoint,
+      visible: isLaser, firing: isLaser, target: this.aimPoint,
       charge: this.mineCharge, speed,
     });
 
@@ -2741,7 +2773,7 @@ export class GameEngine {
     if (useEnemy) {
       const eh = enemyHit!;
       eh.enemy.takeDamage(weaponId === 'sniper' ? 50 : weaponId === 'bazooka' ? 999 : 12, eh.point, eh.headshot);
-      this.enemies.alertSquadOf(eh.enemy);
+      this.enemies.alertAlliesOf(eh.enemy);
       this.hitSeq++;
       if (eh.headshot) this.fpsAudio.headshot(); else this.fpsAudio.enemyHit();
     } else if (useTarget) {
@@ -2766,7 +2798,7 @@ export class GameEngine {
   private handleExplosion(pos: THREE.Vector3): void {
     const dist = pos.distanceTo(this.player.pos);
     this.enemies.damageInRadius(pos, 3.4, 120);
-    this.enemies.alertCampsInRadius(pos, 3.4);
+    this.enemies.alertInRadius(pos, 18);
 
     const MAX_BLAST_DROPS = 14;
     let drops = 0;
@@ -2815,12 +2847,13 @@ export class GameEngine {
     const selItem = this.inventory.hotbar[this.sel] ?? null;
     const weaponId =
       selItem && selItem.kind === 'weapon' ? selItem.weaponId :
-      this.toolMode === 'laser' ? 'laser' : 'block';
+      this.toolMode === 'laser' ? 'laser' :
+      this.toolMode === 'barehand' ? 'barehand' : 'block';
     const weaponName =
       selItem && selItem.kind === 'weapon' ? (WEAPONS[selItem.weaponId]?.name ?? LASER_NAME) :
       selItem && selItem.kind === 'food' ? (FOODS[selItem.foodId]?.name ?? 'Food') :
       selItem && selItem.kind === 'block' ? (BLOCK_NAMES[selItem.blockId] ?? 'Block') :
-      LASER_NAME;
+      this.toolMode === 'barehand' ? 'Bare Hands' : LASER_NAME;
     const ammo =
       selItem && (selItem.kind === 'block' || selItem.kind === 'food') ? selItem.count :
       this.toolMode === 'weapon' ? this.weapons.ammoInfo.ammo : -1;
@@ -2843,8 +2876,6 @@ export class GameEngine {
       hp: Math.max(0, Math.round(this.hp)),
       maxHp: this.maxHp,
       kills: this.kills,
-      campsTotal: this.enemies.campsTotal,
-      campsCleared: this.enemies.campsCleared,
       enemiesAlive: this.enemies.aliveCount,
       dead: this.dead,
       respawnIn: Math.max(0, Math.ceil(DEATH_DURATION - this.deadTimer)),
@@ -2901,19 +2932,6 @@ export class GameEngine {
 
   getPlayer(): Player {
     return this.player;
-  }
-
-  getCamps(): { x: number; z: number; cleared: boolean }[] {
-    const camps = this.enemies?.camps ?? [];
-    return camps.map((c) => ({
-      x: c.site.cx,
-      z: c.site.cz,
-      cleared: c.cleared,
-    }));
-  }
-
-  getClearedCampIds(): number[] {
-    return this.enemies?.getClearedCampIds() ?? [...(this.initialClearedCamps ?? [])];
   }
 
   private capturePersistence(): void {

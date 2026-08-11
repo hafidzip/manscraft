@@ -35,12 +35,10 @@ export interface HudStats {
   hp: number;
   maxHp: number;
   kills: number;
-  campsTotal: number;
-  campsCleared: number;
   enemiesAlive: number;
   dead: boolean;
   respawnIn: number;
-  toolMode: 'weapon' | 'laser' | 'block' | 'food';
+  toolMode: 'weapon' | 'laser' | 'barehand' | 'block' | 'food';
   weaponId: string;
   weaponName: string;
   ammo: number;

@@ -44,7 +44,6 @@ export function DeathScreen({ stats }: { stats: HudStats }) {
         <div className="death-sub flex flex-col items-center gap-5">
           <div className="px-font px-shadow-sm text-[10px] text-white/75 flex flex-wrap justify-center gap-6">
             <span>KILLS <span className="text-[#ffd23e]">{stats.kills}</span></span>
-            <span>CAMPS <span className="text-white">{stats.campsCleared}/{stats.campsTotal} CLEARED</span></span>
             <span>MINED <span className="text-[#ffd23e]">{stats.blocksMined}</span></span>
           </div>
           <div className="px-font px-shadow-sm text-[11px] text-white/55">

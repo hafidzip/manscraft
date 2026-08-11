@@ -12,14 +12,12 @@ interface GameCanvasProps {
   home?: PlanetHome | null;
   onEnterSpace?: (home: PlanetHome, snapshot?: string | null) => void;
   persistentInventory?: Inventory | null;
-  initialClearedCamps?: number[];
-  onSaveClearedCamps?: (campIds: number[]) => void;
   onReady?: () => void;
   planetKey?: string;
 }
 
 export function GameCanvas({
-  home, onEnterSpace, persistentInventory, initialClearedCamps, onSaveClearedCamps, onReady,
+  home, onEnterSpace, persistentInventory, onReady,
   planetKey,
 }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -37,8 +35,6 @@ export function GameCanvas({
 
   const [coldStart] = useState(() => !session.booted);
 
-  const saveRef = useRef(onSaveClearedCamps);
-  saveRef.current = onSaveClearedCamps;
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
 
@@ -80,7 +76,6 @@ export function GameCanvas({
       },
       home ? themeFromPlanet(home.planet, home.star) : undefined,
       persistentInventory ?? undefined,
-      initialClearedCamps,
       planetKey ?? planetKeyOf(home ?? null),
     );
     engineRef.current = engine;
@@ -92,8 +87,6 @@ export function GameCanvas({
 
     return () => {
       cancelled = true;
-      const cleared = engine.getClearedCampIds();
-      saveRef.current?.(cleared);
       engine.dispose();
       engineRef.current = null;
     };
