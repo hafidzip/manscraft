@@ -1,0 +1,180 @@
++    const recipe = input ? smeltResult(input.blockId) : null;
++    const canCook = !!recipe;
++
++    if (st.burn <= 0 && canCook && st.fuel && st.fuel.kind === 'block') {
++      const t = fuelTime(st.fuel.blockId);
++      if (t > 0) {
++        st.burn = t;
++        st.burnMax = t;
++        st.fuel.count -= 1;
++        if (st.fuel.count <= 0) st.fuel = null;
++        changed = true;
++      }
++    }
++
++    if (st.burn <= 0) {                        // unlit: cook progress decays, tick ends
++      if (st.cook > 0) { st.cook = Math.max(0, st.cook - remaining * 2); changed = true; }
++      break;
++    }
++
++    if (!canCook) {                            // lit with nothing to smelt: burn down
++      const step = Math.min(remaining, st.burn);
++      st.burn -= step;
++      remaining -= step;
++      if (st.cook > 0) st.cook = Math.max(0, st.cook - step * 2);
++      changed = true;
++      continue;
++    }
++
++    const step = Math.min(remaining, st.burn, SMELT_TIME - st.cook);
++    st.burn = Math.max(0, st.burn - step);
++    st.cook += step;
++    remaining -= step;
++    changed = true;
++
++    if (st.cook >= SMELT_TIME - 1e-9 && recipe && input) {
++      // One completed smelt. Never more than one item type reported per tick.
++      if (out && out.producedId !== 0 && out.producedId !== recipe.output) break;
++      st.cook = 0;
++      input.count -= 1;
++      if (input.count <= 0) st.input = null;
++      if (out) {
++        out.producedId = recipe.output;
++        out.producedCount += recipe.count;
++      } else if (st.output && st.output.kind === 'block' && st.output.blockId === recipe.output) {
++        st.output.count += recipe.count;
++      } else {
++        st.output = { kind: 'block', blockId: recipe.output, count: recipe.count };
++      }
++    }
++  }
++
++  const litChanged = wasLit !== st.burn > 0;
++  if (out) out.changed = changed || litChanged;
++  return changed || litChanged;
++}
+```
+
+`outputAccepts()` becomes dead for the ejecting path — keep it only if the manual UI still reads `st.output`; otherwise delete it. `furnaceIdle()` is unchanged and now reliably returns true once a furnace drains, so idle furnaces still get garbage-collected.
+
+---
+
+## 7. PATCH — `src/game/crafting/recipes.ts` (one export, no behavior change)
+
+```diff
+ export function recipeIngredients(r: Recipe): Ingredient[] {
+   if (r.shaped) return r.shaped.flat().filter((c): c is Ingredient => !!c);
+   return r.shapeless ?? [];
+ }
++
++/** Stable id lookup used by machine blueprints and save validation. */
++export const RECIPE_IDS: readonly string[] = RECIPES.map((r) => r.id);
++
++/** Only these outputs are automatable (blocks). Recipes with non-block outputs are
++ *  selectable in the UI but will never accept inserter deliveries. */
++export const AUTOMATABLE_RECIPE_IDS: readonly string[] =
++  RECIPES.filter((r) => r.output.kind === 'block').map((r) => r.id);
+```
+
+`matchCraft` is untouched and remains player-inventory-only, exactly as specified.
+
+---
+
+## 8. PATCH — `src/game/fps/LaserMiner.ts` (exact-front only)
+
+```diff
+-import { wrapBlock } from '../core/constants';
++import { wrapBlock } from '../core/constants';
++import { acquireFrontTarget } from '../factory/machineProcessing';
+ 
+-const RANGE = 6;
+ const MINE_TIME = 0.85;
++/** Re-acquisition is O(1) now, so a permanent node simply re-locks next frame. */
++const REACQUIRE_CD = 0.02;
+```
+
+```diff
+-  private acquire(t: Turret): void {
+-    const [fx, fz] = t.dir;
+-    const lx = -fz, lz = fx;
+-    let best: { ox: number; oy: number; oz: number } | null = null;
+-    let bestScore = Infinity;
+-    for (let step = 1; step <= RANGE; step++) {
+-      const spread = Math.min(2, Math.max(1, Math.round((step - 1) * 0.5)));
+-      for (let lat = -spread; lat <= spread; lat++) {
+-        for (let vert = -spread; vert <= spread; vert++) {
+-          const ox = fx * step + lx * lat;
+-          const oz = fz * step + lz * lat;
+-          const oy = vert;
+-          const id = this.vox(wrapBlock(t.wx + ox), t.y + oy, wrapBlock(t.wz + oz));
+-          if (id < 0 || !this.hooks.mineable(id)) continue;
+-          if (!this.reachable(t, ox, oy, oz, lx, lz)) continue;
+-          const score = step * 10 + Math.abs(lat) * 2 + Math.abs(vert) * 2;
+-          if (score < bestScore) { bestScore = score; best = { ox, oy, oz }; }
+-        }
+-      }
+-    }
+-    t.target = best;
+-    t.charge = 0;
+-  }
++  /**
++   * EXACT FRONT ONLY: (wrap(wx+dx), y, wrap(wz+dz)).
++   * No cone, no range walk, no lateral or vertical offsets, no pass-through.
++   */
++  private acquire(t: Turret): void {
++    const [fx, fz] = t.dir;
++    const found = acquireFrontTarget(
++      { getBlock: (x, y, z) => this.vox(x, y, z) },
++      t.wx, t.y, t.wz, fx, fz,
++      (id) => this.hooks.mineable(id),
++    );
++    t.target = found ? { ox: fx, oy: 0, oz: fz } : null;
++    t.charge = 0;
++  }
+```
+
+```diff
+     if (t.charge >= 1) {
+       const wx = wrapBlock(t.wx + t.target.ox);
+       const wy = t.y + t.target.oy;
+       const wz = wrapBlock(t.wz + t.target.oz);
+       tmpDrop.set(ix + 0.5 - t.dir[0], t.y + 1.1, iz + 0.5 - t.dir[1]);
+       this.hooks.mine(wx, wy, wz, tmpDrop);
+       t.target = null;
+       t.charge = 0;
+-      t.scanCd = 0.05;
++      // Ore is still there -> instant re-lock next scan (infinite node).
++      // Normal block is now air -> re-acquire finds nothing and the miner idles.
++      t.scanCd = REACQUIRE_CD;
+     }
+```
+
+Delete `reachable()` and `clearPath()` and the now-unused `RANGE` if nothing else references them (grep first — the beam VFX may reuse `clearPath`). The beam length is now always 1 block; clamp any beam-scale math to the single front cell.
+
+---
+
+## 9. PATCH — `src/game/fps/Inserter.ts` (machine-aware release, no engine import)
+
+```diff
++import { wrapBlock } from '../core/constants';
++
+ type WorldView = { get(x: number, y: number, z: number): number };
++
++/**
++ * Pure port implemented by GameEngine. Keeps three-land free of machine rules.
++ */
++export interface InserterAutomation {
++  /** True only if the target machine took ownership of this one unit. */
++  tryInsert(x: number, y: number, z: number, itemId: number): boolean;
++  /** Emit one rejected/produced unit on top of the target, through ItemDropManager. */
++  emitAbove(x: number, y: number, z: number, itemId: number, count?: number): void;
++  /** True when (x,y,z) is a furnace or a crafting table. */
++  isMachine(x: number, y: number, z: number): boolean;
++}
+ 
+ export class InserterManager implements MachineAgent {
+   constructor(
+     private scene: THREE.Scene,
+     private world: WorldView,
+     private drops: ItemDropManager,
+-    private audio: AudioSynth

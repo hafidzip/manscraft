@@ -1,0 +1,180 @@
+  st.output = null;
+  st.burn = 0;
+  st.burnMax = 0;
+  st.cook = 0;
+  return out;
+}
+
+/* -------------------------------------------------------- crafting table */
+
+export interface CraftingTableState {
+  /** Persistent selected blueprint for THIS table. null = accepts nothing. */
+  recipeId: string | null;
+  /** Sparse FPS item id -> units buffered toward exactly one craft. */
+  buffered: Record<number, number>;
+}
+
+export const newCraftingTable = (): CraftingTableState => ({ recipeId: null, buffered: {} });
+
+const RECIPE_INDEX = new Map<string, Recipe>();
+function indexOf(recipes: readonly Recipe[]): Map<string, Recipe> {
+  if (recipes === RECIPES) {
+    if (RECIPE_INDEX.size === 0) for (const r of RECIPES) RECIPE_INDEX.set(r.id, r);
+    return RECIPE_INDEX;
+  }
+  const m = new Map<string, Recipe>();
+  for (const r of recipes) m.set(r.id, r);
+  return m;
+}
+
+export function recipeById(id: string | null, recipes: readonly Recipe[] = RECIPES): Recipe | null {
+  if (!id) return null;
+  return indexOf(recipes).get(id) ?? null;
+}
+
+const REQ_CACHE = new Map<string, ReadonlyMap<number, number>>();
+
+/**
+ * Ingredient MULTISET for automation. Shaped position is irrelevant to inserter
+ * delivery; duplicate ingredient counts are fully significant.
+ */
+export function recipeRequirements(recipe: Recipe): ReadonlyMap<number, number> {
+  const cached = REQ_CACHE.get(recipe.id);
+  if (cached) return cached;
+  const req = new Map<number, number>();
+  for (const ing of recipeIngredients(recipe)) {
+    if (!ing || ing.kind !== 'block') continue;
+    req.set(ing.blockId, (req.get(ing.blockId) ?? 0) + 1);
+  }
+  const frozen: ReadonlyMap<number, number> = req;
+  REQ_CACHE.set(recipe.id, frozen);
+  return frozen;
+}
+
+export type CraftInsertResult =
+  | { accepted: false }
+  | { accepted: true; producedId: number; producedCount: number };
+
+const REJECT: CraftInsertResult = { accepted: false };
+
+/**
+ * Accept exactly one unit into the table's blueprint buffer.
+ *   not accepted -> caller MUST emit the unit above the table
+ *   accepted, producedCount === 0 -> unit is buffered
+ *   accepted, producedCount  >  0 -> unit was buffered, one craft consumed, emit the result
+ */
+export function tryInsertCrafting(
+  st: CraftingTableState,
+  itemId: number,
+  recipes: readonly Recipe[] = RECIPES,
+): CraftInsertResult {
+  if (!Number.isFinite(itemId) || itemId <= 0) return REJECT;
+  const recipe = recipeById(st.recipeId, recipes);
+  if (!recipe) return REJECT;                       // no blueprint -> reject everything
+
+  const req = recipeRequirements(recipe);
+  const need = req.get(itemId) ?? 0;
+  if (need <= 0) return REJECT;                     // not an ingredient
+
+  const have = st.buffered[itemId] ?? 0;
+  if (have >= need) return REJECT;                  // required count already full
+
+  st.buffered[itemId] = have + 1;
+
+  for (const [id, n] of req) {
+    if ((st.buffered[id] ?? 0) < n) return { accepted: true, producedId: 0, producedCount: 0 };
+  }
+
+  // Complete craft: consume exactly one multiset.
+  for (const [id, n] of req) {
+    const left = (st.buffered[id] ?? 0) - n;
+    if (left > 0) st.buffered[id] = left;
+    else delete st.buffered[id];
+  }
+
+  const out = recipe.output;
+  if (out.kind !== 'block') {
+    // Non-block outputs are not automatable; ingredients were consumed, so return them.
+    for (const [id, n] of req) st.buffered[id] = (st.buffered[id] ?? 0) + n;
+    return REJECT;
+  }
+  return { accepted: true, producedId: out.blockId, producedCount: Math.max(1, out.count) };
+}
+
+/**
+ * Change the blueprint. Ingredients still valid for the new blueprint (up to the new
+ * required count) are kept; everything else is returned for the caller to emit above
+ * the table. Selecting a blueprint never consumes anything.
+ */
+export function setCraftingBlueprint(
+  st: CraftingTableState,
+  recipeId: string | null,
+  recipes: readonly Recipe[] = RECIPES,
+): StackOut[] {
+  if (st.recipeId === recipeId) return [];
+  st.recipeId = recipeId;
+  const recipe = recipeById(recipeId, recipes);
+  const req = recipe ? recipeRequirements(recipe) : new Map<number, number>();
+  const spill: StackOut[] = [];
+  for (const key of Object.keys(st.buffered)) {
+    const id = Number(key);
+    const have = st.buffered[id] ?? 0;
+    const keep = Math.min(have, req.get(id) ?? 0);
+    if (have - keep > 0) spill.push({ id, count: have - keep });
+    if (keep > 0) st.buffered[id] = keep;
+    else delete st.buffered[id];
+  }
+  return spill;
+}
+
+/** Everything a broken crafting table owes the world. Called exactly once. */
+export function spillCrafting(st: CraftingTableState): StackOut[] {
+  const out: StackOut[] = [];
+  for (const key of Object.keys(st.buffered)) {
+    const id = Number(key);
+    const n = st.buffered[id] ?? 0;
+    if (n > 0) out.push({ id, count: n });
+  }
+  st.buffered = {};
+  st.recipeId = null;
+  return out;
+}
+
+export function craftingTableIdle(st: CraftingTableState): boolean {
+  if (st.recipeId) return false;
+  for (const k of Object.keys(st.buffered)) if ((st.buffered[Number(k)] ?? 0) > 0) return false;
+  return true;
+}
+
+/** Buffer progress for HUD: 0..1 toward one craft. */
+export function craftingProgress(st: CraftingTableState, recipes: readonly Recipe[] = RECIPES): number {
+  const recipe = recipeById(st.recipeId, recipes);
+  if (!recipe) return 0;
+  const req = recipeRequirements(recipe);
+  let need = 0;
+  let have = 0;
+  for (const [id, n] of req) {
+    need += n;
+    have += Math.min(n, st.buffered[id] ?? 0);
+  }
+  return need > 0 ? have / need : 0;
+}
+
+/**
+ * Load-time validation. Unknown recipe ids become null; non-integer / non-positive /
+ * over-cap counts are discarded. Returns a state that can never over-buffer.
+ */
+export function sanitizeCraftingState(
+  raw: Partial<CraftingTableState> | null | undefined,
+  recipes: readonly Recipe[] = RECIPES,
+): CraftingTableState {
+  const st = newCraftingTable();
+  const recipe = recipeById(typeof raw?.recipeId === 'string' ? raw.recipeId : null, recipes);
+  st.recipeId = recipe ? recipe.id : null;
+  const req = recipe ? recipeRequirements(recipe) : new Map<number, number>();
+  const src = raw?.buffered ?? {};
+  for (const key of Object.keys(src)) {
+    const id = Number(key);
+    const n = Math.floor(Number(src[Number(key)]));
+    if (!Number.isFinite(id) || id <= 0) continue;
+    if (!Number.isFinite(n) || n <= 0) continue;

@@ -1,0 +1,180 @@
+    const cap = req.get(id) ?? 0;
+    if (cap <= 0) continue;                          // no longer an ingredient -> dropped
+    st.buffered[id] = Math.min(n, cap);
+  }
+  return st;
+}
+
+/* ------------------------------------------------- one-call machine feed */
+
+export const enum MachineKind {
+  None = 0,
+  Furnace = 1,
+  CraftingTable = 2,
+}
+
+/**
+ * The single acceptance entry point used by BOTH inserter implementations.
+ * Returns true when the machine took ownership of the unit; false means the caller
+ * must emit exactly one unit above (x, y, z). Produced results are emitted through
+ * `sink` immediately, on top of the machine.
+ */
+export function feedMachine(
+  kind: MachineKind,
+  st: FurnaceState | CraftingTableState,
+  x: number,
+  y: number,
+  z: number,
+  itemId: number,
+  sink: MachineItemSink,
+  recipes: readonly Recipe[] = RECIPES,
+): boolean {
+  if (kind === MachineKind.Furnace) {
+    return tryInsertFurnace(st as FurnaceState, itemId) !== 'rejected';
+  }
+  if (kind === MachineKind.CraftingTable) {
+    const res = tryInsertCrafting(st as CraftingTableState, itemId, recipes);
+    if (!res.accepted) return false;
+    if (res.producedCount > 0) sink.emitAbove(x, y, z, res.producedId, res.producedCount);
+    return true;
+  }
+  return false;
+}
+```
+
+---
+
+## 2. PATCH — `src/game/world/blocks.ts` (authoritative ore predicate)
+
+```diff
+ export const isConveyor = (id: number): boolean => CONV_DIR.has(id);
+ export const isInserter = (id: number): boolean => INS_DIR.has(id);
+ export const isLaserMiner = (id: number): boolean => LM_DIR.has(id);
+ export const isTurret = (id: number): boolean => id === B.TURRET;
++
++/* ------------------------------------------------------------------ ORE ------
++ * Permanent infinite resource nodes. They are solid world voxels like bedrock,
++ * but unlike bedrock they are harvestable: every completed mining cycle emits one
++ * raw item and leaves the voxel untouched. Hardness stays FINITE and is reused as
++ * the harvest duration, because both mining paths reject non-finite hardness.
++ */
++export const ORE_BLOCK_IDS = [
++  B.ORE_RUBY, B.ORE_AMBER, B.ORE_LUMINESCENCE, B.ORE_DIAMOND,
++  B.ORE_GOLD, B.ORE_SILVER, B.ORE_JADE, B.ORE_EMERALD, B.COAL_ORE,
++] as const;
++
++const ORE_SET = new Set<number>(ORE_BLOCK_IDS);
++
++/** Single authoritative predicate: generation, destruction, mining, sim all use this. */
++export const isOreBlock = (id: number): boolean => ORE_SET.has(id);
++
++/** Harvest duration for a permanent node (seconds of full-charge mining). */
++export const oreHarvestTime = (id: number): number => {
++  const d = DEFS[id];
++  const h = d ? d.hardness : 1.6;
++  return Number.isFinite(h) && h > 0 ? h : 1.6;
++};
++
++/** True when a generic destructive path (explosion, sphere carve) must skip this block. */
++export const isIndestructible = (id: number): boolean => id === B.BEDROCK || isOreBlock(id);
+ export const conveyorDir = (id: number): Dir | null => CONV_DIR.get(id) ?? null;
+```
+
+No `DEFS` hardness values change. `DEFS[B.COAL_ORE].hardness` stays `1.6`, etc.
+
+---
+
+## 3. PATCH — `src/game/world/generator.ts` (everything underground, coal included)
+
+```diff
++/** Minimum vertical clearance between any ore voxel and its own column surface. */
++export const ORE_SURFACE_CLEARANCE = 6;
++
+ export class TerrainGenerator {
++  /** Public for property tests: local column surface height. */
++  heightAt(px: number, pz: number): number {
++    return this.columnAt(wrapBlock(px), wrapBlock(pz)).h;
++  }
++
++  get seaLevel(): number {
++    return this.sea;
++  }
++
++  /** Highest legal Y for ANY ore in this column. Deterministic, no randomness. */
++  oreCeiling(h: number): number {
++    return Math.min(h - ORE_SURFACE_CLEARANCE, this.sea - 2, H - 8);
++  }
+```
+
+```diff
+       if (underwater) {
+         for (let y = h + 1; y <= this.sea; y++) data[chunkIndex(lx, y, lz)] = B.WATER;
+       }
+ 
+-      // CURRENT BUG: coal has no upper cap, and absolute caps do not guarantee
+-      // clearance below each column's local surface.
+-      for (let y = 2; y < Math.min(h, H - 8); y++) {
++      // Every ore type, coal included, is capped by the column-local underground ceiling.
++      const oreMaxY = this.oreCeiling(h);
++      for (let y = 2; y <= oreMaxY; y++) {
+         if (data[chunkIndex(lx, y, lz)] !== B.STONE) continue;
+         const oreRoll = this.decoHash(0x07e0 + y, px, pz);
+         const coalRoll = this.decoHash(0x0c0a + y, px, pz);
+         if (y >= 3 && coalRoll < 0.045) {
+           data[chunkIndex(lx, y, lz)] = B.COAL_ORE;
+           continue;
+         }
+-        if (y <= 15 && oreRoll < 0.008) {
++        // Bands rebalanced to fit entirely under sea-2 (= 28) so no type becomes
++        // unreachable now that absolute caps above the ceiling are dead code.
++        if (y <= 12 && oreRoll < 0.008) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_LUMINESCENCE;
+           continue;
+         }
+-        if (y <= 20 && y >= 5 && oreRoll < 0.012) {
++        if (y <= 16 && y >= 4 && oreRoll < 0.012) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_DIAMOND;
+           continue;
+         }
+-        if (y <= 25 && y >= 8 && oreRoll < 0.010) {
++        if (y <= 18 && y >= 6 && oreRoll < 0.010) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_EMERALD;
+           continue;
+         }
+-        if (y <= 30 && y >= 10 && oreRoll < 0.014) {
++        if (y <= 20 && y >= 8 && oreRoll < 0.014) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_RUBY;
+           continue;
+         }
+-        if (y <= 35 && y >= 15 && oreRoll < 0.016) {
++        if (y <= 22 && y >= 10 && oreRoll < 0.016) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_GOLD;
+           continue;
+         }
+-        if (y <= 40 && y >= 18 && oreRoll < 0.018) {
++        if (y <= 24 && y >= 12 && oreRoll < 0.018) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_JADE;
+           continue;
+         }
+-        if (y <= 45 && y >= 20 && oreRoll < 0.020) {
++        if (y <= 26 && y >= 14 && oreRoll < 0.020) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_SILVER;
+           continue;
+         }
+-        if (y <= 50 && y >= 25 && oreRoll < 0.022) {
++        if (y <= 28 && y >= 16 && oreRoll < 0.022) {
+           data[chunkIndex(lx, y, lz)] = B.ORE_AMBER;
+         }
+       }
+```
+
+Notes: deterministic hash inputs (`0x07e0 + y`, `0x0c0a + y`) are unchanged; only the loop bound and band windows moved. Columns with `h < ORE_SURFACE_CLEARANCE + 2` simply produce no ore (loop does not run). Nothing is stored — generation stays deterministic and delta-free.
+
+---
+
+## 4. PATCH — `src/game/world/world.ts` (ore survives every destructive path)
+
+```diff
+-import { B, DEFS } from './blocks';
++import { B, DEFS, isIndestructible, isOreBlock } from './blocks';
+```

@@ -1,0 +1,180 @@
+
+```diff
+-  // onClick={() => setBookSel(r.id)}
++  // onClick={() => pickBlueprint(r.id)}
+```
+
+Optional but recommended buffer readout next to the recipe (uses only persisted state):
+
+```tsx
+{sel && table && (
+  <div className="blueprint-buffer">
+    {[...recipeRequirements(sel)].map(([id, n]) => (
+      <span key={id} className={(table.buffered[id] ?? 0) >= n ? 'full' : ''}>
+        {BLOCK_NAMES[id] ?? id}: {table.buffered[id] ?? 0}/{n}
+      </span>
+    ))}
+    <em>automation buffer — inserters fill this</em>
+  </div>
+)}
+```
+
+The manual `doCraft` button is unchanged: it consumes the *player inventory* grid and must never read or write `table.buffered`.
+
+---
+
+## 12. PATCH — `src/game/factory/factorySim.ts` (headless parity, still zero `three`)
+
+```diff
+-import { B, DEFS, isConveyor, isWaterId } from '../world/blocks';
++import { B, DEFS, isConveyor, isWaterId, isOreBlock } from '../world/blocks';
++import { packCell, cellX, cellZ } from '../core/cellKey';
++import { clampCellY } from './itemLedger';
++import {
++  MachineKind, acquireFrontTarget, feedMachine, harvestOutcome, machineKey,
++  newCraftingTable, sanitizeCraftingState,
++  type CraftingTableState, type MachineItemSink,
++} from './machineProcessing';
++import { drainFurnaceOutput, newFurnaceTickResult, newFurnace } from '../crafting/smelting';
+ 
+-export const LASER_RANGE = 6;
+ export const LASER_MINE_TIME = 0.85;
+-const FEED_FURNACES = false;
++
++  readonly furnaces = new Map<string, FurnaceState>();
++  readonly craftingTables = new Map<string, CraftingTableState>();
++  private readonly furnaceTickOut = newFurnaceTickResult();
++
++  /** Headless sink: everything lands in the ledger cell directly above the machine. */
++  private readonly sink: MachineItemSink = {
++    emitAbove: (x, y, z, itemId, count = 1) => {
++      this.ledger.addAtCell(packCell(wrapBlock(x), clampCellY(y + 1), wrapBlock(z)), itemId, count);
++    },
++  };
+```
+
+### 12.1 exact-front acquisition + permanent ore
+
+```diff
+   private mineable(id: number): boolean {
+     if (id === B.AIR || id < 0) return false;
+     if (isWaterId(id)) return false;
+     if (kindOf(id) !== 0) return false;
++    if (isOreBlock(id)) return TO_FPS[id] !== undefined;
+     const d = DEFS[id];
+     if (!d || !d.solid || !isFinite(d.hardness)) return false;
+     return TO_FPS[id] !== undefined;
+   }
+ 
+-  private acquire(m: SimMachine): boolean {
+-    const rx = -m.dz; const rz = m.dx;
+-    ... 3-nested-loop cone scan ...
+-  }
++  /** EXACT FRONT ONLY - identical rule to the live LaserMiner. */
++  private acquire(m: SimMachine): boolean {
++    const found = acquireFrontTarget(
++      { getBlock: (x, y, z) => this.view.getBlock(x, y, z) },
++      m.x, m.y, m.z, m.dx, m.dz,
++      (id) => this.mineable(id),
++    );
++    if (!found) { m.tx = -1; return false; }
++    m.tx = found.cell.x; m.ty = found.cell.y; m.tz = found.cell.z; m.aim = 0;
++    return true;
++  }
+```
+
+```diff
+     m.charge += dt / LASER_MINE_TIME;
+     if (m.charge >= 1) {
+-      m.charge -= 1;
++      m.charge -= 1;                        // keep the remainder for catch-up accuracy
+       const worldId = this.view.getBlock(m.tx, m.ty, m.tz);
+-      const itemId = TO_FPS[worldId];
+-      this.setBlockAuthoritative(m.tx, m.ty, m.tz, B.AIR);
+-      if (itemId !== undefined) {
+-        const fx = wrapBlock(m.x + m.dx);
+-        const fz = wrapBlock(m.z + m.dz);
+-        const below = this.view.getBlock(fx, m.y, fz);
+-        const yOff = below !== B.AIR && (DEFS[below]?.solid || isConveyor(below)) ? 1 : 0;
+-        this.ledger.add(fx + 0.5, m.y + yOff, fz + 0.5, itemId, 1);
+-      }
+-      m.tx = -1;
++      const outcome = harvestOutcome(worldId, TO_FPS);
++      if (outcome) {
++        if (outcome.destroy) this.setBlockAuthoritative(m.tx, m.ty, m.tz, B.AIR);
++        const fx = wrapBlock(m.x + m.dx);
++        const fz = wrapBlock(m.z + m.dz);
++        const below = this.view.getBlock(fx, m.y, fz);
++        const yOff = below !== B.AIR && (DEFS[below]?.solid || isConveyor(below)) ? 1 : 0;
++        this.ledger.add(fx + 0.5, m.y + yOff, fz + 0.5, outcome.itemId, 1);
++        this.stats.mined++;
++      }
++      // Ore: re-acquire finds the same voxel next tick -> infinite. Normal block: air -> idle.
++      m.tx = -1;
+     }
+```
+
+Defensive guard inside `setBlockAuthoritative`:
+
+```diff
+   private setBlockAuthoritative(x: number, y: number, z: number, id: number): void {
++    if (id === B.AIR && isOreBlock(this.view.getBlock(x, y, z))) return; // permanent node
+     ...
+   }
+```
+
+### 12.2 headless inserter feeds machines through the shared layer
+
+```diff
+-    if (FEED_FURNACES) { /* parity only ... */ }
+     return;
+```
+
+```diff
+   if (m.held > 0) {
+-    const out = this.inserterOutputCell(m);
+-    const isBeltCell = isConveyor(this.view.getBlock(cellX(out), m.y, cellZ(out)));
+-    const cap = isBeltCell ? 64 : GROUND_CELL_CAP;
+-    if (this.ledger.countAtCell(out) < cap) {
+-      this.ledger.addAtCell(out, m.held, 1);
+-      m.held = 0;
+-    }
++    const fx = wrapBlock(m.x + m.dx);
++    const fy = m.y;
++    const fz = wrapBlock(m.z + m.dz);
++    const kind = this.machineKindAt(fx, fy, fz);
++
++    if (kind !== MachineKind.None) {
++      const st = kind === MachineKind.Furnace
++        ? this.furnaceAt(fx, fy, fz)
++        : this.craftingAt(fx, fy, fz);
++      // Exactly one outcome: accepted into machine state, or emitted on top.
++      if (!feedMachine(kind, st, fx, fy, fz, m.held, this.sink)) {
++        this.sink.emitAbove(fx, fy, fz, m.held, 1);
++      }
++      m.held = 0;
++    } else {
++      const out = this.inserterOutputCell(m);
++      const isBeltCell = isConveyor(this.view.getBlock(cellX(out), m.y, cellZ(out)));
++      const cap = isBeltCell ? 64 : GROUND_CELL_CAP;
++      if (this.ledger.countAtCell(out) < cap) {
++        this.ledger.addAtCell(out, m.held, 1);
++        m.held = 0;
++      }
++    }
+   }
+   m.st = 0;
+```
+
+```diff
++  private machineKindAt(x: number, y: number, z: number): MachineKind {
++    const id = this.view.getBlock(x, y, z);
++    if (id === B.FURNACE || id === B.FURNACE_LIT) return MachineKind.Furnace;
++    if (id === B.CRAFTING_TABLE) return MachineKind.CraftingTable;
++    return MachineKind.None;
++  }
++
++  furnaceAt(x: number, y: number, z: number): FurnaceState {
++    const k = machineKey(x, y, z);
++    let st = this.furnaces.get(k);
++    if (!st) { st = newFurnace(); this.furnaces.set(k, st); }
