@@ -1,0 +1,180 @@
+  const seed = hashPlant(wx, y, wz, 101);
+  const span = Math.max(0, g.blades[1] - g.blades[0]);
+  const nb = g.blades[0] + Math.floor(seed * (span + 1));
+
+  for (let i = 0; i < nb; i++) {
+    const r = (k: number) => hashPlant(wx, y, wz, 200 + i * 11 + k);
+    const cx = x + 0.5 + (r(0) - 0.5) * g.spread;
+    const cz = z + 0.5 + (r(1) - 0.5) * g.spread;
+    const ang = r(2) * Math.PI * 2;
+    const dirX = Math.cos(ang), dirZ = Math.sin(ang);
+    const h  = g.height[0] + r(3) * (g.height[1] - g.height[0]);
+    const hw = (g.width[0] + r(4) * (g.width[1] - g.width[0])) * 0.5;
+
+    const cAmt  = g.curve * (0.6 + r(5) * 0.8);
+    const leanA = (r(6) - 0.5) * 2 * g.lean;
+    const phase = r(7) * Math.PI * 2;
+    // width axis (horizontal, perpendicular to the blade's facing direction)
+    const pX = -dirZ, pZ = dirX;
+    // soft mostly-up normal: reads as flat-lit foliage, matching the original tufts
+    const nl = Math.hypot(dirX * 0.35, 0.9, dirZ * 0.35);
+    const nx = (dirX * 0.35) / nl, ny = 0.9 / nl, nz = (dirZ * 0.35) / nl;
+
+    const segs = g.segments;
+    const at = (t: number) => ({
+      px: cx + dirX * cAmt * t * t + pX * leanA * t,
+      py: y + h * t,
+      pz: cz + dirZ * cAmt * t * t + pZ * leanA * t,
+      w: hw * (1 - g.taper * t),
+    });
+
+    for (let s = 0; s < segs; s++) {
+      const t0 = s / segs, t1 = (s + 1) / segs;
+      const a = at(t0), b = at(t1);
+      const vA = v0 + (v1 - v0) * t0, vB = v0 + (v1 - v0) * t1;
+      pushQuad(bucket,
+        [a.px - pX * a.w, a.py, a.pz - pZ * a.w],
+        [a.px + pX * a.w, a.py, a.pz + pZ * a.w],
+        [b.px + pX * b.w, b.py, b.pz + pZ * b.w],
+        [b.px - pX * b.w, b.py, b.pz - pZ * b.w],
+        [nx, ny, nz],
+        [[u0, vA], [u1, vA], [u1, vB], [u0, vB]],
+        mul,
+        // sway: (phase, strength ∝ height along blade, isTip, unused)
+        [[phase, t0, 0, 0], [phase, t0, 0, 0],
+         [phase, t1, t1 >= 1 ? 1 : 0, 0], [phase, t1, t1 >= 1 ? 1 : 0, 0]],
+      );
+    }
+  }
+}
+```
+
+**Flowers** — N cross quads instead of a fixed X:
+
+```ts
+/**
+ * Cross-quad plant. `quads` controls petal count (task 3):
+ *   2 → classic 4-petal X (terran/desert)
+ *   3 → 6-petal alien asterisk
+ *   4 → 8-petal neon starburst
+ * `f === null` reproduces the exact legacy 2-quad behaviour.
+ */
+function emitCross(
+  bucket: Bucket, x: number, y: number, z: number, tile: number,
+  swayStrength = 0, wx = x, wz = z,
+  f: FlowerShape | null = null, mul: [number, number, number] = [1, 1, 1],
+): void {
+  const [u0, v0, u1, v1] = tileUV(tile);
+  const quads  = f?.quads ?? 2;
+  const radius = f?.radius ?? 0.35;   // 0.35 ≡ the old m = 0.15 margin
+  const height = f?.height ?? 1.0;
+  const twist  = f?.twist ?? 0;
+  const phase  = hashPlant(wx, y, wz, 11) * Math.PI * 2;
+  const base   = hashPlant(wx, y, wz, 13) * Math.PI * 2 * twist;
+  const cx = x + 0.5, cz = z + 0.5;
+
+  for (let q = 0; q < quads; q++) {
+    const a = base + (Math.PI * q) / quads;
+    const dx = Math.cos(a) * radius, dz = Math.sin(a) * radius;
+    const nx = -Math.sin(a), nz = Math.cos(a);
+    pushQuad(bucket,
+      [cx - dx, y,          cz - dz],
+      [cx + dx, y,          cz + dz],
+      [cx + dx, y + height, cz + dz],
+      [cx - dx, y + height, cz - dz],
+      [nx, 0, nz],
+      [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+      mul,
+      [[phase, 0, 0, 0], [phase, 0, 0, 0],
+       [phase, swayStrength, 1, 0], [phase, swayStrength, 1, 0]],
+    );
+  }
+}
+```
+
+> **⚠️ ASSUMPTION** — `pushQuad(bucket, p0..p3, nrm, uvs, colMul, sway)` is my shorthand for
+> the file's existing inline attribute pushes. Confirm the real helper with
+> `grep -n "function push\|\.pos\.push" src/game/world/mesher.ts` and inline accordingly.
+> The **contract to preserve** is: 4 verts, 2 tris, `col` multiplied by `mul`,
+> `sway = (phase, strength, isTip, 0)`.
+>
+> Also note `mul` may exceed 1.0 for bright planets. If `col` is a `Uint8` attribute,
+> clamp: `Math.min(255, ao * 255 * mul[c])`. For the `glow` field, see §13.
+
+---
+
+## 8. Task 7 core — atlas bands, origin colours, per-voxel tags
+
+### `src/game/core/textures.ts`
+
+```diff
+ export const TILE = 16;
+ export const TPR = 8;
+ const TILE_NAMES = [ /* …unchanged 50 names… */ ] as const;
+ export const TILES: Record<string, number> = {};
+ TILE_NAMES.forEach((n, i) => (TILES[n] = i));
++
++/** Tiles that get one painted copy per PlanetType (structure differs, not just hue). */
++export const THEMED_TILE_NAMES = [
++  'grass_top', 'grass_side', 'dirt', 'stone', 'sand', 'gravel',
++  'log_side', 'log_top', 'leaves', 'planks', 'snow', 'snow_side',
++  'water', 'tallgrass', 'flower_red', 'flower_yellow', 'cactus_side', 'cactus_top',
++] as const;
++export type ThemedTileName = typeof THEMED_TILE_NAMES[number];
++const THEMED_INDEX: Record<string, number> = {};
++THEMED_TILE_NAMES.forEach((n, i) => (THEMED_INDEX[n] = i));
++/** base tile index → themed name (reverse lookup used by tileForOrigin) */
++const THEMED_BY_BASE = new Map<number, ThemedTileName>(
++  THEMED_TILE_NAMES.map((n) => [TILES[n], n]),
++);
++
++// ---- atlas geometry: base block, then one row-aligned band per PlanetType --------
++const rowAlign = (n: number) => Math.ceil(n / TPR) * TPR;
++export const VARIANT_BASE   = rowAlign(TILE_NAMES.length);              // 56 (7 rows)
++export const VARIANT_STRIDE = rowAlign(THEMED_TILE_NAMES.length);       // 24 (3 rows)
++export const ATLAS_TILES    = VARIANT_BASE + VARIANT_COUNT * VARIANT_STRIDE; // 392
++export const ATLAS_ROWS     = ATLAS_TILES / TPR;                        // 49
++export const ATLAS_W = TPR * TILE;        // 128
++export const ATLAS_H = ATLAS_ROWS * TILE; // 784  → 401 KB RGBA, NEAREST filtered, no mips
++
++/** Tile index of a themed tile inside a planet's band. */
++export function themedTile(name: ThemedTileName, tag: OriginTag): number {
++  const vi = originTypeIndex(tag);
++  if (vi < 0) return TILES[name];                       // untagged → legacy base tile
++  return VARIANT_BASE + vi * VARIANT_STRIDE + THEMED_INDEX[name];
++}
++
++/**
++ * Remap ANY base tile index through an origin tag. Non-themed tiles pass through.
++ * This is the single call the mesher needs — `d.top/d.side/d.bottom` stay untouched.
++ */
++export function tileForOrigin(baseTile: number, tag: OriginTag): number {
++  if (!tag) return baseTile;
++  const name = THEMED_BY_BASE.get(baseTile);
++  return name ? themedTile(name, tag) : baseTile;
++}
+```
+
+Painters become shape-aware:
+
+```diff
++export interface PaintCtx {
++  /** null for the base band (legacy neutral art). */
++  type: PlanetType | null;
++  flora: Flora | null;
++  rnd: () => number;   // mulberry32, deterministic per tile
++}
+-// PAINTERS[name] draws each 16x16 tile pixel-by-pixel
++// PAINTERS[name](img, tile, ctx) — now receives PaintCtx so *structure* can vary:
++//   log_side : broadleaf → vertical striations
++//              palm      → chevron scales
++//              crystal   → hard diagonal facets + specular highlight row
++//              fungal    → smooth with speckles
++//   leaves   : leafDensity → hole probability; canopyR → clump size
++//   tallgrass: segments/taper/curve → drawn blade silhouette matches the mesh geometry
++//   flower_* : quads → petal count drawn in the tile (2→4 petals, 3→6, 4→8)
++//   water    : per-type ripple frequency
++// Base colours stay the neutral TINT_REF values; the band tint does the rest.
+```
+
+Cached, theme-independent build:
