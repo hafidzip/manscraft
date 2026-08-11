@@ -1,0 +1,200 @@
+  }
+
+  dropInactive(key: string): void {
+    if (key === this.activeKey) return;
+    const sim = this.sims.get(key);
+    if (sim) hub.captureSim(key, sim);
+    this.sims.delete(key);
+    this.rr = Array.from(this.sims.keys());
+  }
+}
+
+export const universeSim = new UniverseSim();
+universeSim.start();   // module scope: survives every React remount, exactly like session.ts
+
+/* ---- Deliverable 7: console self-test hooks ------------------------- */
+export function installDebugHooks(): void {
+  if (typeof window === 'undefined') return;
+  (window as any).__manscraftSim = {
+    get hub() { return hub; },
+    get universeSim() { return universeSim; },
+    get planets() { return universeSim.keys(); },
+    sim: (k: string) => universeSim.get(k),
+    /** Conservation check: added − removed must equal the live total. */
+    parity: (k: string) => {
+      const s = universeSim.get(k); if (!s) return null;
+      const l = s.ledger;
+      return {
+        total: l.total, stacks: l.stackCount, cells: l.cellCount, drift: l.verify(),
+        conserved: l.stats.added - l.stats.removed,
+        deltaRecords: s.deltas.size, pruned: s.deltas.stats.pruned,
+        machines: s.stats.machines, mined: s.stats.mined, produced: s.stats.produced,
+        simTimeSec: s.simTimeSec, backlogSec: s.backlogSec,
+      };
+    },
+    /** Fast-forward a planet by N seconds without waiting (test Feature B). */
+    fastForward: (k: string, sec: number) => universeSim.get(k)?.advance(sec, Infinity) ?? 0,
+    /** Stress the ledger (test Feature C). */
+    stuff: (k: string, n = 1_000_000, itemId = 3) => {
+      const s = universeSim.get(k); if (!s) return null;
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) s.ledger.add((i * 7) % 512, 40 + (i % 8), (i * 13) % 512, itemId, 1);
+      return { ms: +(performance.now() - t0).toFixed(1), total: s.ledger.total, stacks: s.ledger.stackCount, approxBytes: s.ledger.bytes };
+    },
+    flush: () => hub.flushNow(),
+    wipe: () => hub.wipe(),
+  };
+}
+installDebugHooks();
+```
+
+---
+
+## 6. Integration patches
+
+### 6.1 `src/game/world/world.ts`
+
+```diff
++import type { DeltaSink } from '../persist/worldDelta';
++
+ export class World {
+   // …
+-  constructor(public readonly seed: number, private mats: ChunkMaterials) {
++  constructor(public readonly seed: number, private mats: ChunkMaterials,
++              private deltas: DeltaSink | null = null) {
+     this.gen = new TerrainGenerator(seed);
+   }
++  /** Feature A: allowed only BEFORE the first ensureData() call. */
++  setDeltaSink(d: DeltaSink | null): void { this.deltas = d; }
+```
+
+```diff
+   private ensureData(rawCx: number, rawCz: number): Chunk {
+     // …
+     if (!c) {
+       const data = new Uint8Array(S * H * S);
+       this.gen.populateChunk(data, cx, cz);
+       c = { cx, cz, data, /* … */ };
+       this.chunks.set(k, c);
+-      this.buildColumnCache(c);
+-      this.onChunkData?.(cx, cz, c.data, true);
++      // ▼ CRITICAL INJECTION POINT (Feature A). Order matters twice over:
++      //   1. deltas BEFORE buildColumnCache — colH/colC/colW are derived caches.
++      //   2. fromGenerator MUST be false when edits were replayed, otherwise
++      //      MachineRegistry's trustGenerator fast path skips the rescan and every
++      //      restored conveyor/inserter/miner stays unindexed (= dead factory).
++      const edited = this.deltas ? this.deltas.applyToChunk(cx, cz, c.data) : 0;
++      this.buildColumnCache(c);
++      this.onChunkData?.(cx, cz, c.data, edited === 0);
+       if (!this.bulkPreparing) this.markNeighborBorders(cx, cz);
+     }
+```
+
+> **`destroySphere` double-count check (asked for explicitly):** inside `beginBatch()`,
+> `setBlock` takes the `batchDepth > 0` path and does **not** call `onChanged`; `destroySphere`
+> then fires `notify(px,y,pz,oldId,B.AIR)` once per carved cell. So each carved voxel reaches
+> `WorldDeltaStore.recordBlock` exactly once. `recordBlock` is idempotent per cell anyway
+> (`Map.set` on the same `localIdx`), so even a double fire cannot corrupt the store — it only
+> bumps `stats.edits`. No patch needed here.
+
+### 6.2 `src/game/world/machineRegistry.ts`
+
+```diff
+ export class MachineRegistry {
+   // …
++  /** Feature B: the headless sim owns these machines; never erase their records. */
++  retainPredicate: ((key: number) => boolean) | null = null;
++
++  forEachRecord(cb: (rec: MachineRecord) => void): void { for (const r of this.byKey.values()) cb(r); }
+ 
+   pruneDormant(maxAgeSec = 120, maxPerCall = 32): number {
+     // …inside the candidate loop, before removal:
++    if (this.retainPredicate?.(rec.key)) { rec.dormantAt = this.nowSec; continue; }
+     // …existing removal
+   }
+```
+
+### 6.3 `src/game/fps/ItemDrop.ts` — ledger-backed window (Feature C)
+
+Public surface (`spawn`, `takeAt`, `update`, `clear`, `dispose`) is unchanged; only storage moves.
+
+```diff
++import { ItemLedger, ledgerCell } from '../factory/itemLedger';
++import { cellX, cellY, cellZ } from '../../game/core/cellKey';
++import { minImageF } from '../../game/core/constants';
++
++const WINDOW_RADIUS = 20;      // materialize inside this
++const DEMAT_RADIUS = 26;       // return to ledger outside this  (< SLEEP_DIST's old 24 semantics)
++const MATERIALIZE_PER_SWEEP = 24;
++const SWEEP_INTERVAL = 0.25;
++const BULK_PICKUP_PER_FRAME = 4096;   // ledger units vacuumed straight into the inventory
++
+-export interface ItemDropOptions { bus?: ChangeBus; instanced?: boolean; maxItems?: number; sleep?: boolean; }
++export interface ItemDropOptions { bus?: ChangeBus; instanced?: boolean; maxItems?: number; sleep?: boolean;
++  /** Feature C: the planet's authoritative item store (owned by PlanetFactorySim). */
++  ledger?: ItemLedger; }
+```
+
+```diff
+ export class ItemDropManager {
++  private ledger: ItemLedger | null = null;
++  private sweepClock = 0;
++  readonly bridgeStats = { materialized: 0, returned: 0, bulkPicked: 0, checkedOut: 0 };
+   constructor(scene, world, inv, audio, onPickup?, opts: ItemDropOptions = {}) {
+     // …
++    this.ledger = opts.ledger ?? null;
+   }
+```
+
+**`spawn` — check out of the ledger, never destroy:**
+
+```diff
+   spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+     if (blockId === B.AIR || blockId === B.BEDROCK) return;
+-    if (this.items.length >= this.maxItems) this.evictOne();
++    // INVARIANT: a unit is EITHER a ledger count OR a physical entity — never both.
++    if (this.ledger && this.items.length >= this.maxItems) {
++      this.ledger.add(pos.x, pos.y, pos.z, blockId, 1);   // virtual: no pop animation, no cost
++      this.stats.spawned++;
++      return;
++    }
+     // …existing pooled DroppedItem construction…
++    this.bridgeStats.checkedOut++;
+   }
+```
+
+**`evictOne` and the sleep path — return counts instead of deleting:**
+
+```diff
+   private evictOne(): void {
+-    // …picks the farthest item and despawns it (count lost)
++    const victim = /* …existing farthest-item selection… */;
++    if (victim) this.returnToLedger(victim);
+   }
++
++  /** Dematerialize: physical entity → ledger count. Nothing is ever lost. */
++  private returnToLedger(it: DroppedItem): void {
++    if (this.ledger) { this.ledger.add(it.pos.x, it.pos.y, it.pos.z, it.blockId, 1); this.bridgeStats.returned++; }
++    this.despawn(it);          // existing internal teardown (grid.remove + instancer.release + pool)
++    this.bridgeStats.checkedOut--;
++  }
+```
+
+**`takeAt` — physical grid first, then the ledger (window edge):**
+
+```diff
+   takeAt(x, y, z, radius = 0.55): DroppedItem | null {
+     // …existing grid search…
+-    return found;
++    if (found) return found;
++    if (!this.ledger) return null;
++    const id = this.ledger.takeOneAt(x, y, z, radius);
++    if (id === 0) return null;
++    // Detached, pooled record: callers only read .blockId (Inserter) and never re-link it.
++    const ghost = this.recPool.pop() ?? ({} as DroppedItem);
++    ghost.blockId = id; ghost.alive = false; ghost.mesh = null; ghost.inst = -1;
++    ghost.cell = -1; ghost.slot = -1; ghost.index = -1; ghost.awakeSlot = -1;
++    this.stats.takeHits++;
++    return ghost;
+   }
+```

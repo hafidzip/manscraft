@@ -1,0 +1,200 @@
+  clear()
+}
+
+// ItemInstancer.ts — per-blockId THREE.InstancedMesh; acquire/release/set(x,y,z,ry)/flush()
+// START_CAP=64, grow(): doubles instanceMatrix, copies, swaps mesh. release = swap-with-last.
+```
+
+### 4.9 Machine agents — `src/game/fps/Inserter.ts`, `src/game/fps/LaserMiner.ts`
+
+These are the behavioral contracts the headless sim (Feature B) must reproduce **without**
+THREE objects. Note both classes ALSO implement a legacy standalone `update(dt, playerPos)`
+scanner path (string keys `"wx,y,wz"`) — the registry/scheduler path is the live one; the sim
+should be driven by records/state, not by scene scanning.
+
+```ts
+// Inserter.ts — behavior contract
+const DIP_T = 0.14, CARRY_T = 0.46, RELEASE_T = 0.12, RETURN_T = 0.46;
+const SCAN_RADIUS = 26, PRUNE_RADIUS = 42, MAX_ARMS = 24;
+export class InserterManager implements MachineAgent {
+  readonly kind = MK_INSERTER; readonly maxLive = MAX_ARMS;
+  readonly scanRadius = SCAN_RADIUS; readonly pruneRadius = PRUNE_RADIUS;
+  readonly yLo = -2; readonly yHi = 3; readonly thinkPerFrame = 0;
+  // arms: Map<key, Arm>; Arm.state machine: 'idle'→'dip'→'carry'→'release'→'return'
+  // idle, t>0.12: drops.takeAt(ix+0.5-dir[0], arm.y, iz+0.5-dir[1], 0.52)  ← input = BEHIND cell
+  // release: drops.spawn(heldId, Vector3(ix+0.5+dir[0]*0.95, y+1.22, iz+0.5+dir[1]*0.95),
+  //                      Vector3(dir[0]*0.6, -1.2, dir[1]*0.6))            ← output = FRONT cell
+  // one full swing cycle ≈ DIP_T+CARRY_T+RELEASE_T+RETURN_T = 1.18 s per item
+  retain(key) { return arm.state !== 'idle'; }     // finish swing before prune
+}
+
+// LaserMiner.ts — behavior contract
+const SCAN_RADIUS = 26, PRUNE_RADIUS = 42, MAX_TURRETS = 12;
+const RANGE = 6, MINE_TIME = 0.85;
+export interface LaserMinerHooks { mineable(id): boolean; mine(wx, wy, wz, dropPos): void; }
+export class LaserMinerManager implements MachineAgent {
+  readonly kind = MK_LASER; readonly maxLive = MAX_TURRETS;
+  readonly scanRadius = SCAN_RADIUS; readonly pruneRadius = PRUNE_RADIUS;
+  readonly yLo = -4; readonly yHi = 4; readonly thinkPerFrame = 0;
+  // acquire(): scans forward cone (dir × RANGE steps, lateral spread ≤2, vertical ±2):
+  //   first `hooks.mineable(id)` target with `reachable()` LOS, scored step*10+|lat|*2+|vert|*2
+  // tick: aim w/ yaw/pitch lerp (10*dt), when |dYaw|<0.25: charge += dt/MINE_TIME
+  //   charge≥1 → hooks.mine(target…, dropPos at back of miner, y+1.1); retarget in 0.05 s
+  // ⇒ throughput ≈ 1 block per (MINE_TIME + aim/settle) ≈ 1.0–1.3 s per miner
+}
+
+// engine.ts — the hooks (single place that converts world blocks → item drops):
+private laserMinerCanMine(id: number): boolean {
+  if (id === B.AIR || id < 0) return false;
+  if (isWaterId(id)) return false;
+  if (isConveyor(id) || isInserter(id) || isLaserMiner(id) || id === B.TURRET) return false;
+  const d = DEFS[id];
+  if (!d || !d.solid || !isFinite(d.hardness)) return false;
+  return TO_FPS[id] !== undefined;
+}
+private laserMinerMine(x, y, z, dropPos: THREE.Vector3): void {
+  const id = this.world.getBlockRaw(x, y, z);
+  if (id < 0 || !this.laserMinerCanMine(id)) return;
+  this.world.setBlock(x, y, z, B.AIR);            // ← fires ChangeBus.onBlock (persistence hook)
+  // …torch detaching, particles, fx
+  const fpsId = TO_FPS[id];
+  if (fpsId !== undefined) {
+    this.itemDrops.spawn(fpsId, dropPos.clone(), new THREE.Vector3(
+      (Math.random()-0.5)*0.4, 0.6, (Math.random()-0.5)*0.4));
+  }
+  // sound, blocksMined++, enemies.notifyWorldChanged
+}
+```
+
+### 4.10 Furnaces — `src/game/crafting/smelting.ts` (already headless-friendly ✔)
+
+Feature B can reuse this verbatim inside `PlanetFactorySim` (it has no THREE imports).
+
+```ts
+export const SMELT_TIME = 10;
+export interface SmeltRecipe { input: number; output: number; count: number; }
+export const SMELT_RECIPES: SmeltRecipe[] = [
+  { input: B.SAND, output: B.GLASS, count: 1 },
+  { input: B.COBBLE, output: B.STONE, count: 1 },
+  { input: B.GRASS, output: B.DIRT, count: 1 },
+];
+export function smeltResult(blockId: number): SmeltRecipe | null { … }
+export const FUELS: Record<number, number> = { [B.PLANK]: 15, [B.LOG]: 15,
+  [B.CRAFTING_TABLE]: 15, [B.LEAVES]: 5, [B.CACTUS]: 5 };   // NOTE: B.PLANK is FUELS alias in fps/World.ts (B.PLANKS)
+export const fuelTime = (blockId) => FUELS[blockId] ?? 0;
+export const isFuel = (blockId) => fuelTime(blockId) > 0;
+export interface FurnaceState {
+  input: SlotItem | null; fuel: SlotItem | null; output: SlotItem | null;
+  burn: number; burnMax: number; cook: number;             // SlotItem = { kind:'block', blockId, count }
+}
+export const newFurnace = (): FurnaceState => ({ input: null, fuel: null, output: null, burn: 0, burnMax: 0, cook: 0 });
+export function tickFurnace(st: FurnaceState, dt: number): boolean {
+  // burns fuel (burn seconds), cooks input→output after SMELT_TIME while burn>0,
+  // cook regresses at 2× when starved; returns `changed`
+}
+export function furnaceIdle(st): boolean { /* all slots empty && burn<=0 && cook<=0 */ }
+export const furnaceKey = (x, y, z): string => `${x},${y},${z}`;
+
+// engine.ts usage (all dies with the engine today — Feature A persists this map):
+//   private furnaces = new Map<string, FurnaceState>();
+//   private updateFurnaces(dt) { for ([k, st] of this.furnaces) { tickFurnace(st, dt);
+//     if (lit changed) world.setBlock(x,y,z, lit ? B.FURNACE_LIT : B.FURNACE);
+//     if (furnaceIdle(st) && k !== openFurnaceKey) this.furnaces.delete(k); } }
+//   breaking a furnace block: spills each item of input/fuel/output via itemDrops.spawn
+```
+
+### 4.11 Planet switching & the persistence gap — `src/App.tsx`, `src/components/GameCanvas.tsx`, `src/game/session.ts`
+
+```tsx
+// App.tsx — the remount that wipes everything (Feature A's integration point):
+type Mode = 'craft' | 'space';
+function planetKey(home: PlanetHome | null): string {
+  if (!home) return 'home';
+  return `${home.star.seed.toString(16)}-${home.planet.seed.toString(16)}`;   // unique per planet
+}
+const [mode, setMode] = useState<Mode>('craft');
+const [home, setHome] = useState<PlanetHome | null>(null);
+const inventoryRef = useRef<Inventory>(new Inventory());              // survives ✔
+const clearedRef = useRef<Map<string, number[]>>(new Map());          // camps per planet ✔ (pattern to copy)
+const key = planetKey(home);
+const enterSpace = (h, snapshot?) => switchMode('space', h, snapshot, '▲ BREAKING ATMOSPHERE', '#9fd4ff');
+const land       = (h, snapshot?) => switchMode('craft', h, snapshot, '▼ MATERIALIZING SURFACE', '#ffd23e');
+return mode === 'craft'
+  ? <GameCanvas key={key} home={home} onEnterSpace={enterSpace} persistentInventory={inventoryRef.current}
+                initialClearedCamps={initialCleared} onSaveClearedCamps={saveClearedCamps} onReady={onChildReady} />
+  : <SpaceCanvas key={key} home={home} onExit={land} onReady={onChildReady} />;
+
+// GameCanvas.tsx — engine lifecycle:
+useEffect(() => {
+  const engine = new GameEngine(canvas, { /* …events…
+      onEnterSpace: (theme) => {
+        const h = homeFromTheme(theme) ?? home ?? { star: homeStar(), planet: homePlanet() };
+        const snap = engineRef.current?.getSnapshot() ?? null;
+        onEnterSpace?.(h, snap ? snap.toDataURL('image/jpeg', 0.82) : null);
+      } */ },
+    home ? themeFromPlanet(home.planet, home.star) : undefined,
+    persistentInventory ?? undefined, initialClearedCamps);
+  engine.init().then(() => { if (cancelled) engine.dispose(); });
+  return () => { cancelled = true;
+    const cleared = engine.getClearedCampIds();
+    saveRef.current?.(cleared);
+    engine.dispose();            // ← World.chunks + furnaces + machines + drops all die here
+    engineRef.current = null; };
+}, []);
+
+// engine.ts — construction & seed (world identity per planet):
+const seed = this.theme ? planetSeedToWorldSeed(this.theme.seed) : (Math.random() * 0x7fffffff) | 0;
+this.world = new World(seed, mats);
+this.changeBus = new ChangeBus();
+this.changeBus.attach(this.world);
+this.machineRegistry = new MachineRegistry({ indexedKinds: MK_GHOST, trustGenerator: true });
+this.machineRegistry.attach(this.changeBus);
+this.machineRegistry.bootstrap(this.world);
+// …later:
+this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio,
+  () => { this.syncHotbarMode(); }, { bus: this.changeBus, instanced: true });
+this.inserters = new InserterManager(this.scene, this.world, this.itemDrops, this.fpsAudio);
+this.laserMiners = new LaserMinerManager(this.scene, this.world, { mineable: …, mine: … });
+this.turrets = new TurretManager(/* … */);
+this.machines = new MachineScheduler(this.machineRegistry, [this.inserters, this.laserMiners, this.turrets]);
+// init() loads: while (dataProgress < 1) { dataProgress = this.world.prepareAllData(24); await nextFrame(); }
+// then meshes an EVICT_DISTANCE(7-chunk) radius around spawn.
+
+// engine.ts — space exit trigger (ship flight):
+if (!this.spaceExited && this.piloting && this.ship.pos.y > SPACE_ALTITUDE /* =170 */) {
+  this.spaceExited = true;
+  this.weapons.setAllVisible(false); this.bodyGroup.visible = false; this.heldFood.visible = false;
+  this.events.onEnterSpace?.(this.theme);
+}
+
+// engine.ts — main loop calls (per frame):
+//   this.itemDrops.update(dt, this.player.pos);
+//   this.machines.update(dt, this.player.pos);
+//   this.updateFurnaces(dt);
+
+// session.ts — existing localStorage pattern (coins survive full page reload):
+const COIN_KEY = 'manscraft.coins';
+export const session = { booted: false, coins: loadCoins() };
+export const saveCoins = (n: number): void => {
+  session.coins = n;
+  try { localStorage.setItem(COIN_KEY, String(Math.max(0, Math.floor(n)))); } catch { }
+};
+```
+
+### 4.12 Planet identity — `src/game/space/galaxy.ts`, `src/game/space/theme.ts`
+
+```ts
+export const UNIVERSE_SEED = 0x564F58454C534B59n;
+export interface PlanetSpec {
+  seed: bigint; index: number; orbitRadius: number; orbitAngle: number; orbitSpeed: number;
+  inclination: number; radius: number; type: PlanetType; terrainAmp: number; terrainFreq: number;
+  oceanLevel: number; noiseOff: number; spin: number; hasRings: boolean; hasMoons: boolean;
+  axialTilt: number; name: string;
+}
+export interface StarSpec { address: SystemAddress; pos: Vec3d; radius: number; color: number;
+  spectral: string; planetCount: number; seed: bigint; name: string; }
+
+// theme.ts
+export interface PlanetTheme {
+  seed: bigint; type: PlanetType; biome: Biome; seaLevel: number; hillAmp: number;
+  skyHex: number; lava: boolean; spec: PlanetSpec; star: StarSpec;

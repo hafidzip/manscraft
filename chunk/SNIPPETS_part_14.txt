@@ -1,0 +1,200 @@
+
+**`update` — window sweep + bulk pickup:**
+
+```diff
+   update(dt, playerPos): void {
+     // …existing awake-item physics…
+     this.wakeSweep(px, pz);
+     this.sweepPickup(playerPos);
++    if (this.ledger) {
++      // Any physical item that drifted out of the window goes back to the ledger.
++      for (let i = this.items.length - 1; i >= 0; i--) {
++        const it = this.items[i];
++        const dx = minImageF(it.pos.x - playerPos.x), dz = minImageF(it.pos.z - playerPos.z);
++        if (dx * dx + dz * dz > DEMAT_RADIUS * DEMAT_RADIUS) this.returnToLedger(it);
++      }
++      this.sweepClock += dt;
++      if (this.sweepClock >= SWEEP_INTERVAL) { this.sweepClock = 0; this.materializeWindow(playerPos); }
++      this.bulkPickup(playerPos);
++    }
+     this.instancer?.flush();
+   }
++
++  /** Ledger → physical entities, bounded by maxItems (≤512). Runs at 4 Hz, not per frame. */
++  private materializeWindow(p: THREE.Vector3): void {
++    if (!this.ledger) return;
++    let budget = Math.min(MATERIALIZE_PER_SWEEP, this.maxItems - this.items.length);
++    if (budget <= 0) return;
++    this.ledger.forEachOccupiedNear(p.x, p.z, WINDOW_RADIUS, (cell) => {
++      if (budget <= 0) return;
++      if (Math.abs(cellY(cell) + 0.5 - p.y) > WINDOW_RADIUS) return;
++      while (budget > 0 && this.ledger!.takeAnyFromCell(cell, 1) > 0) {
++        const id = this.ledger!.out.id;
++        this._tmp.set(cellX(cell) + 0.5, cellY(cell) + 0.25, cellZ(cell) + 0.5);
++        this.spawnPhysical(id, this._tmp);   // = spawn() body with zero velocity + time=POP_TIME
++        this.bridgeStats.materialized++; budget--;
++      }
++    });
++  }
++
++  /** Millions of items must not require 1e6 pop animations to collect. */
++  private bulkPickup(p: THREE.Vector3): void {
++    if (!this.ledger) return;
++    let left = BULK_PICKUP_PER_FRAME;
++    this.ledger.forEachOccupiedNear(p.x, p.z, PICKUP_DIST, (cell) => {
++      if (left <= 0 || Math.abs(cellY(cell) + 0.5 - p.y) > 1.2) return;
++      left -= this.ledger!.drainCell(cell, (id, n) => {
++        this.inv.addBlock(id, n); this.bridgeStats.bulkPicked += n; this.onPickup?.();
++      }, left);
++    });
++  }
+```
+
+> `spawnPhysical(id, pos)` is the existing `spawn()` body factored out (pool → grid → instancer)
+> **without** the ledger branch and with `time = POP_TIME` so materialized items are immediately
+> takeable. `clear()` must call `returnToLedger` only for a genuine world reset — on planet exit
+> the engine calls `itemDrops.drainToLedger()`:
+```ts
+  /** Called from GameEngine.dispose() BEFORE hub.capture(): no item may die with the scene. */
+  drainToLedger(): void {
+    for (let i = this.items.length - 1; i >= 0; i--) this.returnToLedger(this.items[i]);
+  }
+```
+
+### 6.4 `src/game/fps/Inserter.ts` / `LaserMiner.ts` — visuals become a view
+
+```diff
++export interface SimAgentBridge {
++  inserterView(key: number): { state: number; t: number; held: number } | null;
++  minerView(key: number): { charge: number; tx: number; ty: number; tz: number } | null;
++}
+ export class InserterManager implements MachineAgent {
++  simBridge: SimAgentBridge | null = null;   // set by engine after the sim is attached
+   create(rec: MachineRecord): void {
+     // …existing arm allocation…
++    const s = this.simBridge?.inserterView(rec.key);
++    if (s) {                       // adopt sim truth so the arm never "restarts" on approach
++      arm.heldId = s.held;
++      arm.state = s.state === 0 ? 'idle' : (s.t < DIP_T ? 'dip' : s.t < DIP_T + CARRY_T ? 'carry'
++                 : s.t < DIP_T + CARRY_T + RELEASE_T ? 'release' : 'return');
++      arm.t = s.t;
++    }
+   }
+```
+Same one-liner in `LaserMinerManager.create` for `charge`/target. **The live agents keep
+animating but must stop being the source of truth for item movement:** guard their
+`drops.takeAt` / `drops.spawn` calls with `if (!this.simBridge)` — when a sim is attached the
+transfer already happened in `PlanetFactorySim.stepInserters`, and the arm merely plays it back.
+
+### 6.5 `src/game/engine.ts`
+
+```diff
++import { hub } from './persist/planetStore';
++import { universeSim } from './factory/universeSim';
++import { themeToJson } from './persist/planetStore';
++
+ // — constructor —
+-const seed = this.theme ? planetSeedToWorldSeed(this.theme.seed) : (Math.random() * 0x7fffffff) | 0;
+-this.world = new World(seed, mats);
++const seed = this.theme ? planetSeedToWorldSeed(this.theme.seed) : (Math.random() * 0x7fffffff) | 0;
++this.planetKey = planetKey;                       // new ctor arg, mirrors initialClearedCamps
++this.worldSeed = seed;
++this.themeSea = this.theme?.seaLevel ?? SEA_LEVEL;
++this.themeJson = this.theme ? themeToJson(this.theme) : null;
++const installed = hub.install(this.planetKey, seed, this.themeSea);
++this.deltas = installed.deltas;
++this.ledger = installed.ledger;
++this.world = new World(seed, mats, this.deltas);   // ← deltas live BEFORE any ensureData()
+ this.changeBus = new ChangeBus();
+ this.changeBus.attach(this.world);
++// Sink order: recorder FIRST (pure observer), then the registry, then the sim.
++this.changeBus.add({ onBlock: (x, y, z, _o, n) => this.deltas.recordBlock(x, y, z, n) });
+ this.machineRegistry = new MachineRegistry({ indexedKinds: MK_GHOST, trustGenerator: true });
+ this.machineRegistry.attach(this.changeBus);
+ this.machineRegistry.bootstrap(this.world);
++this.sim = universeSim.ensure(this.planetKey, {
++  seed, themeJson: this.themeJson, deltas: this.deltas, ledger: this.ledger, save: installed.save });
++this.changeBus.add({ onBlock: this.sim.onBlock });
++this.machineRegistry.retainPredicate = this.sim.retain;   // stop pruneDormant erasing sim state
+ // …
+-this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio,
+-  () => { this.syncHotbarMode(); }, { bus: this.changeBus, instanced: true });
++this.itemDrops = new ItemDropManager(this.scene, this.world, this.inventory, this.fpsAudio,
++  () => { this.syncHotbarMode(); }, { bus: this.changeBus, instanced: true, ledger: this.ledger });
+ // …after agents are constructed:
++this.inserters.simBridge = this.sim;
++this.laserMiners.simBridge = this.sim;
++this.sim.attachToLive(this.world, this.furnaces);
++universeSim.setActive(this.planetKey);
+```
+
+```diff
+ // — main loop —
+ this.itemDrops.update(dt, this.player.pos);
+ this.machines.update(dt, this.player.pos);
+-this.updateFurnaces(dt);
++universeSim.tickActive(dt);     // miners + belts + inserters + furnaces (sim owns them now)
++this.syncFurnaceUi();           // was updateFurnaces(); now only mirrors sim state into the UI
+```
+
+```diff
+ // — dispose() —
++ this.itemDrops.drainToLedger();          // physical entities → ledger (nothing is lost)
++ this.sim?.mergeFromLive(this.furnaces);  // adopt UI-created furnaces, go headless
++ hub.capture(this);                       // deltas + ledger + sim + furnaces + player
++ universeSim.setActive(null);
++ this.machineRegistry.retainPredicate = null;
+  // …existing teardown
+```
+Plus the small `EngineLike` surface `planetStore.ts` expects:
+```ts
+  readonly planetKey!: string; readonly worldSeed!: number; readonly themeSea!: number;
+  readonly themeJson!: string | null;
+  readonly deltas!: WorldDeltaStore; readonly ledger!: ItemLedger; sim: PlanetFactorySim | null = null;
+  playerState() { return { x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, yaw: this.player.yaw }; }
+```
+`laserMinerMine` needs **no change** — it already routes through `itemDrops.spawn`, which is now
+ledger-backed. Furnace UI reads `this.sim.furnaceAt(x,y,z,true)` and pins the open furnace with
+`this.sim.pinnedFurnaces.add(furnaceKey(x,y,z))` while the panel is open.
+
+### 6.6 `src/components/GameCanvas.tsx` + `src/App.tsx`
+
+```diff
+ // GameCanvas.tsx
+-const engine = new GameEngine(canvas, { /* events */ },
+-  home ? themeFromPlanet(home.planet, home.star) : undefined,
+-  persistentInventory ?? undefined, initialClearedCamps);
++const engine = new GameEngine(canvas, { /* events */ },
++  home ? themeFromPlanet(home.planet, home.star) : undefined,
++  persistentInventory ?? undefined, initialClearedCamps,
++  planetKey /* ← new prop, same string App.tsx already computes */);
+ engine.init().then(() => { if (cancelled) engine.dispose(); });
+ return () => { cancelled = true;
+   const cleared = engine.getClearedCampIds();
+   saveRef.current?.(cleared);
+-  engine.dispose();
++  engine.dispose();          // dispose() now captures into the hub BEFORE tearing down
++  void hub.flushNow();       // durable within ~1 frame of leaving the planet
+   engineRef.current = null; };
+```
+
+```diff
+ // App.tsx
++import { hub } from './game/persist/planetStore';
++import { universeSim } from './game/factory/universeSim';   // module scope starts the clock
++
+ const key = planetKey(home);
++const [hubReady, setHubReady] = useState(hub.loaded);
++useEffect(() => { hub.ready.then(() => setHubReady(true)); }, []);
++if (!hubReady) return <BootScreen label="RESTORING WORLDS" />;   // ~1 frame after IDB open
+ return mode === 'craft'
+-  ? <GameCanvas key={key} home={home} … />
++  ? <GameCanvas key={key} planetKey={key} home={home} … />
+   : <SpaceCanvas key={key} home={home} onExit={land} onReady={onChildReady} />;
+```
+`universeSim` keeps ticking across the `craft ⇄ space` switch because it lives at module scope —
+the same trick `session.ts` uses for coins.
+
+---
+
+## 7. Verification plan (console-only, no UI work)

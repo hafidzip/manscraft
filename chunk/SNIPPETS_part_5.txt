@@ -1,0 +1,199 @@
+  tint: Record<string, [number, number, number]>;
+  [k: string]: unknown;
+}
+export interface PlanetHome { star: StarSpec; planet: PlanetSpec; }
+export function themeFromPlanet(planet: PlanetSpec, star: StarSpec): PlanetTheme { … }
+export function homeFromTheme(theme: { spec?: PlanetSpec; star?: StarSpec } | null): PlanetHome | null {
+  return theme?.spec && theme.star ? { star: theme.star, planet: theme.spec } : null;
+}
+```
+
+---
+
+## 5. DELIVERABLES — what you must produce
+
+Design and emit complete code for these new modules, plus integration patches describing
+exact edits to the files quoted above (function names / insertion points from §4 are the
+contract):
+
+1. **`src/game/persist/worldDelta.ts`** — `WorldDeltaStore`
+   - `recordBlock(x, y, z, id)` — attach as a `ChangeBus` sink `onBlock` (skip when replaying,
+     guard flag). Internally: per-chunk sparse map. Recommended encoding: per chunk
+     `Map<localIdx:uint16, blockId:uint8>` inside `Map<chunkKey, …>`, because
+     `chunkIndex(x,y,z) = (y*16+z)*16+x` fits in 15 bits and ids < 256.
+   - `applyToChunk(cx, cz, data: Uint8Array)` — called from inside `World.ensureData`
+     immediately after `gen.populateChunk(...)` and BEFORE `onChunkData` fires (see §4.3
+     "CRITICAL INJECTION POINT"), so `MachineRegistry`'s trust-generator fast path and the
+     mesher both see edited voxels, and machines in the delta get their records on rescan.
+   - `serialize()/deserialize()` — versioned, compact (binary or tuple arrays), plus a
+     pruning rule: an edit that restores the GENERATED value (compare against a fresh
+     `TerrainGenerator.populateChunk` into a scratch array, or track counts per chunk) should
+     delete itself so the store self-shrinks.
+   - Also snapshot/restore: `furnaces: Map<string, FurnaceState>`, machine list
+     (from `MachineRegistry.byKey` — export an iterator or serialize via
+     `world.forEachLoadedChunk` + `kindOf` filter), and the `ItemLedger` (below).
+
+2. **`src/game/persist/planetStore.ts`** — `PlanetPersistenceHub` (singleton, lives next to
+   `session.ts`, independent of engine lifetime)
+   - In-memory `Map<planetKey, PlanetSave>` + async flush to IndexedDB (`manscraft.worlds.v1`),
+     mirroring the `clearedRef`/`planetKey` pattern from `App.tsx`.
+   - `capture(engine)` on unmount (called in `GameCanvas` cleanup BEFORE `engine.dispose()`):
+     drains the delta recorder, furnaces, machines, ledger, player spawn/pos.
+   - `install(engine, planetKey)` after `new GameEngine` but before world data is generated
+     (pass into the constructor like `initialClearedCamps`, applied at the §4.3 injection
+     point), so the loading sequence builds already-edited chunks.
+   - Determinism guard: store `{ seed: number, themeSea: number }` in the save and refuse to
+     replay onto a mismatching world.
+
+3. **`src/game/factory/factorySim.ts`** — `PlanetFactorySim` (pure TypeScript, NO three.js)
+   - Owns, per planet: machine state machines replicating §4.9 contracts
+     (laser miner: `charge += dt / 0.85` against a target chosen by the same cone/LOS rules —
+     but reading blocks from a **headless voxel view** over `TerrainGenerator` + delta overlay,
+     so off-planet mining removes real blocks via `deltaStore.recordBlock(x,y,z,B.AIR)` AND
+     the live world via `world.setBlock` when the chunk is loaded);
+     inserters at quantized phases moving ONE stack-unit (or one item) per 1.18 s between
+     cells in the `ItemLedger`; furnaces via verbatim `tickFurnace` on stored `FurnaceState`.
+   - `advance(elapsedSec)` with catch-up: while `elapsed > 0`: step `min(elapsed, 1)` so
+     production stays exact; budget per frame with `performance.now()` deadlines and resume
+     next frame (same pattern as `World.prepareAllData`).
+   - `snapshot()/restore()` for the hub; `mergeFromLive(engine)` on leave and
+     `attachToLive(engine)` on land (live managers become views: when the scheduler creates an
+     agent for a machine the sim owns, sync held-item/phase from sim state).
+   - Disable stale-state erasure: patch `MachineRegistry.pruneDormant` (§4.6) to skip records
+     the sim claims, and stop relying on it for machine truth.
+
+4. **`src/game/factory/itemLedger.ts`** — `ItemLedger` (Feature C core)
+   - Aggregate stacks per cell: `Map<cellKey:number, Stack[]>` where a hot path uses
+     `Uint32Array`/`Float64Array` SoA buffers with free-list slots:
+     `cell:Int32Array, id:Int32Array, count:Int32Array` (millions of items = a few thousand
+     stacks ⇒ megabytes, O(1) amortized add/remove with merge-on-arrival into the top stack).
+   - API mirroring what consumers need: `add(x, y, z, itemId, n)`, `takeOneAt(x, y, z, r)`
+     (backs `ItemDropManager.takeAt`), `takeAllInto(inv|cell)`, `countsInRadius(...)` for HUD,
+     `serialize()/deserialize()`.
+   - Conveyor simulation at scale: group belts into lanes; per lane, maintain
+     `(id,count)` transit counters with fixed latency `len / BELT_SPEED (2.6 m/s)`; deposit at
+     the lane terminus cell. (A per-cell flood-forward `for` pass over belt cells is
+     acceptable at 32×32 chunks; a run-length transport-line is the stretch goal.)
+   - Bridge **window**: `ItemDropManager` keeps its exact public surface (§4.8) but its
+     storage switches: `spawn()` → ledger `add` + materialize a physical `DroppedItem` only if
+     within the live window (≤ ~512 active visibles, near player); on `evictOne`/sleep-exit,
+     counts RETURN to the ledger instead of disappearing; `takeAt` consults both the physical
+     grid (for fresh pops) and the ledger (window edge). Sleep/evict must never delete counts.
+
+5. **`src/game/factory/universeSim.ts`** — `UniverseSim` singleton
+   - `Map<planetKey, PlanetFactorySim>`; a `tick()` driven by a rAF/setInterval that survives
+     scene switches (start it in `App.tsx` or module scope, like `session`), using
+     `performance.now()` deltas so time accrues while in space AND while on other planets.
+   - The ACTIVE planet's sim ticks at full rate synchronized with the engine frame (call from
+     `GameEngine` loop next to `this.machines.update`), inactive planets tick from
+     `UniverseSim` with budgeted catch-up (e.g. 8 ms/frame, same cost-accounting style as
+     `World.update`).
+   - Water/fluid and enemies stay live-only (out of scope) — note this explicitly in code
+     comments so the decision is discoverable.
+
+6. **Integration patches (precise, minimal)**
+   - `world.ts`: accept an optional `deltas?: { applyToChunk(cx, cz, data): void }` (ctor or
+     setter); call at the §4.3 injection point. ALSO: `World.destroySphere` already re-fires
+     `onChanged` per carved cell — recorder must not double-count `beginBatch` edits
+     (they are deferred inside `setBlock`; verify with `batchDepth`).
+   - `engine.ts`: wire `deltas` into `new World(...)`; construct `PlanetFactorySim` for the
+     planet; call `universeSim.setActive(planetKey)`; on `dispose()` → `hub.capture(this)`;
+     route `laserMinerMine`'s `itemDrops.spawn(...)` through the ledger window; replace the
+     `furnaces` map's ownership with sim state hydrated from the save.
+   - `GameCanvas.tsx` cleanup and `App.tsx`: pass `planetKey` + hub handles down, mirroring
+     the existing `initialClearedCamps`/`onSaveClearedCamps` props plumbing.
+   - `machineRegistry.ts`: `pruneDormant` respects a `retain(key)` predicate injected by the
+     sim.
+
+7. **Self-test hooks** — expose `window.__manscraftSim = { hub, universeSim }` debug getters
+   and stats parity logs (e.g. ledger total items in/out conserved; delta count monotonic
+   minus pruned), so the implementation is verifiable from the console without UI work.
+
+**Acceptance criteria recap:** leave planet → return ⇒ holes/buildings/machines/furnaces
+restored exactly; miners/furnaces/belts on abandoned planets keep producing while the player
+is in space or on another planet (verifiable via item counts after a timed absence); system
+absorbs ≥1,000,000 ledgered items with stable frame times (only ≤ ~512 physical entities
+alive near the player at any moment).
+
+```
+
+# MANSCRAFT — Persistent Worlds, Headless Factory, Million‑Item Ledger
+### Full implementation package (5 new modules + precise integration patches + self‑test hooks)
+
+> Everything below is written against the contracts in `SNIPPETS.md` §4. Names, insertion points
+> and constants are taken verbatim from the quoted sources. New code is **allocation‑free in
+> per‑frame paths**, wrap‑safe (toroid), and reuses `packCell` / `packChunk`.
+> `itemLedger.ts`, `factorySim.ts`, `universeSim.ts`, `worldDelta.ts`, `planetStore.ts`
+> contain **zero `three` imports**.
+
+---
+
+## 0. The five decisions that make this work
+
+| # | Decision | Why it matters |
+|---|---|---|
+| 1 | **Machine *placements* need no separate save.** Every machine block arrives through `world.setBlock` → `ChangeBus.onBlock` → the delta store. Restoring the delta restores the machines; only *runtime* state (arm phase, held item, laser charge) is snapshotted by the sim. | Kills a whole class of two‑source‑of‑truth bugs. |
+| 2 | **`ensureData` must pass `fromGenerator = (appliedEdits === 0)`.** `MachineRegistry` skips its rescan when `fromGenerator===true` (§4.6 trust‑generator fast path). If we replay a delta containing conveyors and still claim "from generator", **those machines are never indexed**. | Without this, Feature A silently restores machine *blocks* with no machine *behaviour*. |
+| 3 | **Deltas are applied *before* `buildColumnCache`**, not just before `onChunkData`. | `colH/colC/colW` are derived caches; feeding them pre‑edit voxels produces wrong lighting/water columns for restored chunks. |
+| 4 | **Ledger invariant: one unit is EITHER a ledger count OR a physical `DroppedItem`, never both.** `spawn` checks out; evict/sleep‑exit checks back in; nothing is ever destroyed. | Makes conservation (`in − out === ledger + physical`) a testable console assertion. |
+| 5 | **Off‑planet simulation carries fractional remainders** (`charge -= 1`, `t -= CYCLE`) instead of resetting. | 10 minutes away ⇒ exactly 10 minutes of production, even when catch‑up runs in 1‑second quanta. |
+
+Tick order inside one sim step is fixed and load‑bearing: **miners → belts → inserters → furnaces**.
+(Mine first so fresh drops ride the belt in the same step; inserters after belts so an item that just
+arrived at a lane terminus is grabbable this step, matching the live frame order
+`itemDrops.update → machines.update → updateFurnaces`.)
+
+---
+
+## 1. `src/game/factory/itemLedger.ts` — Feature C core
+
+```ts
+/* eslint-disable no-bitwise */
+/**
+ * src/game/factory/itemLedger.ts
+ *
+ * Virtualized item storage. Items are AGGREGATE STACKS (itemId, count) bound to a cell key,
+ * held in SoA typed arrays with a free list. 1e6 items typically = a few thousand stacks
+ * (~20 bytes each) instead of 1e6 * ~200 bytes + 1e6 mesh instances.
+ *
+ * Ids stored here are FPS/ITEM ids (the id space `ItemDropManager.spawn` receives), see
+ * TO_FPS/FROM_FPS in engine/constants.ts. NEVER world block ids.
+ *
+ * NO three.js imports. Safe to run headless / in a worker.
+ */
+import { WORLD_HEIGHT, CHUNK_LOG2, wrapBlock, minImageF } from '../core/constants';
+import { packCell, cellX, cellY, cellZ, packChunk, chunkRadiusFor } from '../core/cellKey';
+
+export const LEDGER_MAGIC = 0x4d43494c; // 'MCIL'
+export const LEDGER_VERSION = 1;
+
+/** Must stay in sync with ItemDrop.ts BELT_SPEED. */
+export const BELT_SPEED = 2.6;
+/** Items that may rest on ONE belt cell before the lane back-pressures. */
+export const BELT_CELL_CAP = 8;
+
+const NIL = -1;
+
+export const clampCellY = (y: number): number =>
+  y < 0 ? 0 : y >= WORLD_HEIGHT ? WORLD_HEIGHT - 1 : y | 0;
+
+/** Wrap-safe cell key for a world position (accepts floats). */
+export const ledgerCell = (x: number, y: number, z: number): number =>
+  packCell(wrapBlock(Math.floor(x)), clampCellY(Math.floor(y)), wrapBlock(Math.floor(z)));
+
+/** Pooled out-param so hot paths never allocate. */
+export interface TakeResult { id: number; count: number; cell: number; }
+
+export class ItemLedger {
+  // ---- SoA slot storage -------------------------------------------------
+  private cap: number;
+  private sCell: Int32Array;
+  private sId: Int32Array;
+  private sCount: Float64Array;   // f64: a single stack may legitimately hold >2^31 units
+  private sNext: Int32Array;      // intra-cell chain, doubles as free-list chain
+
+  private head = new Map<number, number>();        // cellKey -> head slot
+  private byChunk = new Map<number, Set<number>>(); // chunkKey -> occupied cellKeys
+  private freeHead = NIL;
+  private top = 0;
+  private liveSlots = 0;
