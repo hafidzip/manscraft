@@ -1,9 +1,9 @@
-import { CHUNK_SIZE as S, WORLD_HEIGHT as H, SEA_LEVEL, WORLD_SIZE, wrapBlock, chunkIndex } from '../core/constants';
+import { CHUNK_SIZE as S, WORLD_HEIGHT as H, SEA_LEVEL, WORLD_SIZE, wrapBlock, wrapDelta, chunkIndex } from '../core/constants';
 import {
   Torus2, PeriodicPerlin2, fbm, ridged, billow, warp2,
   smoothstep, to01, hash2, clamp, type Periodic2,
 } from '../core/noise';
-import { B, DEFS } from './blocks';
+import { B, DEFS, isLeaves } from './blocks';
 import { Biome, BIOME_DEFS, type BiomeDef, pickBiome } from './biomes';
 import { floraFor, type Flora, type TreeShape } from '../space/flora';
 import { resolveSpecies, winterPalette, type TreePalette, type SpeciesMix } from './treeSpecies';
@@ -12,6 +12,16 @@ import type { PlanetType } from '../space/palettes';
 
 const TREE_SALT = 0x5eed;
 const W = WORLD_SIZE;
+/** How far outside a chunk we still plant trunks so their canopy can own in-chunk leaves. */
+const TREE_HALO = 10;
+/** Max XZ distance² at which a leaf is claimed by a trunk (covers mega / clustered canopies). */
+const TREE_OWNER_R2 = 12 * 12;
+
+interface PlantedTree {
+  x: number;
+  z: number;
+  leaves: number;
+}
 
 const MAX_TREE_DENSITY = Object.values(BIOME_DEFS)
   .reduce((m, d) => Math.max(m, d.trees), 0);
@@ -410,8 +420,9 @@ export class TerrainGenerator {
     }
 
     const set = this.makeSetter(data, baseX, baseZ);
-    for (let tx = -2; tx < S + 2; tx++) {
-      for (let tz = -2; tz < S + 2; tz++) {
+    const planted: PlantedTree[] = [];
+    for (let tx = -TREE_HALO; tx < S + TREE_HALO; tx++) {
+      for (let tz = -TREE_HALO; tz < S + TREE_HALO; tz++) {
         const px = wrapBlock(baseX + tx);
         const pz = wrapBlock(baseZ + tz);
         const roll = hash2(this.seed ^ TREE_SALT, px, pz);
@@ -427,9 +438,11 @@ export class TerrainGenerator {
         if (h <= this.sea + 1) continue;
         const surface = this.surfaceBlock(biome, h);
         if (surface !== bDef.surface) continue;
-        this.placeTree(set, px, h, pz, bDef);
+        const pal = this.placeTree(set, px, h, pz, bDef);
+        planted.push({ x: px, z: pz, leaves: pal.leaves });
       }
     }
+    this.unifyCanopyLeaves(data, baseX, baseZ, planted);
   }
 
   private makeSetter(data: Uint8Array, baseX: number, baseZ: number) {
@@ -461,21 +474,66 @@ export class TerrainGenerator {
     return resolveSpecies(mix, groveT);
   }
 
-  private placeTree(set: SetFn, wx: number, h: number, wz: number, bDef?: BiomeDef): void {
+  private placeTree(set: SetFn, wx: number, h: number, wz: number, bDef?: BiomeDef): TreePalette {
     const s = this.flora.tree;
     let pal = this.pickPalette(wx, wz, this.treeMixFor(bDef, s));
     if (bDef?.surface === B.SNOW) pal = winterPalette(pal);
     switch (s.silhouette) {
-      case 'conifer':   return this.tConifer(set, wx, h, wz, s, pal);
-      case 'palm':      return this.tPalm(set, wx, h, wz, s, pal);
-      case 'spire':     return this.tSpire(set, wx, h, wz, s, pal);
-      case 'crystal':   return this.tCrystal(set, wx, h, wz, s, pal);
-      case 'succulent': return this.tSucculent(set, wx, h, wz, s, pal);
-      case 'umbrella':  return this.tUmbrella(set, wx, h, wz, s, pal);
-      case 'fungal':    return this.tFungal(set, wx, h, wz, s, pal);
-      case 'mega':      return this.tMega(set, wx, h, wz, s, pal);
-      case 'none':      return;
-      default:          return this.tBroadleaf(set, wx, h, wz, s, pal);
+      case 'conifer':   this.tConifer(set, wx, h, wz, s, pal); break;
+      case 'palm':      this.tPalm(set, wx, h, wz, s, pal); break;
+      case 'spire':     this.tSpire(set, wx, h, wz, s, pal); break;
+      case 'crystal':   this.tCrystal(set, wx, h, wz, s, pal); break;
+      case 'succulent': this.tSucculent(set, wx, h, wz, s, pal); break;
+      case 'umbrella':  this.tUmbrella(set, wx, h, wz, s, pal); break;
+      case 'fungal':    this.tFungal(set, wx, h, wz, s, pal); break;
+      case 'mega':      this.tMega(set, wx, h, wz, s, pal); break;
+      case 'none':      break;
+      default:          this.tBroadleaf(set, wx, h, wz, s, pal); break;
+    }
+    return pal;
+  }
+
+  /**
+   * Overlapping canopies at snow/grass borders used to interleave green and white
+   * leaves (first-writer-wins on air). Reassign every leaf to the nearest trunk
+   * so each tree is a single color.
+   */
+  private unifyCanopyLeaves(
+    data: Uint8Array,
+    baseX: number,
+    baseZ: number,
+    planted: PlantedTree[],
+  ): void {
+    if (planted.length === 0) return;
+    let mixed = false;
+    for (let i = 1; i < planted.length; i++) {
+      if (planted[i].leaves !== planted[0].leaves) { mixed = true; break; }
+    }
+    if (!mixed) return;
+
+    for (let lx = 0; lx < S; lx++) {
+      for (let lz = 0; lz < S; lz++) {
+        const wx = wrapBlock(baseX + lx);
+        const wz = wrapBlock(baseZ + lz);
+        for (let y = 1; y < H; y++) {
+          const i = chunkIndex(lx, y, lz);
+          const id = data[i];
+          if (!isLeaves(id)) continue;
+          let bestD = TREE_OWNER_R2 + 1;
+          let bestLeaves = id;
+          for (let t = 0; t < planted.length; t++) {
+            const p = planted[t];
+            const dx = wrapDelta(wx - p.x, W);
+            const dz = wrapDelta(wz - p.z, W);
+            const d = dx * dx + dz * dz;
+            if (d < bestD) {
+              bestD = d;
+              bestLeaves = p.leaves;
+            }
+          }
+          if (bestD <= TREE_OWNER_R2 && bestLeaves !== id) data[i] = bestLeaves;
+        }
+      }
     }
   }
 
