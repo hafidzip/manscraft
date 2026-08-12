@@ -484,10 +484,6 @@ export class TerrainGenerator {
     set(x, y, z, pal.leaves, false);
   }
 
-  /**
-   * Grow an irregular canopy mass from a noisy ellipsoid.
-   * Every voxel is the same leaf block — one tree, one colour.
-   */
   private growCanopy(
     set: SetFn,
     cx: number, cy: number, cz: number,
@@ -513,7 +509,6 @@ export class TerrainGenerator {
     }
   }
 
-  /** Single straight column. Height only — never leans, never thickens, never forks. */
   private trunk(set: SetFn, wx: number, h: number, wz: number, len: number, pal: TreePalette): number {
     const top = h + Math.max(1, len);
     for (let y = h + 1; y <= top; y++) set(wx, y, wz, pal.log, true);

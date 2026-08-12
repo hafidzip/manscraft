@@ -11,7 +11,6 @@ export interface TreePalette {
   fruit?: number;
 }
 
-/** One species, one leaf colour. Mixed canopies are never generated. */
 export const SPECIES: Record<TreeSpecies, TreePalette> = {
   oak:     { log: B.LOG,        leaves: B.LEAVES },
   birch:   { log: B.LOG_BIRCH,  leaves: B.LEAVES_BIRCH },
@@ -32,7 +31,6 @@ const WINTER_SKIP = new Set<number>([
   B.LEAVES_SNOW, B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
 ]);
 
-/** Frost-coat ordinary foliage so snow-biome canopies read white-ish. */
 export function winterPalette(pal: TreePalette): TreePalette {
   if (WINTER_SKIP.has(pal.leaves)) return pal;
   return { ...pal, leaves: B.LEAVES_SNOW };
