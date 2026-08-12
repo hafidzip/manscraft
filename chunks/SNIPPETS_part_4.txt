@@ -1,180 +1,180 @@
-      if (seam) return vary([70, 50, 28], 6, r);
-      return vary([164, 129, 76], 10, r);
-    }),
-  craft_side: (img, r) => {
-    const base: RGB[] = [];
-    for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] : [164, 129, 76];
-    return tileRegion(img, TILES.craft_side, (x, y) => {
-      if (y < 2) return vary([120, 92, 54], 8, r);
-      if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {
-        if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28], 6, r);
-        return vary([132, 102, 60], 8, r);
-      }
-      return vary(base[x], 10, r);
-    });
-  },
-  craft_bottom: (img, r) =>
-    tileRegion(img, TILES.craft_bottom, (_x, y) => {
-      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
-      return vary([150, 118, 70], 10, r);
-    }),
+  }
 
-  cobble: (img, r) =>
-    tileRegion(img, TILES.cobble, (x, y) => {
-      const cell = ((x + (Math.floor(y / 5) % 2) * 3) / 5) | 0;
-      const row = (y / 5) | 0;
-      const edge = x % 5 === 4 || y % 5 === 4;
-      if (edge) return vary([74, 74, 78], 8, r);
-      const tone = (cell + row) % 3;
-      const base: RGB = tone === 0 ? [140, 140, 144] : tone === 1 ? [118, 118, 122] : [100, 100, 104];
-      return vary(base, 12, r);
-    }),
+  // motif accents
+  switch (st.motif) {
+    case 'meadow': speckle(t, r, c.accent, 4); speckle(t, r, c.warm, 2); break;
+    case 'lush': speckle(t, r, c.accent, 3); speckle(t, r, P.sh, 6); break;
+    case 'dry': for (let i = 0; i < 10; i++) t.wset(Math.floor(r() * 16), Math.floor(r() * 16), c.warm); break;
+    case 'alien': for (let i = 0; i < 3; i++) {
+        const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+        t.disc(x, y, 1.4, mix(P.mid, c.accent, 0.55)); t.set(x, y, c.accent2);
+      } break;
+    case 'fungal': for (let i = 0; i < 5; i++) {
+        const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+        t.set(x, y, c.accent2); t.set(x + 1, y, c.accent); t.set(x, y + 1, c.accent);
+      } break;
+    case 'crimson': for (let i = 0; i < 7; i++) {
+        const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+        t.wset(x, y, P.sh); t.wset(x, y - 1, c.accent);
+      } break;
+    case 'regolith': case 'ash': speckle(t, r, c.pal.stone.dk, 12); break;
+    default: break;
+  }
+  frostPass(t, c, c.salt ^ 0x3f);
+  emberPass(t, r, c);
+  glowPass(t, r, c, 5);
+};
 
-  furnace_top: (img, r) =>
-    tileRegion(img, TILES.furnace_top, (x, y) => {
-      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
-      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66], 8, r);
-      return vary([124, 124, 128], 12, r);
-    }),
-  furnace_side: (img, r) =>
-    tileRegion(img, TILES.furnace_side, () =>
-      Math.random() < 0.001 ? vary([100, 100, 104], 8, r) : vary([120, 120, 124], 14, r)
-    ),
-  furnace_front: (img, r) =>
-    tileRegion(img, TILES.furnace_front, (x, y) => {
-      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
-      if (x >= 3 && x <= 12) {
-        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
-        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);
-        if (y === 12) return vary([70, 70, 74], 6, r);
-      }
-      return vary([124, 124, 128], 12, r);
-    }),
-  furnace_front_lit: (img, r) =>
-    tileRegion(img, TILES.furnace_front_lit, (x, y) => {
-      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
-      if (x >= 3 && x <= 12) {
-        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
-        if (y >= 7 && y <= 11) {
-          const h = 11 - y;
-          const flame = (x * 7 + h * 3) % 5;
-          if (h >= 3) return flame < 2 ? vary([255, 214, 92], 18, r) : vary([28, 24, 22], 5, r);
-          if (h === 2) return flame < 3 ? vary([255, 160, 40], 20, r) : vary([120, 40, 16], 12, r);
-          return vary([228, 88, 24], 22, r);
-        }
-        if (y === 12) return vary([70, 70, 74], 6, r);
-      }
-      return vary([124, 124, 128], 12, r);
-    }),
+const paintGrassSide: PPainter = (t, r, c) => {
+  const G = c.pal.grass, D = c.pal.dirt, st = c.style;
+  // dirt body
+  clumpBase(t, D, 4, c.salt ^ 0xd127, 0.06);
+  for (let i = 0; i < 7; i++) { // pebbles
+    const x = Math.floor(r() * 15), y = 4 + Math.floor(r() * 11);
+    t.set(x, y, D.lt); t.set(x + 1, y, D.mid); t.set(x, y + 1, D.sh);
+  }
+  speckle(t, r, D.sh, 9);
 
-  ore_ruby: (img, r) =>
-    tileRegion(img, TILES.ore_ruby, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const crystal = (x * 3 + y * 7) % 11 < 3 && r() < 0.5;
-      if (crystal) {
-        const bright = r() < 0.3;
-        return bright ? vary([255, 80, 90], 15, r) : vary([180, 30, 40], 12, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_amber: (img, r) =>
-    tileRegion(img, TILES.ore_amber, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const crystal = (x * 5 + y * 3) % 9 < 3 && r() < 0.45;
-      if (crystal) {
-        const bright = r() < 0.35;
-        return bright ? vary([255, 200, 60], 18, r) : vary([200, 140, 30], 14, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_luminescence: (img, r) =>
-    tileRegion(img, TILES.ore_luminescence, (x, y) => {
-      if (r() < 0.08) return vary([52, 52, 58], 8, r);
-      const crystal = (x * 7 + y * 5) % 10 < 3 && r() < 0.5;
-      if (crystal) {
-        const bright = r() < 0.4;
-        return bright ? vary([140, 255, 220], 20, r) : vary([60, 180, 150], 16, r);
-      }
-      return vary([108, 108, 114], 14, r);
-    }),
-  ore_diamond: (img, r) =>
-    tileRegion(img, TILES.ore_diamond, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const crystal = (x * 4 + y * 6) % 10 < 3 && r() < 0.4;
-      if (crystal) {
-        const bright = r() < 0.35;
-        return bright ? vary([180, 240, 255], 18, r) : vary([80, 180, 220], 14, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_gold: (img, r) =>
-    tileRegion(img, TILES.ore_gold, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const fleck = (x * 6 + y * 4) % 8 < 2 && r() < 0.5;
-      if (fleck) {
-        const bright = r() < 0.4;
-        return bright ? vary([255, 220, 80], 20, r) : vary([200, 160, 40], 14, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_silver: (img, r) =>
-    tileRegion(img, TILES.ore_silver, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const fleck = (x * 5 + y * 7) % 9 < 2 && r() < 0.5;
-      if (fleck) {
-        const bright = r() < 0.4;
-        return bright ? vary([230, 235, 240], 15, r) : vary([170, 175, 180], 12, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_jade: (img, r) =>
-    tileRegion(img, TILES.ore_jade, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const crystal = (x * 4 + y * 5) % 9 < 3 && r() < 0.45;
-      if (crystal) {
-        const bright = r() < 0.35;
-        return bright ? vary([140, 220, 160], 16, r) : vary([70, 150, 90], 14, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
-  ore_emerald: (img, r) =>
-    tileRegion(img, TILES.ore_emerald, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
-      const crystal = (x * 6 + y * 4) % 10 < 3 && r() < 0.4;
-      if (crystal) {
-        const bright = r() < 0.35;
-        return bright ? vary([80, 255, 120], 18, r) : vary([30, 160, 80], 14, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
+  // jagged grass overhang
+  const [lo, hi] = st.lip;
+  const edge: number[] = [];
+  let e = lo + Math.floor(r() * (hi - lo + 1));
+  for (let x = 0; x < TILE; x++) {
+    e += r() < 0.42 ? (r() < 0.5 ? -1 : 1) : 0;
+    edge[x] = Math.max(lo, Math.min(hi, e));
+  }
+  for (let x = 0; x < TILE; x++) {
+    for (let y = 0; y < edge[x]; y++) {
+      const v = fbm(x, y, st.clump, c.salt ^ 0x9a55, 2);
+      t.set(x, y, y === 0 ? (v > 0.5 ? G.hi : G.lt) : v < 0.4 ? G.dk : v < 0.68 ? G.mid : G.lt);
+    }
+    // drips of grass hanging past the lip
+    if (r() < st.drip) { t.set(x, edge[x], G.dk); if (r() < 0.35) t.set(x, edge[x] + 1, G.sh); }
+    // contact shadow under the lip
+    else t.shade(x, edge[x], 0.82);
+  }
+  frostPass(t, c, c.salt ^ 0x3f);
+  emberPass(t, r, c);
+  glowPass(t, r, c, 3);
+};
 
-  coal_ore: (img, r) =>
-    tileRegion(img, TILES.coal_ore, (x, y) => {
-      const chunk = (x * 5 + y * 3) % 9 < 3 && r() < 0.55;
-      if (chunk) {
-        const bright = r() < 0.25;
-        return bright ? vary([64, 64, 68], 10, r) : vary([26, 26, 30], 8, r);
-      }
-      return vary([118, 118, 124], 14, r);
-    }),
+const paintDirt: PPainter = (t, r, c) => {
+  const D = c.pal.dirt;
+  clumpBase(t, D, 4, c.salt ^ 0xd127, 0.09);
+  for (let i = 0; i < 9; i++) { // pebbles w/ highlight + drop shadow
+    const x = Math.floor(r() * 15), y = Math.floor(r() * 15);
+    t.set(x, y, D.lt); t.set(x + 1, y, D.mid); t.set(x, y + 1, D.sh); t.set(x + 1, y + 1, D.dk);
+  }
+  speckle(t, r, D.sh, 14);
+  speckle(t, r, D.hi, 4);
+  if (c.style.motif === 'ash' || c.lava) emberPass(t, r, c);
+  frostPass(t, c, c.salt ^ 0x77);
+};
 
-  coal: (img, r) =>
-    tileRegion(img, TILES.coal, (x, y) => {
-      const dx = x - 8, dy = y - 8;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d > 6.2) return null;
-      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r);
-      return vary([28, 28, 32], 10, r);
-    }),
+const paintStone: PPainter = (t, r, c) => paintStoneBase(t, r, c);
 
-  stick: (img, r) =>
-    tileRegion(img, TILES.stick, (x, y) => {
-      if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58], 14, r);
-      if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38], 10, r);
-      return null;
-    }),
+const paintCobble: PPainter = (t, r, c) => {
+  const P = c.pal.stone;
+  t.fill((x, y) => {
+    const row = (y / 5) | 0;
+    const cell = ((x + (row % 2) * 3) / 5) | 0;
+    if (x % 5 === 4 || y % 5 === 4) return P.sh;
+    const tone = (cell + row + ((c.salt >> (row & 7)) & 1)) % 3;
+    return varyH(tone === 0 ? P.lt : tone === 1 ? P.mid : P.dk, 9, pixelHash(x, y, c.salt));
+  });
+  speckle(t, r, P.hi, 6);
+  speckle(t, r, P.sh, 6);
+};
 
-  torch: (img, r) => {
+const paintGravel: PPainter = (t, r, c) => {
+  const P = c.pal.stone;
+  const tones = [P.mid, P.lt, P.dk, P.hi];
+  t.fill((x, y) => {
+    const i = Math.floor(vnoise(x, y, 8, c.salt ^ 0x9ab) * tones.length) % tones.length;
+    return varyH(tones[i], 8, pixelHash(x, y, c.salt ^ 3));
+  });
+  speckle(t, r, P.sh, 18);
+};
+
+const paintSand: PPainter = (t, r, c) => {
+  const P = c.pal.sand, st = c.style;
+  t.fill((x, y) => {
+    let v = fbm(x, y, 5, c.salt ^ 0x5a4d, 2) + (bayer(x, y) - 0.5) * 0.1;
+    if (st.ripple > 0) v += Math.sin((x * 0.8 + y * 2.1 + (c.salt & 7)) * 0.9) * 0.12 * st.ripple;
+    return v < 0.36 ? P.dk : v < 0.58 ? P.mid : v < 0.82 ? P.lt : P.hi;
+  });
+  speckle(t, r, P.sh, 6);
+  frostPass(t, c, c.salt ^ 0xa1);
+};
+
+const paintLeaves: PPainter = (t, r, c) => {
+  const P = c.pal.leaves, st = c.style;
+  t.fill((x, y) => {
+    const n = fbm(x, y, st.leafClump, c.salt ^ 0x1eaf, 2);
+    const h = pixelHash(x, y, c.salt ^ 0xh0le >>> 0);
+    // holes cluster at the low-density edges → reads like a canopy, not static
+    if (n < 0.30 + st.leafHole * 0.6 && h < 0.55 + st.leafHole) return null;
+    if (h < 0.05) return null;
+    return n < 0.42 ? P.dk : n < 0.6 ? P.mid : n < 0.82 ? P.lt : P.hi;
+  });
+  // veins / darker leaf seams
+  for (let i = 0; i < 5; i++) {
+    const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+    if (t.alphaAt(x, y)) { t.set(x, y, P.sh); if (t.alphaAt(x + 1, y + 1)) t.set(x + 1, y + 1, P.sh); }
+  }
+  // berries / spores / frost
+  if (st.motif === 'lush' || st.motif === 'meadow' || st.motif === 'alien')
+    for (let i = 0; i < 3; i++) {
+      const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+      if (t.alphaAt(x, y)) t.set(x, y, c.accent);
+    }
+  frostPass(t, c, c.salt ^ 0xb2);
+  glowPass(t, r, c, 6);
+};
+
+const paintLogSide: PPainter = (t, r, c) => {
+  const P = c.pal.log, st = c.style;
+  const cols: RGB[] = [];
+  for (let x = 0; x < TILE; x++) {
+    const v = vnoise(x, 0, 6, c.salt ^ 0x109);
+    cols[x] = x % 4 === 0 || v < st.barkDark ? P.dk : v > 0.78 ? P.lt : P.mid;
+  }
+  t.fill((x, y) => varyH(cols[x], 7, pixelHash(x, y, c.salt ^ 0x10)));
+  // bark cracks
+  for (let i = 0; i < 4; i++) {
+    let x = Math.floor(r() * 16);
+    const y0 = Math.floor(r() * 10);
+    for (let y = y0; y < y0 + 4 + Math.floor(r() * 6); y++) {
+      t.wset(x, y, P.sh);
+      if (r() < 0.25) x += r() < 0.5 ? -1 : 1;
+    }
+  }
+  // knot
+  if (r() < 0.55) {
+    const kx = 3 + Math.floor(r() * 10), ky = 3 + Math.floor(r() * 10);
+    t.disc(kx, ky, 2.2, P.dk); t.disc(kx, ky, 1.2, P.sh); t.set(kx, ky, P.lt);
+  }
+  glowPass(t, r, c, 3);
+};
+
+const paintLogTop: PPainter = (t, r, c) => {
+  const P = c.pal.log, st = c.style;
+  t.fill((x, y) => {
+    const dx = x - 7.5, dy = y - 7.5;
+    const d = Math.sqrt(dx * dx + dy * dy) + (vnoise(x, y, 4, c.salt ^ 0x71) - 0.5) * st.ringJitter * 2;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) > 6.6) return P.dk; // bark rim
+    if (d < 1.2) return P.sh;
+    return Math.floor(d) % 2 === 0 ? P.lt : P.mid;
+  });
+  speckle(t, r, P.hi, 3);
+};
+
+const paintPlanks: PPainter = (t, r, c) => {
+  const P = c.pal.planks;
+  t.fill((x, y) => {
+    if (y % 4 === 3) return P.dk;
+    const joint = Math.floor(y / 4) % 2 === 0 ? x === 11 : x === 4;
+    if (joint) return P.dk;
+    const g = vnoise(x, y, 6, c.salt ^ 0x9146);
+    return g < 0.33 ? P.mid : g > 0.8 ? P.hi : P.lt;
+  });

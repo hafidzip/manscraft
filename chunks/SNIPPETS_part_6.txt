@@ -1,180 +1,180 @@
-  wc.height = TILE;
-  const wctx = wc.getContext('2d')!;
-  const wimg = wctx.createImageData(TILE, TILE);
-  const wr = mulberry32(4242);
-  const wm = tints?.water ?? ([1, 1, 1] as RGB);
-  for (let y = 0; y < TILE; y++)
-    for (let x = 0; x < TILE; x++) {
-      const wave = (x + y * 3) % 7 === 0;
-      const c = wave ? vary([92, 138, 244], 8, wr) : vary([58, 102, 222], 10, wr);
-      put(wimg.data, TILE, x, y, [
-        Math.max(0, Math.min(255, c[0] * wm[0])),
-        Math.max(0, Math.min(255, c[1] * wm[1])),
-        Math.max(0, Math.min(255, c[2] * wm[2])),
-      ] as const);
+  t.blit(img, tile);
+}
+
+function paintInserterTop(t: Tile16, rot: number, r: () => number): void {
+  const N = TILE;
+  t.fill((px, py) => {
+    let x = px, y = py;
+    if (rot === 1) { x = py; y = N - 1 - px; }
+    else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
+    else if (rot === 3) { x = N - 1 - py; y = px; }
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42], 5, r);
+    if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68], 7, r);
+    const dx = x - 7.5, dz = y - 7.5, d = Math.sqrt(dx * dx + dz * dz);
+    if (d < 2.2) return vary([28, 28, 32], 4, r);
+    if (d < 3.4) return vary([98, 98, 106], 8, r);
+    if (x >= 10 && x <= 13 && Math.abs(y - 7.5) <= x - 10 + 1 && Math.abs(y - 7.5) > x - 10 - 1)
+      return vary([226, 146, 34], 10, r);
+    return vary([72, 72, 80], 9, r);
+  });
+}
+
+/** ores inherit the planet stone matrix, then overlay a universal crystal motif */
+function oreTile(gem: [RGB, RGB], mod: [number, number, number]): PPainter {
+  return (t, r, c) => {
+    paintStoneBase(t, r, c, 0.94);
+    for (let y = 0; y < TILE; y++)
+      for (let x = 0; x < TILE; x++) {
+        const isC = (x * mod[0] + y * mod[1]) % mod[2] < 3 && pixelHash(x, y, c.salt ^ 0x0re) < 0.5;
+        if (!isC) continue;
+        const bright = r() < 0.35;
+        t.set(x, y, bright ? gem[0] : gem[1]);
+        if (bright && r() < 0.4) t.set(x, y + 1, shadeMul(gem[1], 0.75));
+      }
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   9. painter registry
+   ══════════════════════════════════════════════════════════════ */
+
+const PAINTERS: Partial<Record<TileName, PPainter>> = {
+  grass_top: paintGrassTop,
+  grass_side: paintGrassSide,
+  dirt: paintDirt,
+  stone: paintStone,
+  cobble: paintCobble,
+  gravel: paintGravel,
+  sand: paintSand,
+  leaves: paintLeaves,
+  log_side: paintLogSide,
+  log_top: paintLogTop,
+  planks: paintPlanks,
+  tallgrass: paintTallgrass,
+  flower_red: paintFlowerRed,
+  flower_yellow: paintFlowerYellow,
+  snow: paintSnow,
+  snow_side: paintSnowSide,
+  water: paintWaterTile,
+  cactus_side: paintCactusSide,
+  cactus_top: paintCactusTop,
+  bedrock: paintBedrock,
+  glass: paintGlass,
+
+  craft_top: (t, r, c) => {
+    const P = c.pal.planks;
+    t.fill((x, y) => {
+      if (x === 0 || y === 0 || x === 15 || y === 15) return P.dk;
+      if (x === 7 || x === 8 || y === 7 || y === 8) return P.sh;
+      return varyH(P.lt, 9, pixelHash(x, y, c.salt));
+    });
+    speckle(t, r, P.hi, 4);
+  },
+  craft_side: (t, r, c) => {
+    const P = c.pal.planks;
+    t.fill((x, y) => {
+      if (y < 2) return P.mid;
+      if (y >= 4 && y <= 9 && x >= 4 && x <= 11)
+        return y === 4 || y === 9 || x === 4 || x === 11 ? P.sh : P.mid;
+      return x % 4 === 0 ? P.dk : varyH(P.lt, 9, pixelHash(x, y, c.salt ^ 1));
+    });
+    speckle(t, r, P.sh, 4);
+  },
+  craft_bottom: (t, _r, c) => {
+    const P = c.pal.planks;
+    t.fill((x, y) => (y % 4 === 3 ? P.dk : varyH(P.mid, 9, pixelHash(x, y, c.salt ^ 2))));
+  },
+
+  furnace_top: (t, r, c) => {
+    paintStoneBase(t, r, c, 0.98);
+    t.fill((x, y) => {
+      if (x === 0 || y === 0 || x === 15 || y === 15) return c.pal.stone.dk;
+      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return c.pal.stone.sh;
+      return t.get(x, y);
+    });
+  },
+  furnace_side: (t, r, c) => paintStoneBase(t, r, c, 0.96),
+  furnace_front: (t, r, c) => {
+    paintStoneBase(t, r, c, 0.96);
+    t.fill((x, y) => {
+      if (x === 0 || y === 0 || x === 15 || y === 15) return c.pal.stone.dk;
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return shadeMul(c.pal.stone.sh, 0.8);
+        if (y >= 7 && y <= 11) return [22, 22, 24] as const;
+        if (y === 12) return c.pal.stone.dk;
+      }
+      return t.get(x, y);
+    });
+  },
+  furnace_front_lit: (t, r, c) => {
+    paintStoneBase(t, r, c, 0.96);
+    t.fill((x, y) => {
+      if (x === 0 || y === 0 || x === 15 || y === 15) return c.pal.stone.dk;
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return shadeMul(c.pal.stone.sh, 0.8);
+        if (y >= 7 && y <= 11) {
+          const h = 11 - y, flame = (x * 7 + h * 3) % 5;
+          if (h >= 3) return flame < 2 ? ([255, 214, 92] as const) : ([28, 24, 22] as const);
+          if (h === 2) return flame < 3 ? ([255, 160, 40] as const) : ([120, 40, 16] as const);
+          return [228, 88, 24] as const;
+        }
+        if (y === 12) return c.pal.stone.dk;
+      }
+      return t.get(x, y);
+    });
+  },
+
+  ore_ruby: oreTile([[255, 80, 90], [180, 30, 40]], [3, 7, 11]),
+  ore_amber: oreTile([[255, 200, 60], [200, 140, 30]], [5, 3, 9]),
+  ore_luminescence: oreTile([[140, 255, 220], [60, 180, 150]], [7, 5, 10]),
+  ore_diamond: oreTile([[180, 240, 255], [80, 180, 220]], [4, 6, 10]),
+  ore_gold: oreTile([[255, 220, 80], [200, 160, 40]], [6, 4, 8]),
+  ore_silver: oreTile([[230, 235, 240], [170, 175, 180]], [5, 7, 9]),
+  ore_jade: oreTile([[140, 220, 160], [70, 150, 90]], [4, 5, 9]),
+  ore_emerald: oreTile([[80, 255, 120], [30, 160, 80]], [6, 4, 10]),
+  coal_ore: oreTile([[64, 64, 68], [26, 26, 30]], [5, 3, 9]),
+
+  coal: (t, r) => t.fill((x, y) => {
+    const dx = x - 8, dy = y - 8, d = Math.sqrt(dx * dx + dy * dy);
+    if (d > 6.2) return null;
+    if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r);
+    return vary([28, 28, 32], 10, r);
+  }),
+  stick: (t, r) => t.fill((x, y) => {
+    const k = Math.abs(x - (15 - y));
+    if (k <= 1) return vary([138, 100, 58], 14, r);
+    if (k === 2) return vary([96, 68, 38], 10, r);
+    return null;
+  }),
+  torch: (t) => t.fill((x, y) => {
+    const cx = x >= 6 && x <= 9;
+    if (cx && y >= 6) return y === 6 ? ([120, 88, 50] as const)
+      : x === 6 ? ([96, 68, 38] as const) : x === 9 ? ([80, 56, 32] as const) : ([138, 100, 58] as const);
+    if (cx && y >= 4 && y <= 5) return [40, 30, 24] as const;
+    const fx = x - 7.5, fy = y - 2, df = Math.sqrt(fx * fx + fy * fy * 0.6);
+    if (y <= 5) {
+      if (df < 1.3) return [255, 246, 200] as const;
+      if (df < 2.4) return [255, 200, 70] as const;
+      if (df < 3.4) return [240, 130, 30] as const;
     }
-  wctx.putImageData(wimg, 0, 0);
-  const water = configure(new THREE.CanvasTexture(wc));
-  water.wrapS = THREE.RepeatWrapping;
-  water.wrapT = THREE.RepeatWrapping;
+    return null;
+  }),
 
-  return {
-    atlas: configure(new THREE.CanvasTexture(canvas)),
-    water,
-    cracks: [0, 1, 2, 3, 4].map(makeCrackTexture),
-    atlasCanvas: canvas,
-    atlasImg: img,
-    atlasCtx: ctx,
-  };
-}
-```
-
----
-
-### `src/game/space/theme.ts` (PlanetTheme — what createTextures receives)
-
-```ts
-import { Rng, derive } from './rng';
-import type { PlanetPalette, PlanetType } from './palettes';
-import { Biome } from '../world/biomes';
-import { SEA_LEVEL } from '../core/constants';
-import type { PlanetSpec, StarSpec } from './galaxy';
-import { PLANET_PALETTES } from './palettes';
-import {
-  hueBucketFromSeed, originGroupHex, originTints, packOrigin, waterHexFor,
-  type OriginTag,
-} from '../core/origin';
-import { floraFor, type Flora, type FlowerShape, type GrassShape, type TreeShape } from './flora';
-
-export interface ThemePalette {
-  grass: number; dirt: number; stone: number; sand: number; log: number;
-  leaf: number; planks: number; snow: number; water: number; cactus: number;
-}
-
-export interface PlanetTheme {
-  seed: bigint;
-  type: PlanetType;
-  biome: Biome;
-  seaLevel: number;
-  hillAmp: number;
-  skyHex: number;
-  lava: boolean;
-  spec: PlanetSpec;
-  star: StarSpec;
-  tint: Record<string, [number, number, number]>;
-
-  originTag: OriginTag;
-  variantId: number;
-  hueBucket: number;
-
-  colors: ThemePalette;
-  waterHex: number;
-
-  tree: TreeShape;
-  grass: GrassShape;
-  flower: FlowerShape;
-
-  fogHex: number;
-  fogDensity: number;
-  ambientHex: number;
-  sunHex: number;
-  particleHex: number;
-  toolTintHex: number;
-
-  [k: string]: unknown;
-}
-
-// RULES map PlanetType → surface biome/sea/hill/lava/sky
-const RULES: Record<PlanetType, { biome: Biome; sea: number; hillAmp: number; sky?: number; lava?: boolean }> = {
-  terran: { biome: Biome.PLAINS, sea: 0, hillAmp: 1 },
-  ocean: { biome: Biome.PLAINS, sea: 10, hillAmp: 0.7, sky: 0x6fd6f0 },
-  desert: { biome: Biome.DESERT, sea: -24, hillAmp: 1.25, sky: 0xf0b070 },
-  ice: { biome: Biome.SNOW, sea: -2, hillAmp: 0.95, sky: 0xcdeaff },
-  oceanic_ice: { biome: Biome.SNOW, sea: 8, hillAmp: 0.6, sky: 0xa8d8f0 },
-  volcanic: { biome: Biome.MOUNTAINS, sea: -8, hillAmp: 1.55, sky: 0x53221a, lava: true },
-  lava: { biome: Biome.MOUNTAINS, sea: 4, hillAmp: 1.35, sky: 0x7a1f10, lava: true },
-  barren: { biome: Biome.MOUNTAINS, sea: -30, hillAmp: 1.15, sky: 0x1b1c22 },
-  alien: { biome: Biome.FOREST, sea: -2, hillAmp: 1.2, sky: 0x9d5cff },
-  jungle: { biome: Biome.FOREST, sea: 3, hillAmp: 1.05, sky: 0x7fe0b0 },
-  savanna: { biome: Biome.PLAINS, sea: -9, hillAmp: 0.85, sky: 0xe8c070 },
-  tundra: { biome: Biome.SNOW, sea: -4, hillAmp: 0.75, sky: 0xa9c4d8 },
-  crimson: { biome: Biome.DESERT, sea: -18, hillAmp: 1.3, sky: 0xc0402f },
-  neon: { biome: Biome.FOREST, sea: -6, hillAmp: 1.4, sky: 0x25f0d0 },
-};
-
-export function themeFromPalette(pal: PlanetPalette, seed: bigint): PlanetTheme {
-  const rule = RULES[pal.key] ?? RULES.terran;
-  const r = new Rng(derive(seed, 0x7e));
-  const f = new Rng(derive(seed, 0x6f0));
-
-  const hueBucket = hueBucketFromSeed(seed);
-  const originTag = packOrigin(pal.key, hueBucket);
-  const flora: Flora = floraFor(pal.key, seed);
-  const skyHex = rule.sky ?? /* skyFromAtmo(pal.atmoHex) */ pal.atmoHex;
-
-  const colors: ThemePalette = {
-    grass: originGroupHex(originTag, 'grass'),
-    dirt: originGroupHex(originTag, 'dirt'),
-    stone: originGroupHex(originTag, 'stone'),
-    sand: originGroupHex(originTag, 'sand'),
-    log: originGroupHex(originTag, 'log'),
-    leaf: originGroupHex(originTag, 'leaves'),
-    planks: originGroupHex(originTag, 'planks'),
-    snow: originGroupHex(originTag, 'snow'),
-    water: waterHexFor(originTag),
-    cactus: originGroupHex(originTag, 'cactus'),
-  };
-
-  return {
-    seed,
-    type: pal.key,
-    biome: rule.biome,
-    seaLevel: Math.max(2, Math.round(SEA_LEVEL + rule.sea + r.range(-2, 2))),
-    hillAmp: rule.hillAmp * r.range(0.92, 1.08),
-    skyHex,
-    lava: rule.lava ?? pal.lava,
-    spec: undefined as unknown as PlanetSpec,
-    star: undefined as unknown as StarSpec,
-    tint: (originTints(originTag) ?? {}) as Record<string, [number, number, number]>,
-    originTag,
-    variantId: (originTag & 0x0f) - 1,
-    hueBucket,
-    colors,
-    waterHex: colors.water,
-    tree: flora.tree,
-    grass: flora.grass,
-    flower: flora.flower,
-    fogHex: skyHex,
-    fogDensity: (pal.lava ? 0.020 : 0.0075) * f.range(0.7, 1.45),
-    ambientHex: pal.atmoHex,
-    sunHex: 0xfff6e6,
-    particleHex: colors.dirt,
-    toolTintHex: colors.planks,
-  };
-}
-
-export function themeFromPlanet(planet: PlanetSpec, star: StarSpec): PlanetTheme {
-  const pal = PLANET_PALETTES[planet.type] ?? PLANET_PALETTES.terran;
-  const base = themeFromPalette(pal, planet.seed);
-  return { ...base, spec: planet, star };
-}
-```
-
-**Use `theme.colors.grass` (hex), `theme.type`, `theme.seed`, `theme.originTag`, `theme.grass`/`theme.flower` when building painters.**
-
----
-
-### `src/game/core/origin.ts` (group colors / legacy tint multipliers)
-
-```ts
-import { PLANET_PALETTES, rampAt255, type PlanetType } from '../space/palettes';
-
-export type OriginTag = number;
-export type RGB = [number, number, number];
-export type TintMap = Record<string, RGB>;
-
-export const NO_ORIGIN: OriginTag = 0;
-
-export const PLANET_TYPE_ORDER: readonly PlanetType[] = [
-  'terran', 'ocean', 'desert', 'ice', 'volcanic', 'alien', 'barren',
-  'jungle', 'savanna', 'tundra', 'lava', 'oceanic_ice', 'crimson', 'neon',
+  conveyor_side: (t, r) => t.fill((x, y) => {
+    if (x === 0 || y === 0 || x === 15 || y === 15) return vary([42, 42, 48], 5, r);
+    if (y >= 5 && y <= 10 && (x <= 4 || x >= 11)) {
+      const cx = x <= 4 ? 2.5 : 13.5, dx = x - cx, dy = y - 7.5;
+      if (dx * dx + dy * dy < 5) return vary([100, 100, 106], 8, r);
+    }
+    if (y >= 3 && y <= 5) return vary([58, 58, 64], 6, r);
+    return vary([66, 66, 72], 8, r);
+  }),
+  inserter_top_n: (t, r) => paintInserterTop(t, 0, r),
+  inserter_top_e: (t, r) => paintInserterTop(t, 1, r),
+  inserter_top_s: (t, r) => paintInserterTop(t, 2, r),
+  inserter_top_w: (t, r) => paintInserterTop(t, 3, r),
+  inserter_side: (t, r) => t.fill((x, y) => {
+    if (x === 0 || y === 0 || x === 15 || y === 15) return vary([40, 40, 46], 5, r);
+    if (x >= 5 && x <= 10 && y >= 2) {
+      if (x === 5 || x === 10) return vary([100, 100, 108], 8, r);
+      if (y === 8 || y === 9) return vary([226, 146, 34], 10, r);

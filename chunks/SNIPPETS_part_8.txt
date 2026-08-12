@@ -1,175 +1,180 @@
-    if (!d) continue;
-    const base = BASE_COLORS[id];
-    const m = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
-    d.colors = tintColors(base, m);
+    let x = 2 + Math.floor(r() * 12), y = 2 + Math.floor(r() * 12);
+    const steps = 6 + stage * 4 + Math.floor(r() * 6);
+    for (let s = 0; s < steps; s++) {
+      ctx.fillRect(x, y, 1, 1);
+      if (r() < 0.5) x += r() < 0.5 ? -1 : 1; else y += r() < 0.5 ? -1 : 1;
+      x = Math.max(0, Math.min(TILE - 1, x));
+      y = Math.max(0, Math.min(TILE - 1, y));
+    }
+  }
+  return configure(new THREE.CanvasTexture(c));
+}
+
+export function createTextures(theme?: PlanetTheme | null): TextureSet {
+  const paint = buildPaintContext(theme);
+  const canvas = document.createElement('canvas');
+  canvas.width = ATLAS_W; canvas.height = ATLAS_H;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(ATLAS_W, ATLAS_H);
+
+  TILE_NAMES.forEach((name, i) => {
+    const painter = PAINTERS[name];
+    const t = new Tile16();
+    // deterministic per planet + per tile
+    const r = mulberry32((paint.salt ^ Math.imul(i + 1, 7919) ^ 0x9e3779b9) >>> 0);
+    if (painter) painter(t, r, paint);
+    guardTile(name, t, r, paint);
+    t.blit(img, TILES[name]);
+  });
+
+  // machines only: gentle planet grade so factories don't look alien to the world
+  const tints = tintsFromTheme(theme);
+  if (tints?.stone) {
+    const m = tints.stone.map((v) => 1 + (v - 1) * MACHINE_GRADE) as unknown as RGB;
+    for (const n of MACHINE_TILES) tintTile(img, TILES[n], m);
+  }
+
+  ctx.putImageData(img, 0, 0);
+
+  // standalone animated-water texture uses the same planet painter
+  const wc = document.createElement('canvas');
+  wc.width = TILE; wc.height = TILE;
+  const wctx = wc.getContext('2d')!;
+  const wimg = wctx.createImageData(TILE, TILE);
+  const wt = new Tile16();
+  paintWaterTile(wt, mulberry32(paint.salt ^ 4242), paint);
+  for (let y = 0; y < TILE; y++)
+    for (let x = 0; x < TILE; x++) {
+      const c = wt.get(x, y) ?? paint.pal.water.mid;
+      put(wimg.data, TILE, x, y, c);
+    }
+  wctx.putImageData(wimg, 0, 0);
+  const water = configure(new THREE.CanvasTexture(wc));
+  water.wrapS = THREE.RepeatWrapping;
+  water.wrapT = THREE.RepeatWrapping;
+
+  return {
+    atlas: configure(new THREE.CanvasTexture(canvas)),
+    water,
+    cracks: [0, 1, 2, 3, 4].map(makeCrackTexture),
+    atlasCanvas: canvas,
+    atlasImg: img,
+    atlasCtx: ctx,
+    paint,
+  };
+}
+
+/* ── icons (unchanged) ───────────────────────────────────────── */
+
+export function makeIcon(atlasCanvas: HTMLCanvasElement, tile: number, size = 44): string {
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(atlasCanvas, (tile % TPR) * TILE, Math.floor(tile / TPR) * TILE, TILE, TILE, 0, 0, size, size);
+  return c.toDataURL();
+}
+
+export function makeBucketIcon(size = 44): string {
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  const off = document.createElement('canvas');
+  off.width = TILE; off.height = TILE;
+  const octx = off.getContext('2d')!;
+  const px = (x: number, y: number, col: string) => { octx.fillStyle = col; octx.fillRect(x, y, 1, 1); };
+  const row = (x0: number, x1: number, y: number, col: string) => { octx.fillStyle = col; octx.fillRect(x0, y, x1 - x0 + 1, 1); };
+  const SILVER = '#c8ced6', STEEL = '#8d969e', DARK = '#5c646c';
+  px(4, 3, STEEL); px(5, 2, STEEL); px(6, 1, STEEL); px(7, 1, STEEL);
+  px(8, 1, STEEL); px(9, 1, STEEL); px(10, 2, STEEL); px(11, 3, STEEL);
+  row(4, 11, 4, SILVER);
+  for (let y = 5; y <= 12; y++) {
+    px(4, y, STEEL); px(11, y, DARK);
+    for (let x = 5; x <= 10; x++) {
+      if (y === 5) px(x, y, x === 6 || x === 9 ? '#6f93f2' : '#4a74e8');
+      else if (y <= 9) px(x, y, '#4266d8');
+      else px(x, y, '#3554b8');
+    }
+  }
+  row(5, 10, 13, DARK); row(5, 10, 12, STEEL);
+  for (let y = 6; y <= 11; y++) px(5, y, '#4f71db');
+  ctx.drawImage(off, 0, 0, TILE, TILE, 0, 0, size, size);
+  return c.toDataURL();
+}
+
+/** QA helper: 4× nearest-neighbour blow-up of the whole atlas as a data URL. */
+export function atlasDebugSheet(set: TextureSet, scale = 4): string {
+  const c = document.createElement('canvas');
+  c.width = ATLAS_W * scale; c.height = ATLAS_H * scale;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(set.atlasCanvas, 0, 0, ATLAS_W, ATLAS_H, 0, 0, c.width, c.height);
+  return c.toDataURL();
+}
+```
+
+> ⚠ One typo-trap to fix on paste: in `paintLeaves` the expression `c.salt ^ 0xh0le >>> 0` is a
+> placeholder — replace it with `c.salt ^ 0x40e1`. (Left visible on purpose so it can't be missed.)
+
+---
+
+## 2. Companion patches
+
+### `src/game/space/flora.ts` — guarantee grass exists where it must
+
+```ts
+const MUST_HAVE_GRASS: ReadonlySet<PlanetType> =
+  new Set(['terran', 'jungle', 'savanna', 'alien', 'neon', 'ocean', 'tundra']);
+
+export function floraFor(type: PlanetType, seed: bigint): Flora {
+  const f = buildFlora(type, seed);          // existing body
+  if (MUST_HAVE_GRASS.has(type)) {
+    f.grass.present = true;
+    if (f.grass.blades[1] < 5) f.grass.blades = [5, 9];
+  }
+  return f;
+}
+```
+
+### `src/game/world/blocks.ts` — stop double-darkening painted blocks
+
+```ts
+// textures now carry planet identity; vertex colours only need a whisper of grade
+const VERTEX_TINT = 0.3;
+
+export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
+  const tints = tintsFromTheme(theme);
+  for (let id = 0; id < DEFS.length; id++) {
+    const d = DEFS[id]; if (!d) continue;
+    const raw = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
+    const m = raw ? (raw.map((v) => 1 + (v - 1) * VERTEX_TINT) as [number, number, number]) : null;
+    d.colors = tintColors(BASE_COLORS[id], m);
   }
 }
 ```
 
----
-
-### `src/game/world/mesher.ts` (tall grass emission — blank if tile empty)
+### `src/game/world/mesher.ts` — denser blades from flora hints
 
 ```ts
-// In buildChunkGeometry:
-const grassShape = activeFlora().grass;
-const flowerShape = activeFlora().flower;
-
-if (d.cross) {
-  const plantTag = tagAt(x, y, z);
-  const plantMul = relativeColorMul(plantTag, nativeTag, BLOCK_GROUP[id]);
-  if (id === B.TALLGRASS) {
-    if (grassShape.present) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z, plantMul);
-  } else if (id === B.FLOWER_RED || id === B.FLOWER_YELLOW) {
-    if (flowerShape.present) emitCross(cutoutB, x, y, z, d.side, 0.018, baseX + x, baseZ + z, plantMul);
-  } else {
-    emitCross(cutoutB, x, y, z, d.side, 0.028, baseX + x, baseZ + z, plantMul);
-  }
-  continue;
-}
-
-// Opaque faces use:
-// const tile = f.dir[1] === 1 ? d.top : f.dir[1] === -1 ? d.bottom : d.side;
-// const [u0, v0, u1, v1] = tileUV(tile);
-
-function emitTallGrass(
-  bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number,
-  mul: [number, number, number] = [1, 1, 1],
-): void {
+function emitTallGrass(bucket, x, y, z, tile, wx, wz, mul = [1, 1, 1]) {
   const [u0, v0, u1, v1] = tileUV(tile);
+  const shape = activeFlora().grass;
   const seed = hashPlant(wx, y, wz, 101);
-  const blades = 5 + Math.floor(seed * 3);
-  for (let i = 0; i < blades; i++) {
-    // ... builds thin quads sampling FULL tile UV (u0..u1, v0..v1)
-    // normals encode grass: bucket.nrm.push(cx, cz, ang + 100.0);
-    bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
-    // vertex colors multiply texture — keep mul near 1,1,1 for native grass
-  }
+  const lo = Math.max(4, shape.blades?.[0] ?? 5);
+  const hi = Math.max(lo, shape.blades?.[1] ?? lo + 3);
+  const blades = lo + Math.floor(seed * (hi - lo + 1));
+  // ...unchanged quad build, still sampling the full tile UV
 }
 ```
 
-**Important:** tallgrass quads sample the **entire** 16×16 tile UV. If the painter only draws a few 1px blades, most of the quad is transparent (OK with alphaTest), but if the painter draws nothing → **blank grass**. Prefer denser blade pixels and/or a faint filled silhouette so alphaTest retains visible fragments. Optionally improve mesher later to use tighter UVs; texture fix is the first line of defense.
-
----
-
-### `src/game/engine.ts` (texture creation + cutout material)
+### `src/game/world/biomes.ts` — reference meadow density
 
 ```ts
-async init(theme?: PlanetTheme | null): Promise<void> {
-  if (theme !== undefined) this.theme = theme;
-  setActivePlanetTheme(this.theme);
-  this.textures = createTextures(this.theme);
-  applyThemeToBlockColors(this.theme);
-
-  const mats = {
-    opaque: new THREE.MeshLambertMaterial({ map: this.textures.atlas, vertexColors: true }),
-    cutout: new THREE.MeshLambertMaterial({
-      map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
-    }),
-    foliage: new THREE.MeshLambertMaterial({
-      map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
-    }),
-    water: new THREE.MeshLambertMaterial({
-      map: this.textures.water, vertexColors: true, transparent: false, opacity: 1.0,
-      side: THREE.DoubleSide,
-    }),
-  };
-  // cutout shader forces world-up normals; grass blades get wrap lighting floor
-}
+{ name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
+  trees: 0.008, tree: 'auto', flowers: 0.16, grass: 0.72, cactus: 0 },
+{ name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
+  trees: 0.055, tree: 'auto', flowers: 0.09,  grass: 0.70, cactus: 0 },
 ```
 
----
-
-### `src/game/world/generator.ts` (surface decoration)
-
-```ts
-if (!underwater) {
-  const r = this.decoHash(0xdec0, px, pz);
-  const onGrass = surface === B.GRASS && h > this.sea + 1;
-  if (onGrass && r < bDef.flowers) {
-    const flower = this.decoHash(0xf10, px, pz) < 0.5 ? B.FLOWER_RED : B.FLOWER_YELLOW;
-    data[chunkIndex(lx, h + 1, lz)] = flower;
-  } else if (onGrass && r < bDef.flowers + bDef.grass) {
-    data[chunkIndex(lx, h + 1, lz)] = B.TALLGRASS;
-  }
-}
-```
-
-### `src/game/world/biomes.ts`
-
-```ts
-export const BIOME_DEFS: BiomeDef[] = [
-  { name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
-    trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0 },
-  { name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
-    trees: 0.05, tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0 },
-  // Desert: no grass. Mountains: grass 0.32. Snow: grass 0.02.
-];
-```
-
-For reference meadow look on terran/plains: consider raising `flowers` (e.g. 0.12–0.35) and keeping grass high; recolor `flower_red` painter toward lavender procedurally for lush types.
-
-### `src/game/core/noise.ts`
-
-```ts
-export function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-```
-
-### Space planet body (visual only — separate from surface atlas)
-
-`src/game/space/planet.ts` builds LOD voxel shells colored by `biomeColorInto(h, lat, pal, ...)` from the same palettes. Surface block atlas is independent but should **feel consistent** with the orb’s climate colors.
-
----
-
-## Suggested implementation plan (for the larger model)
-
-1. **Add `PlanetPaintContext`** in `textures.ts`:
-   - `type`, `seedU32`, `originTag`, hex→RGB for grass/dirt/stone/sand/log/leaf/water from `theme.colors` or `groupTargetRgb` + hueBucket nudge.
-   - motif style enum derived from type: `lush | dry | frozen | ash | alien | fungal | crimson | ...`.
-
-2. **Change painter signature** to `(img, r, ctx) => void` OR close over `ctx` when building a `PAINTERS` map inside `createTextures(theme)`.
-
-3. **Rewrite organic painters** with Minecraft pixel-art techniques using `ctx` palettes:
-   - `grass_top`, `grass_side`, `dirt`, `stone`, `sand`, `leaves`, `log_side`, `log_top`, `tallgrass`, `flower_red`, `flower_yellow`, `snow*`, `cactus*`, `water`, `planks` (wood matches log).
-   - Keep machines/ores mostly as-is (optional subtle stone base match).
-
-4. **Seed RNG** from planet:
-   ```ts
-   const seedU32 = Number(theme.seed & 0xffffffffn) ^ (theme.originTag << 16);
-   painter(img, mulberry32(seedU32 ^ (i * 7919) ^ 0x9e3779b9));
-   ```
-
-5. **Reduce or remove post-paint `tintTile`** for tiles you fully paint with planet colors (double-tint washes detail). If kept, use strength ≪ 0.85 or only for foreign-block vertex path.
-
-6. **Blank grass fixes**:
-   - Assert tallgrass painter always plots ≥ N opaque pixels when `theme.grass.present !== false`.
-   - Grass top always fully opaque.
-   - Flower painters always have stem + petals with a>0.
-   - Optionally densify `emitTallGrass` blade count using `activeFlora().grass.blades`.
-
-7. **Reference meadow pass (terran/jungle/plains)**:
-   - Grass: rich multi tuft texture (not flat).
-   - `flower_red` → pink/lilac petals (`~[220,140,200]` / `[190,110,210]`) for lush types; keep true red on crimson.
-   - `flower_yellow` stays warm yellow accent.
-   - Optionally bump plains `flowers` density in `biomes.ts` so carpets match the screenshot.
-
----
-
-## Acceptance criteria
-
-- [ ] Two different planet types produce **visually distinct** grass/dirt/leaf/log atlas tiles even in grayscale (pattern differs, not only hue).
-- [ ] Textures read as **16×16 pixel art** (crisp, limited palette, intentional detail).
-- [ ] No blank grass tops; tall grass visible on planets with `grass.present`.
-- [ ] Lush terran/plains can resemble the reference: textured grass + flower field + detailed trees.
-- [ ] Deterministic for a given `theme.seed` + `theme.type`.
-- [ ] No regression on machines, ores, water animation path, or mesher UV indexing.
-
----
+### `src/game/world/generator.ts` — scale deco by planet lushness
