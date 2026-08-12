@@ -1,0 +1,180 @@
+# Task: Procedural Planet-Unique Block Textures (Pixel-Art Atlas)
+
+You are editing a Minecraft-style voxel game (manscraft / VoxelCraft). Planets are already fully procedural (space scene, surface terrain, theme/flora). **Block textures are still generic** — one shared atlas is painted once with fixed base colors, then **only multiplied by per-planet RGB tints**. That makes every planet look like the same grass/dirt/stone with a hue shift.
+
+## Goal
+
+1. **Each planet’s unique blocks get their own distinct procedural textures in the atlas** — real pattern/structure differences (blade streaks, clump noise, dirt flecks, stone cracks, leaf silhouettes, bark rings, flower petals), **not just tinting**.
+2. Procedural textures must look like **hand-drawn 16×16 Minecraft pixel art** (nearest-neighbor, limited palette, intentional dither/speckle, crisp edges, no blurry noise soup).
+3. **Fix blank / invisible / washed-out grass** (grass block tops and tall-grass cutouts).
+
+
+### Reference look (target aesthetic), **IMPORTANT** each must have their own color palette
+
+- Lush plains/forest floor: **grass tops with visible pixel variation**, not flat tint slabs.
+- Heavy **flower field** (many cross/billboard flowers),.
+- Tall **conifer/broadleaf voxel trees**: trunks, multi canopy blocks with holes (cutout leaves).
+- Dirt/side of grass blocks visible on slopes with a **jagged grass overhang** on the side tile.
+- No blank/pink-missing/alpha-punched grass tops; tall grass blades must sample a real tallgrass not empty atlas cells.
+
+---
+
+## Hard constraints
+
+- Keep atlas model: **16×16 tiles**, packed grid, `NearestFilter`, no mipmaps, `SRGBColorSpace`.
+- `createTextures(theme)` is called once per planet landing in `engine.init` — **seed painters from `theme.seed` / `theme.originTag` / `theme.type`** so the same planet is stable across sessions.
+- Do **not** rely only on `tintTile` / `tintsFromTheme` / `originTints` for identity. Tint may remain as a *secondary* grade; **primary identity must come from painter logic + per-planet palette stops**.
+- Preserve tile indices (`TILES.*`) and `tileUV` layout unless you deliberately expand the atlas (if you add tiles, update `TILE_NAMES`, block defs, mesher).
+- Cutout tiles (`tallgrass`, `leaves`, flowers, torch, glass, stick, coal item) **must write real alpha** (`put(..., a)`); transparent pixels stay `a=0`. Blank grass is often caused by all-null painters, wrong UV, or alphaTest eating near-empty tiles.
+- `emitTallGrass` / cutout materials use `alphaTest: 0.4` — blades need **opaque green pixels** covering enough of the quad UVs.
+- Prefer extending `src/game/core/textures.ts` (+ small hooks in theme/origin if needed). Avoid breaking conveyor animation (`animateConveyorTiles`) and ore/machine tiles unless theming them similarly.
+
+---
+
+## Architecture (current → desired)
+
+### Current (problem)
+
+```
+createTextures(theme)
+  → paint every tile with FIXED base RGB painters (same for all planets)
+  → optionally multiply pixels by tintsFromTheme(theme)  // generic look
+```
+
+### Desired
+
+```
+createTextures(theme)
+  → derive PlanetPaintContext from theme (type, seed, originTag, palette stops, flora hints)
+  → for each organic/surface tile, run a PLANET-AWARE painter that:
+        picks a small hand-authored-style palette (4–6 colors) from planet ramps
+        draws Minecraft-like motifs with seeded RNG (hash per pixel / feature)
+        varies motif by planet type (terran grass ≠ crimson grass ≠ neon grass ≠ ice grass)
+  → machines/ores may stay mostly universal
+  → optional light grade/tint only after paint, not instead of paint
+```
+
+Planet types that must feel obviously different on **grass_top / grass_side / dirt / leaves / log / tallgrass / flowers** at minimum:
+
+`terran | ocean | desert | ice | oceanic_ice | volcanic | lava | barren | alien | jungle | savanna | tundra | crimson | neon`
+
+---
+
+## Pixel-art painter guidelines (implement these techniques)
+
+Work in **integer pixel space** 0..15. Use a seeded `mulberry32` / `pixelHash`.
+
+1. **Palette first**: 1 shadow, 2 mid, 1 highlight, optional accent (flowers, biolum, frost). Sample from `PLANET_PALETTES[type].stops` via existing `rampAt` / `groupTargetRgb` / `originGroupHex`, then **quantize** slightly so it feels painted.
+2. **Base fill** with low-amplitude value noise (not HSV noise soup).
+3. **Motifs**:
+   - `grass_top`: diagonal blade clusters, tiny dirt holes, occasional flower speck; Minecraft-like patchy tufts.
+   - `grass_side`: dirt body + top 2–5 px grass lip with irregular edge array (already started).
+   - `dirt`: pebbles + dark pits.
+   - `stone` / `cobble`: cracks, blobs, mortar lines.
+   - `leaves`: ~10–20% holes (`null` alpha), clustered leaf pixels, vein darker dots.
+   - `log_side`: vertical bark striations; `log_top`: concentric rings.
+   - `tallgrass`: 5–9 single-pixel blades with lean; **never return an empty tile**.
+   - flowers: stem + petal disc matching planet accents (lavender for lush terran meadow look).
+4. **Outline / contact shadow**: darken bottom row or one side lightly for “hand-drawn” weight.
+5. **Determinism**: `mulberry32(planetSeedSalt ^ tileIndex * 7919)` plus `pixelHash(x,y,salt)`.
+
+### Blank grass — known failure modes to fix
+
+1. `tallgrass` painter returns `null` for every pixel → alphaTest discards whole quad.
+2. Grass top painted too dark then over-tinted toward black/zero.
+3. `grassShape.present === false` skips mesh emission for some planet types (volcanic/lava/barren/desert ice) — OK for those; **terran/jungle/savanna/alien/neon must present**.
+4. Side/top tile index mismatch in `DEFS[B.GRASS]` / `DEFS[B.TALLGRASS]`.
+5. After procedural regen, atlas `needsUpdate` / materials still pointing at old texture (recreate path in `engine.init` is fine if textures rebuilt there).
+
+**Fix requirements:**
+
+- Guarantee `grass_top`, `grass_side`, and `tallgrass` always have visible opaque pixels for planets where grass exists.
+- For flower-heavy meadow planets, bias flower petal colors toward **lavender** (reference)
+- Ensure cutout UVs still map to the painted tallgrass/flower tiles.
+
+---
+
+## Files you must touch (primary)
+
+| File | Role |
+|------|------|
+| `src/game/core/textures.ts` | Atlas painters, `createTextures`, tint helpers |
+| `src/game/space/theme.ts` | `PlanetTheme` fields available at texture build |
+| `src/game/space/palettes.ts` | Per-type color ramps for space + surface grading |
+| `src/game/core/origin.ts` | origin tag → group colors / tints |
+| `src/game/space/flora.ts` | grass/flower shape flags (present, glow) |
+| `src/game/world/blocks.ts` | tile indices on defs, theme color apply |
+| `src/game/world/mesher.ts` | tall grass / cutout emission + UVs |
+| `src/game/engine.ts` | `createTextures(this.theme)` on init |
+| `src/game/world/generator.ts` | surface deco (flowers/tallgrass placement) |
+| `src/game/world/biomes.ts` | flower/grass densities |
+
+---
+
+## Relevant source (full context for editing)
+
+### `src/game/core/textures.ts` (FULL — this is the main file)
+
+```ts
+import * as THREE from 'three';
+import { mulberry32 } from './noise';
+import { PLANET_PALETTES } from '../space/palettes';
+import type { PlanetTheme } from '../space/theme';
+
+export const TILE = 16;
+export const TPR = 8;
+
+const TILE_NAMES = [
+  'grass_top', 'grass_side', 'dirt', 'stone', 'sand', 'gravel',
+  'log_side', 'log_top', 'leaves', 'planks', 'glass', 'snow',
+  'snow_side', 'bedrock', 'flower_red', 'flower_yellow', 'tallgrass',
+  'cactus_side', 'cactus_top', 'water',
+  'craft_top', 'craft_side', 'craft_bottom',
+  'furnace_front', 'furnace_front_lit', 'furnace_side', 'furnace_top',
+  'cobble',
+  'ore_ruby', 'ore_amber', 'ore_luminescence', 'ore_diamond',
+  'ore_gold', 'ore_silver', 'ore_jade', 'ore_emerald',
+  'coal_ore', 'coal', 'stick', 'torch',
+  'conveyor_top_n', 'conveyor_top_e', 'conveyor_top_s', 'conveyor_top_w',
+  'conveyor_side',
+  'inserter_top_n', 'inserter_top_e', 'inserter_top_s', 'inserter_top_w',
+  'inserter_side',
+] as const;
+
+export const TILES: Record<string, number> = {};
+TILE_NAMES.forEach((n, i) => (TILES[n] = i));
+
+export const ATLAS_COLS = TPR;
+export const ATLAS_ROWS = Math.ceil(TILE_NAMES.length / TPR);
+export const ATLAS_W = ATLAS_COLS * TILE;
+export const ATLAS_H = ATLAS_ROWS * TILE;
+
+type RGB = readonly [number, number, number];
+const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
+const rgb = (r: number, g: number, b: number): RGB => [clampByte(r), clampByte(g), clampByte(b)] as const;
+const map3 = (base: RGB, f: (c: number, i: number) => number): RGB =>
+  rgb(f(base[0], 0), f(base[1], 1), f(base[2], 2));
+
+function put(d: Uint8ClampedArray, w: number, x: number, y: number, c: RGB, a = 255): void {
+  const i = (y * w + x) * 4;
+  d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = a;
+}
+
+const vary = (base: RGB, amt: number, r: () => number): RGB => {
+  const v = Math.floor((r() * 2 - 1) * amt);
+  return map3(base, (c) => c + v);
+};
+
+function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RGB {
+  let i = 0;
+  for (let k = 0; k < stops.length - 1; k++) {
+    if (h > stops[k + 1][0]) i = k + 1;
+    else break;
+  }
+  const a = stops[i];
+  const b = stops[Math.min(i + 1, stops.length - 1)];
+  const span = b[0] - a[0];
+  const t = span === 0 ? 0 : Math.min(1, Math.max(0, (h - a[0]) / span));
+  return [
+    a[1][0] + (b[1][0] - a[1][0]) * t,
+    a[1][1] + (b[1][1] - a[1][1]) * t,

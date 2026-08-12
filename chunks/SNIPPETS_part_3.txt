@@ -1,0 +1,180 @@
+
+  const tiles = [
+    TILES.conveyor_top_n, TILES.conveyor_top_e,
+    TILES.conveyor_top_s, TILES.conveyor_top_w,
+  ];
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const t of tiles) {
+    const ox = (t % TPR) * TILE;
+    const oy = Math.floor(t / TPR) * TILE;
+    x0 = Math.min(x0, ox); y0 = Math.min(y0, oy);
+    x1 = Math.max(x1, ox + TILE); y1 = Math.max(y1, oy + TILE);
+  }
+  set.atlasCtx.putImageData(img, 0, 0, x0, y0, x1 - x0, y1 - y0);
+  set.atlas.needsUpdate = true;
+}
+
+// === CURRENT GENERIC PAINTERS (replace organic ones with planet-aware versions) ===
+const PAINTERS: Partial<Record<string, Painter>> = {
+  grass_top: (img, r) =>
+    tileRegion(img, TILES.grass_top, () => {
+      let s = 0.78 + r() * 0.34;
+      if (r() < 0.06) s *= 0.82;
+      return shadeMul(GRASS_BASE, s);
+    }),
+  grass_side: (img, r) => {
+    const edge: number[] = [];
+    for (let x = 0; x < TILE; x++) edge[x] = 2 + Math.floor(r() * 3);
+    tileRegion(img, TILES.grass_side, (x, y) => {
+      if (y < edge[x]) {
+        let s = 0.78 + r() * 0.34;
+        if (r() < 0.06) s *= 0.82;
+        return shadeMul(GRASS_BASE, s);
+      }
+      const c = vary([121, 85, 58], 20, r);
+      return r() < 0.08 ? vary([88, 62, 42], 10, r) : c;
+    });
+  },
+  dirt: paintDirt,
+  stone: (img, r) =>
+    tileRegion(img, TILES.stone, (x, y) => {
+      const vein = Math.sin(x * 0.7 + y * 0.45) > 0.75 && r() < 0.6;
+      return vein ? vary([104, 104, 108], 10, r) : vary([128, 128, 128], 12, r);
+    }),
+  sand: (img, r) =>
+    tileRegion(img, TILES.sand, () =>
+      r() < 0.1 ? vary([199, 184, 133], 8, r) : vary([219, 207, 163], 12, r)
+    ),
+  gravel: (img, r) => {
+    const pebbles: RGB[] = [
+      [128, 126, 123],
+      [142, 135, 128],
+      [104, 101, 98],
+      [162, 151, 136],
+    ];
+    return tileRegion(img, TILES.gravel, () => {
+      const p = pebbles[Math.floor(r() * pebbles.length)];
+      return vary(p, 10, r);
+    });
+  },
+  log_side: (img, r) => {
+    const cols: RGB[] = [];
+    for (let x = 0; x < TILE; x++) {
+      const dark = x % 4 === 0 || r() < 0.18;
+      cols[x] = dark ? [86, 60, 34] : [104, 76, 44];
+    }
+    return tileRegion(img, TILES.log_side, (x, y) =>
+      vary(cols[x], 10 + ((y + x) % 3) * 2, r)
+    );
+  },
+  log_top: (img, r) =>
+    tileRegion(img, TILES.log_top, (x, y) => {
+      const dx = x - 7.5;
+      const dy = y - 7.5;
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (d > 6.5) return vary([86, 60, 34], 10, r);
+      const ring = Math.floor(d + r() * 0.6) % 2 === 0;
+      return ring ? vary([176, 138, 90], 8, r) : vary([150, 114, 70], 8, r);
+    }),
+  leaves: (img, r) =>
+    tileRegion(img, TILES.leaves, () => {
+      if (r() < 0.14) return null;
+      return r() < 0.4 ? vary([38, 96, 34], 14, r) : vary([52, 124, 44], 18, r);
+    }),
+  planks: (img, r) =>
+    tileRegion(img, TILES.planks, (x, y) => {
+      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
+      const joint = (Math.floor(y / 4) % 2 === 0 ? x === 11 : x === 4);
+      if (joint) return vary([96, 70, 40], 8, r);
+      return vary([164, 129, 76], 10, r);
+    }),
+  glass: (img) =>
+    tileRegion(img, TILES.glass, (x, y) => {
+      const border = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (border) return [206, 232, 245];
+      if (x === y + 6 || x === y + 7 || (x < 6 && x === y - 3)) return [224, 244, 252];
+      return null;
+    }),
+  snow: (img, r) =>
+    tileRegion(img, TILES.snow, () =>
+      r() < 0.12 ? vary([214, 232, 238], 6, r) : vary([238, 246, 248], 7, r)
+    ),
+  snow_side: (img, r) => {
+    const edge: number[] = [];
+    for (let x = 0; x < TILE; x++) edge[x] = 3 + Math.floor(r() * 2);
+    return tileRegion(img, TILES.snow_side, (x, y) => {
+      if (y < edge[x]) return vary([238, 246, 248], 7, r);
+      return vary([121, 85, 58], 18, r);
+    });
+  },
+  bedrock: (img, r) =>
+    tileRegion(img, TILES.bedrock, () => {
+      const v = r();
+      return v < 0.4 ? vary([56, 56, 56], 10, r) : v < 0.75 ? vary([88, 88, 88], 10, r) : vary([30, 30, 30], 8, r);
+    }),
+  flower_red: (img, r) =>
+    tileRegion(img, TILES.flower_red, (x, y) => {
+      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r);
+      if (y === 8 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r);
+      const px = x - 7.5;
+      const py = y - 3.5;
+      const petal = Math.abs(px) <= 1.6 && Math.abs(py) <= 1.6 && !(Math.abs(px) === 1.5 && Math.abs(py) === 1.5);
+      if (petal && y < 6) return vary([205, 47, 42], 18, r);
+      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [255, 214, 92];
+      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
+    }),
+  flower_yellow: (img, r) =>
+    tileRegion(img, TILES.flower_yellow, (x, y) => {
+      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r);
+      if (y === 9 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r);
+      const px = x - 7.5;
+      const py = y - 3.5;
+      const petal = Math.abs(px) <= 1.6 && Math.abs(py) <= 1.6 && !(Math.abs(px) === 1.5 && Math.abs(py) === 1.5);
+      if (petal && y < 6) return vary([228, 198, 66], 16, r);
+      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [180, 120, 40];
+      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
+    }),
+  tallgrass: (img, r) => {
+    const blades: { x: number; h: number; lean: number }[] = [];
+    for (let i = 0; i < 7; i++) {
+      blades.push({
+        x: 1 + Math.floor(r() * 14),
+        h: 6 + Math.floor(r() * 9),
+        lean: r() < 0.5 ? -1 : 1,
+      });
+    }
+    return tileRegion(img, TILES.tallgrass, (x, y) => {
+      for (const b of blades) {
+        const by = TILE - 1 - y;
+        if (by < b.h) {
+          const bx = b.x + Math.floor((by / b.h) * 2) * b.lean;
+          if (x === bx) return shadeMul(GRASS_BASE, 0.86 + r() * 0.24);
+        }
+      }
+      return null;
+    });
+  },
+  cactus_side: (img, r) =>
+    tileRegion(img, TILES.cactus_side, (x) => {
+      const rib = x % 4 === 1;
+      const c = rib ? vary([42, 106, 40], 8, r) : vary([62, 138, 56], 10, r);
+      return r() < 0.04 ? [226, 236, 214] : c;
+    }),
+  cactus_top: (img, r) =>
+    tileRegion(img, TILES.cactus_top, (x, y) => {
+      const border = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (border) return vary([42, 106, 40], 8, r);
+      if (x === 7 || x === 8 || y === 7 || y === 8) return vary([52, 122, 48], 8, r);
+      return vary([62, 138, 56], 9, r);
+    }),
+  water: (img, r) =>
+    tileRegion(img, TILES.water, (x, y) => {
+      const wave = (x + y * 3) % 7 === 0;
+      return wave ? vary([92, 138, 244], 8, r) : vary([58, 102, 222], 10, r);
+    }),
+
+  craft_top: (img, r) =>
+    tileRegion(img, TILES.craft_top, (x, y) => {
+      const seam = x === 7 || x === 8 || y === 7 || y === 8;
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([96, 70, 40], 8, r);

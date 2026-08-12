@@ -1,0 +1,180 @@
+    void r;
+    return tileRegion(img, TILES.torch, (x, y) => {
+      const cx = x >= 6 && x <= 9;
+      if (cx && y >= 6) {
+        if (y === 6) return [120, 88, 50];
+        return (x === 6) ? [96, 68, 38] : (x === 9 ? [80, 56, 32] : [138, 100, 58]);
+      }
+      if (x >= 6 && x <= 9 && y >= 4 && y <= 5) return [40, 30, 24];
+      const fx = x - 7.5, fy = y - 2;
+      const df = Math.sqrt(fx * fx + fy * fy * 0.6);
+      if (y <= 5) {
+        if (df < 1.3) return [255, 246, 200];
+        if (df < 2.4) return [255, 200, 70];
+        if (df < 3.4) return [240, 130, 30];
+      }
+      return null;
+    });
+  },
+
+  conveyor_top_n: (img) => paintBeltTop(img, TILES.conveyor_top_n, 0, 0),
+  conveyor_top_e: (img) => paintBeltTop(img, TILES.conveyor_top_e, 1, 0),
+  conveyor_top_s: (img) => paintBeltTop(img, TILES.conveyor_top_s, 2, 0),
+  conveyor_top_w: (img) => paintBeltTop(img, TILES.conveyor_top_w, 3, 0),
+  conveyor_side: (img, r) =>
+    tileRegion(img, TILES.conveyor_side, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([42, 42, 48], 5, r);
+      if (y >= 5 && y <= 10 && (x <= 4 || x >= 11)) {
+        const cx = x <= 4 ? 2.5 : 13.5;
+        const dx = x - cx, dy = y - 7.5;
+        if (dx * dx + dy * dy < 5) return vary([100, 100, 106], 8, r);
+      }
+      if (y >= 3 && y <= 5) return vary([58, 58, 64], 6, r);
+      return vary([66, 66, 72], 8, r);
+    }),
+
+  inserter_top_n: (img, r) => paintInserterTop(img, TILES.inserter_top_n, 0, r),
+  inserter_top_e: (img, r) => paintInserterTop(img, TILES.inserter_top_e, 1, r),
+  inserter_top_s: (img, r) => paintInserterTop(img, TILES.inserter_top_s, 2, r),
+  inserter_top_w: (img, r) => paintInserterTop(img, TILES.inserter_top_w, 3, r),
+  inserter_side: (img, r) =>
+    tileRegion(img, TILES.inserter_side, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([40, 40, 46], 5, r);
+      if (x >= 5 && x <= 10 && y >= 2) {
+        if (x === 5 || x === 10) return vary([100, 100, 108], 8, r);
+        if (y === 8 || y === 9) return vary([226, 146, 34], 10, r);
+        return vary([62, 62, 70], 8, r);
+      }
+      if (y >= 12 && y <= 14 && x % 3 !== 0) return vary([30, 30, 34], 4, r);
+      return vary([56, 56, 62], 8, r);
+    }),
+};
+
+export interface TextureSet {
+  atlas: THREE.CanvasTexture;
+  water: THREE.CanvasTexture;
+  cracks: THREE.CanvasTexture[];
+  atlasCanvas: HTMLCanvasElement;
+  atlasImg: ImageData;
+  atlasCtx: CanvasRenderingContext2D;
+}
+
+export function tileUV(tile: number): [number, number, number, number] {
+  const col = tile % ATLAS_COLS;
+  const row = Math.floor(tile / ATLAS_COLS);
+  const e = 0.02;
+  const u0 = (col * TILE + e) / ATLAS_W;
+  const u1 = ((col + 1) * TILE - e) / ATLAS_W;
+  const vTop = 1 - (row * TILE + e) / ATLAS_H;
+  const vBottom = 1 - ((row + 1) * TILE - e) / ATLAS_H;
+  return [u0, vBottom, u1, vTop];
+}
+
+export function makeBucketIcon(size = 44): string {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  const off = document.createElement('canvas');
+  off.width = TILE;
+  off.height = TILE;
+  const octx = off.getContext('2d')!;
+  const px = (x: number, y: number, col: string) => {
+    octx.fillStyle = col;
+    octx.fillRect(x, y, 1, 1);
+  };
+  const row = (x0: number, x1: number, y: number, col: string) => {
+    octx.fillStyle = col;
+    octx.fillRect(x0, y, x1 - x0 + 1, 1);
+  };
+  const SILVER = '#c8ced6';
+  const STEEL = '#8d969e';
+  const DARK = '#5c646c';
+  px(4, 3, STEEL); px(5, 2, STEEL); px(6, 1, STEEL); px(7, 1, STEEL);
+  px(8, 1, STEEL); px(9, 1, STEEL); px(10, 2, STEEL); px(11, 3, STEEL);
+  row(4, 11, 4, SILVER);
+  for (let y = 5; y <= 12; y++) {
+    px(4, y, STEEL);
+    px(11, y, DARK);
+    for (let x = 5; x <= 10; x++) {
+      if (y === 5) px(x, y, x === 6 || x === 9 ? '#6f93f2' : '#4a74e8');
+      else if (y <= 9) px(x, y, '#4266d8');
+      else if (y <= 12) px(x, y, '#3554b8');
+    }
+  }
+  row(5, 10, 13, DARK);
+  row(5, 10, 12, STEEL);
+  for (let y = 6; y <= 11; y++) px(5, y, '#4f71db');
+  ctx.drawImage(off, 0, 0, TILE, TILE, 0, 0, size, size);
+  return c.toDataURL();
+}
+
+export function makeIcon(atlasCanvas: HTMLCanvasElement, tile: number, size = 44): string {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  const sx = (tile % TPR) * TILE;
+  const sy = Math.floor(tile / TPR) * TILE;
+  ctx.drawImage(atlasCanvas, sx, sy, TILE, TILE, 0, 0, size, size);
+  return c.toDataURL();
+}
+
+function configure(tex: THREE.CanvasTexture, nearest = true): THREE.CanvasTexture {
+  if (nearest) {
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+  }
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeCrackTexture(stage: number): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = TILE;
+  c.height = TILE;
+  const ctx = c.getContext('2d')!;
+  const r = mulberry32(9001 + stage * 137);
+  ctx.clearRect(0, 0, TILE, TILE);
+  ctx.fillStyle = 'rgba(24, 20, 16, 0.92)';
+  const walkers = 2 + stage * 2;
+  for (let w = 0; w < walkers; w++) {
+    let x = 2 + Math.floor(r() * 12);
+    let y = 2 + Math.floor(r() * 12);
+    const steps = 6 + stage * 4 + Math.floor(r() * 6);
+    for (let s = 0; s < steps; s++) {
+      ctx.fillRect(x, y, 1, 1);
+      if (r() < 0.5) x += r() < 0.5 ? -1 : 1;
+      else y += r() < 0.5 ? -1 : 1;
+      x = Math.max(0, Math.min(TILE - 1, x));
+      y = Math.max(0, Math.min(TILE - 1, y));
+    }
+  }
+  return configure(new THREE.CanvasTexture(c));
+}
+
+export function createTextures(theme?: PlanetTheme | null): TextureSet {
+  const tints = tintsFromTheme(theme);
+  const canvas = document.createElement('canvas');
+  canvas.width = ATLAS_W;
+  canvas.height = ATLAS_H;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(ATLAS_W, ATLAS_H);
+
+  TILE_NAMES.forEach((name, i) => {
+    const painter = PAINTERS[name];
+    if (painter) painter(img, mulberry32(1337 + i * 7919)); // <-- seed is NOT planet-based today
+    if (tints) {
+      const g = TILE_GROUP[name];
+      if (g && tints[g]) tintTile(img, TILES[name], tints[g]);
+    }
+  });
+  ctx.putImageData(img, 0, 0);
+
+  const wc = document.createElement('canvas');
+  wc.width = TILE;

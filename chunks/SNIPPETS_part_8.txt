@@ -1,0 +1,175 @@
+    if (!d) continue;
+    const base = BASE_COLORS[id];
+    const m = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
+    d.colors = tintColors(base, m);
+  }
+}
+```
+
+---
+
+### `src/game/world/mesher.ts` (tall grass emission — blank if tile empty)
+
+```ts
+// In buildChunkGeometry:
+const grassShape = activeFlora().grass;
+const flowerShape = activeFlora().flower;
+
+if (d.cross) {
+  const plantTag = tagAt(x, y, z);
+  const plantMul = relativeColorMul(plantTag, nativeTag, BLOCK_GROUP[id]);
+  if (id === B.TALLGRASS) {
+    if (grassShape.present) emitTallGrass(cutoutB, x, y, z, d.side, baseX + x, baseZ + z, plantMul);
+  } else if (id === B.FLOWER_RED || id === B.FLOWER_YELLOW) {
+    if (flowerShape.present) emitCross(cutoutB, x, y, z, d.side, 0.018, baseX + x, baseZ + z, plantMul);
+  } else {
+    emitCross(cutoutB, x, y, z, d.side, 0.028, baseX + x, baseZ + z, plantMul);
+  }
+  continue;
+}
+
+// Opaque faces use:
+// const tile = f.dir[1] === 1 ? d.top : f.dir[1] === -1 ? d.bottom : d.side;
+// const [u0, v0, u1, v1] = tileUV(tile);
+
+function emitTallGrass(
+  bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number,
+  mul: [number, number, number] = [1, 1, 1],
+): void {
+  const [u0, v0, u1, v1] = tileUV(tile);
+  const seed = hashPlant(wx, y, wz, 101);
+  const blades = 5 + Math.floor(seed * 3);
+  for (let i = 0; i < blades; i++) {
+    // ... builds thin quads sampling FULL tile UV (u0..u1, v0..v1)
+    // normals encode grass: bucket.nrm.push(cx, cz, ang + 100.0);
+    bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
+    // vertex colors multiply texture — keep mul near 1,1,1 for native grass
+  }
+}
+```
+
+**Important:** tallgrass quads sample the **entire** 16×16 tile UV. If the painter only draws a few 1px blades, most of the quad is transparent (OK with alphaTest), but if the painter draws nothing → **blank grass**. Prefer denser blade pixels and/or a faint filled silhouette so alphaTest retains visible fragments. Optionally improve mesher later to use tighter UVs; texture fix is the first line of defense.
+
+---
+
+### `src/game/engine.ts` (texture creation + cutout material)
+
+```ts
+async init(theme?: PlanetTheme | null): Promise<void> {
+  if (theme !== undefined) this.theme = theme;
+  setActivePlanetTheme(this.theme);
+  this.textures = createTextures(this.theme);
+  applyThemeToBlockColors(this.theme);
+
+  const mats = {
+    opaque: new THREE.MeshLambertMaterial({ map: this.textures.atlas, vertexColors: true }),
+    cutout: new THREE.MeshLambertMaterial({
+      map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
+    }),
+    foliage: new THREE.MeshLambertMaterial({
+      map: this.textures.atlas, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide,
+    }),
+    water: new THREE.MeshLambertMaterial({
+      map: this.textures.water, vertexColors: true, transparent: false, opacity: 1.0,
+      side: THREE.DoubleSide,
+    }),
+  };
+  // cutout shader forces world-up normals; grass blades get wrap lighting floor
+}
+```
+
+---
+
+### `src/game/world/generator.ts` (surface decoration)
+
+```ts
+if (!underwater) {
+  const r = this.decoHash(0xdec0, px, pz);
+  const onGrass = surface === B.GRASS && h > this.sea + 1;
+  if (onGrass && r < bDef.flowers) {
+    const flower = this.decoHash(0xf10, px, pz) < 0.5 ? B.FLOWER_RED : B.FLOWER_YELLOW;
+    data[chunkIndex(lx, h + 1, lz)] = flower;
+  } else if (onGrass && r < bDef.flowers + bDef.grass) {
+    data[chunkIndex(lx, h + 1, lz)] = B.TALLGRASS;
+  }
+}
+```
+
+### `src/game/world/biomes.ts`
+
+```ts
+export const BIOME_DEFS: BiomeDef[] = [
+  { name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
+    trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0 },
+  { name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
+    trees: 0.05, tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0 },
+  // Desert: no grass. Mountains: grass 0.32. Snow: grass 0.02.
+];
+```
+
+For reference meadow look on terran/plains: consider raising `flowers` (e.g. 0.12–0.35) and keeping grass high; recolor `flower_red` painter toward lavender procedurally for lush types.
+
+### `src/game/core/noise.ts`
+
+```ts
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+```
+
+### Space planet body (visual only — separate from surface atlas)
+
+`src/game/space/planet.ts` builds LOD voxel shells colored by `biomeColorInto(h, lat, pal, ...)` from the same palettes. Surface block atlas is independent but should **feel consistent** with the orb’s climate colors.
+
+---
+
+## Suggested implementation plan (for the larger model)
+
+1. **Add `PlanetPaintContext`** in `textures.ts`:
+   - `type`, `seedU32`, `originTag`, hex→RGB for grass/dirt/stone/sand/log/leaf/water from `theme.colors` or `groupTargetRgb` + hueBucket nudge.
+   - motif style enum derived from type: `lush | dry | frozen | ash | alien | fungal | crimson | ...`.
+
+2. **Change painter signature** to `(img, r, ctx) => void` OR close over `ctx` when building a `PAINTERS` map inside `createTextures(theme)`.
+
+3. **Rewrite organic painters** with Minecraft pixel-art techniques using `ctx` palettes:
+   - `grass_top`, `grass_side`, `dirt`, `stone`, `sand`, `leaves`, `log_side`, `log_top`, `tallgrass`, `flower_red`, `flower_yellow`, `snow*`, `cactus*`, `water`, `planks` (wood matches log).
+   - Keep machines/ores mostly as-is (optional subtle stone base match).
+
+4. **Seed RNG** from planet:
+   ```ts
+   const seedU32 = Number(theme.seed & 0xffffffffn) ^ (theme.originTag << 16);
+   painter(img, mulberry32(seedU32 ^ (i * 7919) ^ 0x9e3779b9));
+   ```
+
+5. **Reduce or remove post-paint `tintTile`** for tiles you fully paint with planet colors (double-tint washes detail). If kept, use strength ≪ 0.85 or only for foreign-block vertex path.
+
+6. **Blank grass fixes**:
+   - Assert tallgrass painter always plots ≥ N opaque pixels when `theme.grass.present !== false`.
+   - Grass top always fully opaque.
+   - Flower painters always have stem + petals with a>0.
+   - Optionally densify `emitTallGrass` blade count using `activeFlora().grass.blades`.
+
+7. **Reference meadow pass (terran/jungle/plains)**:
+   - Grass: rich multi tuft texture (not flat).
+   - `flower_red` → pink/lilac petals (`~[220,140,200]` / `[190,110,210]`) for lush types; keep true red on crimson.
+   - `flower_yellow` stays warm yellow accent.
+   - Optionally bump plains `flowers` density in `biomes.ts` so carpets match the screenshot.
+
+---
+
+## Acceptance criteria
+
+- [ ] Two different planet types produce **visually distinct** grass/dirt/leaf/log atlas tiles even in grayscale (pattern differs, not only hue).
+- [ ] Textures read as **16×16 pixel art** (crisp, limited palette, intentional detail).
+- [ ] No blank grass tops; tall grass visible on planets with `grass.present`.
+- [ ] Lush terran/plains can resemble the reference: textured grass + flower field + detailed trees.
+- [ ] Deterministic for a given `theme.seed` + `theme.type`.
+- [ ] No regression on machines, ores, water animation path, or mesher UV indexing.
+
+---

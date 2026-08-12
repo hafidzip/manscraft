@@ -1,0 +1,180 @@
+    a[1][2] + (b[1][2] - a[1][2]) * t,
+  ] as const;
+}
+
+const TINT_REF: Record<string, RGB> = {
+  grass: [96, 162, 54],
+  dirt: [121, 85, 58],
+  stone: [128, 128, 128],
+  sand: [219, 207, 163],
+  leaves: [56, 120, 40],
+  log: [104, 76, 44],
+  planks: [164, 129, 80],
+  snow: [238, 246, 248],
+  water: [58, 102, 222],
+  cactus: [62, 138, 56],
+};
+
+const TILE_GROUP: Record<string, string> = {
+  grass_top: 'grass', grass_side: 'grass', tallgrass: 'grass',
+  dirt: 'dirt', snow_side: 'snow',
+  stone: 'stone', gravel: 'stone', bedrock: 'stone', cobble: 'stone',
+  furnace_top: 'stone', furnace_side: 'stone', furnace_front: 'stone',
+  sand: 'sand', leaves: 'leaves',
+  log_side: 'log', log_top: 'log', planks: 'planks',
+  craft_top: 'planks', craft_side: 'planks', craft_bottom: 'planks',
+  snow: 'snow', water: 'water', cactus_side: 'cactus', cactus_top: 'cactus',
+};
+
+export type TintMap = Record<string, RGB>;
+
+const TINT_STRENGTH = 0.85;
+const clampMul = (v: number) => Math.max(0.22, Math.min(2.4, v));
+
+const GROUP_H: Record<string, number> = {
+  grass: 0.14, leaves: 0.22, dirt: 0.08, sand: 0.04, stone: 0.5,
+  log: 0.3, planks: 0.36, water: -0.2, cactus: 0.18,
+};
+function targetFor(group: string, theme: PlanetTheme): RGB {
+  const pal = PLANET_PALETTES[theme.type];
+  if (group === 'snow') return pal.pole as unknown as RGB;
+  return rampAt(pal.stops, GROUP_H[group] ?? 0.12);
+}
+
+export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
+  if (!theme || !PLANET_PALETTES[theme.type]) return null;
+  const out: TintMap = {};
+  for (const g of Object.keys(TINT_REF)) {
+    const ref = TINT_REF[g];
+    const tgt = targetFor(g, theme);
+    const m: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      // NOTE: tgt from rampAt is 0..1 floats for stops — multiplied as if 0..255 in places historically.
+      const raw = clampMul((tgt[k] * 255) / Math.max(1, ref[k]));
+      m[k] = 1 + (raw - 1) * TINT_STRENGTH;
+    }
+    if (theme.lava && (g === 'stone' || g === 'dirt')) {
+      m[0] *= 1.18; m[1] *= 0.9; m[2] *= 0.78;
+    }
+    out[g] = [m[0], m[1], m[2]] as const;
+  }
+  return out;
+}
+
+function tintTile(img: ImageData, tile: number, m: RGB): void {
+  if (m[0] === 1 && m[1] === 1 && m[2] === 1) return;
+  const ox = (tile % TPR) * TILE;
+  const oy = Math.floor(tile / TPR) * TILE;
+  const d = img.data;
+  for (let y = 0; y < TILE; y++) {
+    for (let x = 0; x < TILE; x++) {
+      const i = ((oy + y) * img.width + ox + x) * 4;
+      if (d[i + 3] === 0) continue;
+      d[i] = clampByte(d[i] * m[0]);
+      d[i + 1] = clampByte(d[i + 1] * m[1]);
+      d[i + 2] = clampByte(d[i + 2] * m[2]);
+    }
+  }
+}
+
+function tileRegion(
+  img: ImageData,
+  tile: number,
+  fn: (x: number, y: number) => RGB | null
+): void {
+  const ox = (tile % TPR) * TILE;
+  const oy = Math.floor(tile / TPR) * TILE;
+  for (let y = 0; y < TILE; y++) {
+    for (let x = 0; x < TILE; x++) {
+      const c = fn(x, y);
+      if (c) put(img.data, img.width, ox + x, oy + y, c);
+    }
+  }
+}
+
+type Painter = (img: ImageData, r: () => number) => void;
+
+const GRASS_BASE: RGB = [96, 162, 54];
+
+const shadeMul = (base: RGB, f: number): RGB => map3(base, (c) => Math.floor(c * f));
+
+const paintDirt: Painter = (img, r) =>
+  tileRegion(img, TILES.dirt, () => (r() < 0.08 ? vary([88, 62, 42], 10, r) : vary([121, 85, 58], 20, r)));
+
+function pixelHash(x: number, y: number, salt: number): number {
+  let h = Math.imul(x + 0x9e37, 0x85ebca6b) ^ Math.imul(y + 0x1b87, 0xc2b2ae35) ^ salt;
+  h = Math.imul(h ^ (h >>> 13), 0x27d4eb2f);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+const varyH = (base: RGB, amt: number, h: number): RGB => {
+  const v = Math.floor((h * 2 - 1) * amt);
+  return map3(base, (c) => c + v);
+};
+
+function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number): void {
+  const N = TILE;
+  tileRegion(img, tile, (px, py) => {
+    let x = px, y = py;
+    if (rot === 1) { x = py; y = N - 1 - px; }
+    else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
+    else if (rot === 3) { x = N - 1 - py; y = px; }
+
+    if (y === 0 || y === N - 1) return varyH([44, 44, 50], 5, pixelHash(x, y, 11));
+    if (y === 1 || y === N - 2) return varyH([88, 88, 96], 7, pixelHash(x, y, 12));
+
+    const wx = ((x - phase) % N + N) % N;
+
+    if (wx % 4 === 0) return varyH([50, 50, 56], 6, pixelHash(wx, y, 13));
+    const cw = wx % 8;
+    const dx = cw - 5;
+    if (dx >= -2 && dx <= 0) {
+      const spread = -dx;
+      const off = Math.abs(y - 7.5);
+      if (off >= spread - 0.5 && off <= spread + 1.5)
+        return varyH([226, 146, 34], 12, pixelHash(wx, y, 14));
+    }
+    return varyH([74, 74, 80], 9, pixelHash(wx, y, 15));
+  });
+}
+
+function paintInserterTop(img: ImageData, tile: number, rot: number, r: () => number): void {
+  const N = TILE;
+  tileRegion(img, tile, (px, py) => {
+    let x = px, y = py;
+    if (rot === 1) { x = py; y = N - 1 - px; }
+    else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
+    else if (rot === 3) { x = N - 1 - py; y = px; }
+
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42], 5, r);
+    if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68], 7, r);
+
+    const dx = x - 7.5;
+    const dz = y - 7.5;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d < 2.2) return vary([28, 28, 32], 4, r);
+    if (d < 3.4) return vary([98, 98, 106], 8, r);
+
+    if (x >= 10 && x <= 13 && Math.abs(y - 7.5) <= (x - 10) + 1 && Math.abs(y - 7.5) > (x - 10) - 1)
+      return vary([226, 146, 34], 10, r);
+
+    if ((x === 3 || x === 12) && Math.abs(y - 7.5) > 4 && (y === 3 + (Math.abs(x - 7.5) > 3 ? 1 : 0) || y === 12 - (Math.abs(x - 7.5) > 3 ? 1 : 0)))
+      return vary([110, 110, 118], 8, r);
+
+    return vary([72, 72, 80], 9, r);
+  });
+}
+
+const BELT_ANIM_PX_PER_SEC = 20;
+let beltPhase = -1;
+
+export function animateConveyorTiles(set: TextureSet, time: number): void {
+  const phase = Math.floor(time * BELT_ANIM_PX_PER_SEC) % TILE;
+  if (phase === beltPhase) return;
+  beltPhase = phase;
+
+  const img = set.atlasImg;
+  paintBeltTop(img, TILES.conveyor_top_n, 0, phase);
+  paintBeltTop(img, TILES.conveyor_top_e, 1, phase);
+  paintBeltTop(img, TILES.conveyor_top_s, 2, phase);
+  paintBeltTop(img, TILES.conveyor_top_w, 3, phase);

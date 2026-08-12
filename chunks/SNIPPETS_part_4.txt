@@ -1,0 +1,180 @@
+      if (seam) return vary([70, 50, 28], 6, r);
+      return vary([164, 129, 76], 10, r);
+    }),
+  craft_side: (img, r) => {
+    const base: RGB[] = [];
+    for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] : [164, 129, 76];
+    return tileRegion(img, TILES.craft_side, (x, y) => {
+      if (y < 2) return vary([120, 92, 54], 8, r);
+      if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {
+        if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28], 6, r);
+        return vary([132, 102, 60], 8, r);
+      }
+      return vary(base[x], 10, r);
+    });
+  },
+  craft_bottom: (img, r) =>
+    tileRegion(img, TILES.craft_bottom, (_x, y) => {
+      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
+      return vary([150, 118, 70], 10, r);
+    }),
+
+  cobble: (img, r) =>
+    tileRegion(img, TILES.cobble, (x, y) => {
+      const cell = ((x + (Math.floor(y / 5) % 2) * 3) / 5) | 0;
+      const row = (y / 5) | 0;
+      const edge = x % 5 === 4 || y % 5 === 4;
+      if (edge) return vary([74, 74, 78], 8, r);
+      const tone = (cell + row) % 3;
+      const base: RGB = tone === 0 ? [140, 140, 144] : tone === 1 ? [118, 118, 122] : [100, 100, 104];
+      return vary(base, 12, r);
+    }),
+
+  furnace_top: (img, r) =>
+    tileRegion(img, TILES.furnace_top, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66], 8, r);
+      return vary([124, 124, 128], 12, r);
+    }),
+  furnace_side: (img, r) =>
+    tileRegion(img, TILES.furnace_side, () =>
+      Math.random() < 0.001 ? vary([100, 100, 104], 8, r) : vary([120, 120, 124], 14, r)
+    ),
+  furnace_front: (img, r) =>
+    tileRegion(img, TILES.furnace_front, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
+        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);
+        if (y === 12) return vary([70, 70, 74], 6, r);
+      }
+      return vary([124, 124, 128], 12, r);
+    }),
+  furnace_front_lit: (img, r) =>
+    tileRegion(img, TILES.furnace_front_lit, (x, y) => {
+      const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
+      if (rim) return vary([88, 88, 92], 8, r);
+      if (x >= 3 && x <= 12) {
+        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
+        if (y >= 7 && y <= 11) {
+          const h = 11 - y;
+          const flame = (x * 7 + h * 3) % 5;
+          if (h >= 3) return flame < 2 ? vary([255, 214, 92], 18, r) : vary([28, 24, 22], 5, r);
+          if (h === 2) return flame < 3 ? vary([255, 160, 40], 20, r) : vary([120, 40, 16], 12, r);
+          return vary([228, 88, 24], 22, r);
+        }
+        if (y === 12) return vary([70, 70, 74], 6, r);
+      }
+      return vary([124, 124, 128], 12, r);
+    }),
+
+  ore_ruby: (img, r) =>
+    tileRegion(img, TILES.ore_ruby, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const crystal = (x * 3 + y * 7) % 11 < 3 && r() < 0.5;
+      if (crystal) {
+        const bright = r() < 0.3;
+        return bright ? vary([255, 80, 90], 15, r) : vary([180, 30, 40], 12, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_amber: (img, r) =>
+    tileRegion(img, TILES.ore_amber, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const crystal = (x * 5 + y * 3) % 9 < 3 && r() < 0.45;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([255, 200, 60], 18, r) : vary([200, 140, 30], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_luminescence: (img, r) =>
+    tileRegion(img, TILES.ore_luminescence, (x, y) => {
+      if (r() < 0.08) return vary([52, 52, 58], 8, r);
+      const crystal = (x * 7 + y * 5) % 10 < 3 && r() < 0.5;
+      if (crystal) {
+        const bright = r() < 0.4;
+        return bright ? vary([140, 255, 220], 20, r) : vary([60, 180, 150], 16, r);
+      }
+      return vary([108, 108, 114], 14, r);
+    }),
+  ore_diamond: (img, r) =>
+    tileRegion(img, TILES.ore_diamond, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const crystal = (x * 4 + y * 6) % 10 < 3 && r() < 0.4;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([180, 240, 255], 18, r) : vary([80, 180, 220], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_gold: (img, r) =>
+    tileRegion(img, TILES.ore_gold, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const fleck = (x * 6 + y * 4) % 8 < 2 && r() < 0.5;
+      if (fleck) {
+        const bright = r() < 0.4;
+        return bright ? vary([255, 220, 80], 20, r) : vary([200, 160, 40], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_silver: (img, r) =>
+    tileRegion(img, TILES.ore_silver, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const fleck = (x * 5 + y * 7) % 9 < 2 && r() < 0.5;
+      if (fleck) {
+        const bright = r() < 0.4;
+        return bright ? vary([230, 235, 240], 15, r) : vary([170, 175, 180], 12, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_jade: (img, r) =>
+    tileRegion(img, TILES.ore_jade, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const crystal = (x * 4 + y * 5) % 9 < 3 && r() < 0.45;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([140, 220, 160], 16, r) : vary([70, 150, 90], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+  ore_emerald: (img, r) =>
+    tileRegion(img, TILES.ore_emerald, (x, y) => {
+      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      const crystal = (x * 6 + y * 4) % 10 < 3 && r() < 0.4;
+      if (crystal) {
+        const bright = r() < 0.35;
+        return bright ? vary([80, 255, 120], 18, r) : vary([30, 160, 80], 14, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+
+  coal_ore: (img, r) =>
+    tileRegion(img, TILES.coal_ore, (x, y) => {
+      const chunk = (x * 5 + y * 3) % 9 < 3 && r() < 0.55;
+      if (chunk) {
+        const bright = r() < 0.25;
+        return bright ? vary([64, 64, 68], 10, r) : vary([26, 26, 30], 8, r);
+      }
+      return vary([118, 118, 124], 14, r);
+    }),
+
+  coal: (img, r) =>
+    tileRegion(img, TILES.coal, (x, y) => {
+      const dx = x - 8, dy = y - 8;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 6.2) return null;
+      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r);
+      return vary([28, 28, 32], 10, r);
+    }),
+
+  stick: (img, r) =>
+    tileRegion(img, TILES.stick, (x, y) => {
+      if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58], 14, r);
+      if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38], 10, r);
+      return null;
+    }),
+
+  torch: (img, r) => {
