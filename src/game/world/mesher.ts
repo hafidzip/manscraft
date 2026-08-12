@@ -33,7 +33,27 @@ const FACES: Face[] = [
   { dir: [0, 0, -1], shade: 0.70, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
 ];
 
-const AO_SHADE = [0.68, 0.80, 0.91, 1.0];
+/**
+ * Minecraft smooth-lighting per-vertex AO.
+ *
+ * Each vertex averages the AO light values of the 4 voxels around it:
+ * the face-adjacent cell (always open — the face is only emitted when
+ * visible) plus the two orthogonal side voxels and the diagonal corner.
+ *
+ * Matches Block.getAmbientOcclusionLightValue():
+ *   opaque full-cube → 0.2, air / transparent → 1.0
+ *
+ * If both side voxels are solid the corner is ignored so light cannot
+ * leak through cracks (the classic Minecraft both-sides rule).
+ *
+ * Result is a multiplier in {0.4, 0.6, 0.8, 1.0}.
+ */
+function minecraftVertexAO(side1: boolean, side2: boolean, corner: boolean): number {
+  const s1 = side1 ? 0.2 : 1.0;
+  const s2 = side2 ? 0.2 : 1.0;
+  const cr = side1 && side2 ? s1 : corner ? 0.2 : 1.0;
+  return (1.0 + s1 + s2 + cr) * 0.25;
+}
 
 
 const PW    = S + 2;
@@ -53,7 +73,8 @@ for (let id = 0; id < 256; id++) {
   SKIP_ID[id]  = (isInserter(id) || isLaserMiner(id) || isTurret(id)) ? 1 : 0;
   const fullOpaque = !!d.solid && !d.cross && !d.cutout && !d.water;
   IS_CUBE[id]  = fullOpaque ? 1 : 0;
-  OCCLUDES[id] = (d.opaque || isLeaves(id)) ? 1 : 0;
+  // Minecraft isOpaqueFullCube: only truly opaque cubes cast AO.
+  OCCLUDES[id] = d.opaque ? 1 : 0;
 }
 OCCLUDES[UNKNOWN] = 1;
 
@@ -350,7 +371,9 @@ export function buildChunkGeometry(
           const us = isWater ? [0, 0, 1, 1] : [u0, u0, u1, u1];
           const vs = isWater ? [1, 0, 0, 1] : [v1, v0, v0, v1];
 
-          const doAO = !isWater && !d.cutout && !isFoliage;
+          // Water and cross-plants use their own lighting; cubes, glass and
+          // leaves all receive Minecraft per-vertex AO.
+          const doAO = !isWater && !d.cross;
           let fu = 0;
           let fv = 0;
           if (isWater) {
@@ -363,6 +386,8 @@ export function buildChunkGeometry(
               case 5: fu = -flowX; break;
             }
           }
+          // Tangent axes of this face, used to walk to the two side voxels
+          // and the diagonal corner around each vertex.
           const t1 = f.dir[0] !== 0 ? 1 : 0;
           const t2 = f.dir[0] !== 0 ? 2 : f.dir[1] !== 0 ? 2 : 1;
           const ex = x + f.dir[0];
@@ -370,7 +395,7 @@ export function buildChunkGeometry(
           const ez = z + f.dir[2];
 
           const vbase = bucket.base;
-          const aos = [0, 0, 0, 0];
+          const aos = [1, 1, 1, 1];
 
           for (let ci = 0; ci < 4; ci++) {
             const c = f.corners[ci];
@@ -387,21 +412,24 @@ export function buildChunkGeometry(
               const d2: [number, number, number] = [ex, ey, ez];
               d1[t1] += c[t1] ? 1 : -1;
               d2[t2] += c[t2] ? 1 : -1;
-              const o1 = occludes(d1[0], d1[1], d1[2]);
-              const o2 = occludes(d2[0], d2[1], d2[2]);
-              const oc = occludes(
+              const side1 = occludes(d1[0], d1[1], d1[2]);
+              const side2 = occludes(d2[0], d2[1], d2[2]);
+              const corner = occludes(
                 ex + (d1[0] - ex) + (d2[0] - ex),
                 ey + (d1[1] - ey) + (d2[1] - ey),
-                ez + (d2[2] - ez) + (d1[2] - ez)
+                ez + (d2[2] - ez) + (d1[2] - ez),
               );
-              const ao = o1 && o2 ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0));
+              const ao = minecraftVertexAO(side1, side2, corner);
               aos[ci] = ao;
-              shade *= AO_SHADE[ao];
+              shade *= ao;
             }
             bucket.col.push(shade * voxelMul[0], shade * voxelMul[1], shade * voxelMul[2]);
           }
 
-          if (doAO && aos[0] + aos[2] < aos[1] + aos[3]) {
+          // Flip the quad so the shared triangle diagonal is the darker one.
+          // Prevents the anisotropic interpolation artefact Minecraft/0fps
+          // describe (bright "X" across a saddle of mixed AO).
+          if (doAO && aos[0] + aos[2] > aos[1] + aos[3]) {
             bucket.idx.push(vbase, vbase + 1, vbase + 3, vbase + 1, vbase + 2, vbase + 3);
           } else {
             bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
