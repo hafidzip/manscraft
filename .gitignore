@@ -5,3 +5,4 @@ comparison.txt
 bun.lock
 package-lock.json
 .env
+*.impl.ts
