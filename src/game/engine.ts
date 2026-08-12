@@ -284,7 +284,10 @@ export class GameEngine {
   async init(theme?: PlanetTheme | null): Promise<void> {
     if (theme !== undefined) this.theme = theme;
     setActivePlanetTheme(this.theme);
-    this.textures = createTextures(this.theme);
+    this.textures?.atlas.dispose();
+    this.textures?.water.dispose();
+    this.textures?.cracks.forEach((c) => c.dispose());
+    this.textures = createTextures(this.theme); // fresh atlas ⇒ materials must be rebuilt too
     applyThemeToBlockColors(this.theme);
 
     const mats: ChunkMaterials & {

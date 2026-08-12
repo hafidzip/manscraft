@@ -396,10 +396,11 @@ export class TerrainGenerator {
         if (!underwater) {
           const r = this.decoHash(0xdec0, px, pz);
           const onGrass = surface === B.GRASS && h > this.sea + 1;
-          if (onGrass && r < bDef.flowers) {
+          const lush = activeFlora().grass.present ? (this.theme?.type === 'jungle' ? 1.35 : 1) : 0;
+          if (onGrass && r < bDef.flowers * lush) {
             const flower = this.decoHash(0xf10, px, pz) < 0.5 ? B.FLOWER_RED : B.FLOWER_YELLOW;
             data[chunkIndex(lx, h + 1, lz)] = flower;
-          } else if (onGrass && r < bDef.flowers + bDef.grass) {
+          } else if (onGrass && r < (bDef.flowers + bDef.grass) * lush) {
             data[chunkIndex(lx, h + 1, lz)] = B.TALLGRASS;
           } else if (bDef.cactus > 0 && surface === B.SAND && h > this.sea + 1 && r < bDef.cactus) {
             const ch = 2 + Math.floor(this.decoHash(0xcac, px, pz) * 2);
