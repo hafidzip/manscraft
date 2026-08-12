@@ -39,6 +39,7 @@ export const TO_FPS: Record<number, number> = {
   [B.LOG_BIRCH]: 6, [B.LOG_SPRUCE]: 6, [B.LOG_PALM]: 6, [B.LOG_ALIEN]: 6,
   [B.LEAVES_BIRCH]: 7, [B.LEAVES_SPRUCE]: 7, [B.LEAVES_AUTUMN]: 7, [B.LEAVES_JUNGLE]: 7,
   [B.LEAVES_ALIEN]: 7, [B.LEAVES_CRIMSON]: 7, [B.LEAVES_NEON]: 7, [B.LEAVES_CRYSTAL]: 7,
+  [B.LEAVES_SNOW]: 7,
 };
 
 export const FROM_FPS: Record<number, number> = Object.fromEntries(

@@ -48,7 +48,7 @@ export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Snowy Taiga', surface: B.SNOW, sub: B.DIRT, hill: 4,
     trees: 0.022, tree: 'auto', flowers: 0, grass: 0.02, cactus: 0,
-    treeMix: [{ species: 'spruce', w: 8 }, { species: 'birch', w: 2 }],
+    treeMix: [{ species: 'frost', w: 8 }, { species: 'frost_birch', w: 2 }],
   },
 ];
 

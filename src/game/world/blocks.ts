@@ -63,6 +63,7 @@ export const B = {
   LEAVES_CRIMSON: 119,
   LEAVES_NEON: 120,
   LEAVES_CRYSTAL: 121,
+  LEAVES_SNOW: 122,
 } as const;
 
 export const LOG_IDS: readonly number[] = [
@@ -70,7 +71,7 @@ export const LOG_IDS: readonly number[] = [
 ] as const;
 export const LEAF_IDS: readonly number[] = [
   B.LEAVES, B.LEAVES_BIRCH, B.LEAVES_SPRUCE, B.LEAVES_AUTUMN, B.LEAVES_JUNGLE,
-  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
+  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL, B.LEAVES_SNOW,
 ] as const;
 const LOG_SET = new Set<number>(LOG_IDS);
 const LEAF_SET = new Set<number>(LEAF_IDS);
@@ -184,6 +185,7 @@ DEFS[B.LEAVES_ALIEN] = leafDef('Xeno Fronds', TILES.leaves_alien, [0x9f3cb0, 0xc
 DEFS[B.LEAVES_CRIMSON] = leafDef('Crimson Fronds', TILES.leaves_crimson, [0x992528, 0xb43a36, 0x71191d]);
 DEFS[B.LEAVES_NEON] = leafDef('Neon Caps', TILES.leaves_neon, [0x2bc1a2, 0x40e0c0, 0x1c8f78], 8);
 DEFS[B.LEAVES_CRYSTAL] = leafDef('Frost Shards', TILES.leaves_crystal, [0x7cb6d6, 0xa2d6ee, 0x5e93b4], 3);
+DEFS[B.LEAVES_SNOW] = leafDef('Snow Leaves', TILES.leaves_snow, [0xdce8ea, 0xf2f7f8, 0xc5d4d6]);
 DEFS[B.WATER] = def({
   name: 'Water', top: TILES.water, solid: false, opaque: false, water: true, cutout: false,
   hardness: 0, sound: 'sand', colors: [0x3a66de, 0x5c8af4],
@@ -462,6 +464,7 @@ export const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.LEAVES_CRIMSON]: 'leaves_crimson',
   [B.LEAVES_NEON]: 'leaves_neon',
   [B.LEAVES_CRYSTAL]: 'leaves_crystal',
+  [B.LEAVES_SNOW]: 'leaves_snow',
   ...Object.fromEntries(STONE_GROUP.map((id) => [id, 'stone'])),
 };
 
@@ -470,7 +473,7 @@ export const THEMED_IDS: ReadonlySet<number> = new Set([
   B.FLOWER_RED, B.FLOWER_YELLOW, B.SNOW, B.WATER, B.CACTUS,
   B.LOG_BIRCH, B.LOG_SPRUCE, B.LOG_PALM, B.LOG_ALIEN,
   B.LEAVES_BIRCH, B.LEAVES_SPRUCE, B.LEAVES_AUTUMN, B.LEAVES_JUNGLE,
-  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
+  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL, B.LEAVES_SNOW,
 ]);
 export const isThemedId = (id: number): boolean => THEMED_IDS.has(id);
 

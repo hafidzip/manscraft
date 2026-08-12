@@ -2,7 +2,8 @@ import { B } from './blocks';
 
 export type TreeSpecies =
   | 'oak' | 'birch' | 'autumn' | 'spruce' | 'palm' | 'jungle'
-  | 'alien' | 'crimson' | 'neon' | 'crystal' | 'cactus';
+  | 'alien' | 'crimson' | 'neon' | 'crystal' | 'cactus'
+  | 'frost' | 'frost_birch';
 
 export interface TreePalette {
   log: number;
@@ -21,9 +22,21 @@ export const SPECIES: Record<TreeSpecies, TreePalette> = {
   alien:   { log: B.LOG_ALIEN,  leaves: B.LEAVES_ALIEN },
   crimson: { log: B.LOG_SPRUCE, leaves: B.LEAVES_CRIMSON },
   neon:    { log: B.LOG_ALIEN,  leaves: B.LEAVES_NEON },
-  crystal: { log: B.LOG_SPRUCE, leaves: B.LEAVES_CRYSTAL },
-  cactus:  { log: B.CACTUS,     leaves: B.LEAVES_CRIMSON },
+  crystal:     { log: B.LOG_SPRUCE, leaves: B.LEAVES_CRYSTAL },
+  cactus:      { log: B.CACTUS,     leaves: B.LEAVES_CRIMSON },
+  frost:       { log: B.LOG_SPRUCE, leaves: B.LEAVES_SNOW },
+  frost_birch: { log: B.LOG_BIRCH,  leaves: B.LEAVES_SNOW },
 };
+
+const WINTER_SKIP = new Set<number>([
+  B.LEAVES_SNOW, B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
+]);
+
+/** Frost-coat ordinary foliage so snow-biome canopies read white-ish. */
+export function winterPalette(pal: TreePalette): TreePalette {
+  if (WINTER_SKIP.has(pal.leaves)) return pal;
+  return { ...pal, leaves: B.LEAVES_SNOW };
+}
 
 export interface SpeciesMix { species: TreeSpecies; w: number }
 

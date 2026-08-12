@@ -27,6 +27,7 @@ const TILE_NAMES = [
   'log_palm_side', 'log_palm_top', 'log_alien_side', 'log_alien_top',
   'leaves_birch', 'leaves_spruce', 'leaves_autumn', 'leaves_jungle',
   'leaves_alien', 'leaves_crimson', 'leaves_neon', 'leaves_crystal',
+  'leaves_snow',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -86,6 +87,7 @@ const TILE_GROUP: Record<string, string> = {
   leaves_birch: 'leaves_birch', leaves_spruce: 'leaves_spruce', leaves_autumn: 'leaves_autumn',
   leaves_jungle: 'leaves_jungle', leaves_alien: 'leaves_alien', leaves_crimson: 'leaves_crimson',
   leaves_neon: 'leaves_neon', leaves_crystal: 'leaves_crystal',
+  leaves_snow: 'leaves_snow',
   ore_ruby: 'stone', ore_amber: 'stone', ore_luminescence: 'stone', ore_diamond: 'stone',
   ore_gold: 'stone', ore_silver: 'stone', ore_jade: 'stone', ore_emerald: 'stone',
   coal_ore: 'stone',
@@ -842,6 +844,8 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     { holes: 0.10, speck: [224,255,242] as unknown as RGB, speckChance: 0.15 }),
   leaves_crystal: leafPainter(TILES.leaves_crystal, [86,150,190] as unknown as RGB, [166,216,240] as unknown as RGB,
     { holes: 0.23, grain: 22, speck: [236,250,255] as unknown as RGB, speckChance: 0.10 }),
+  leaves_snow: leafPainter(TILES.leaves_snow, [198,214,216] as unknown as RGB, [240,246,248] as unknown as RGB,
+    { holes: 0.16, grain: 10, speck: [255,255,255] as unknown as RGB, speckChance: 0.18 }),
 };
 
 export interface TextureSet {

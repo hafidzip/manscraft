@@ -109,7 +109,7 @@ const RULES: Record<PlanetType, Rule> = {
   },
   tundra: {
     s: 'conifer', dens: 0.9,
-    mix: [{ species: 'spruce', w: 8 }, { species: 'birch', w: 2 }],
+    mix: [{ species: 'frost', w: 8 }, { species: 'frost_birch', w: 2 }],
     grass: { blades: [3, 5], height: [0.25, 0.5] }, flower: false,
   },
   crimson: {

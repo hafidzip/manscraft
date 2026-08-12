@@ -6,7 +6,7 @@ import {
 import { B, DEFS } from './blocks';
 import { Biome, BIOME_DEFS, type BiomeDef, pickBiome } from './biomes';
 import { floraFor, type Flora, type TreeShape } from '../space/flora';
-import { resolveSpecies, type TreePalette, type SpeciesMix } from './treeSpecies';
+import { resolveSpecies, winterPalette, type TreePalette, type SpeciesMix } from './treeSpecies';
 import { NO_ORIGIN, type OriginTag } from '../core/origin';
 import type { PlanetType } from '../space/palettes';
 
@@ -463,7 +463,8 @@ export class TerrainGenerator {
 
   private placeTree(set: SetFn, wx: number, h: number, wz: number, bDef?: BiomeDef): void {
     const s = this.flora.tree;
-    const pal = this.pickPalette(wx, wz, this.treeMixFor(bDef, s));
+    let pal = this.pickPalette(wx, wz, this.treeMixFor(bDef, s));
+    if (bDef?.surface === B.SNOW) pal = winterPalette(pal);
     switch (s.silhouette) {
       case 'conifer':   return this.tConifer(set, wx, h, wz, s, pal);
       case 'palm':      return this.tPalm(set, wx, h, wz, s, pal);
