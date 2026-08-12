@@ -27,11 +27,11 @@ export interface BiomeDef {
 export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
-    trees: 0.008, tree: 'auto', flowers: 0.16, grass: 0.72, cactus: 0,
+    trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0,
   },
   {
     name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
-    trees: 0.055, tree: 'auto', flowers: 0.09, grass: 0.70, cactus: 0,
+    trees: 0.05, tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0,
   },
   {
     name: 'Desert', surface: B.SAND, sub: B.SAND, hill: 1.5,

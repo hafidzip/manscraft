@@ -535,11 +535,8 @@ function emitTallGrass(
   mul: [number, number, number] = [1, 1, 1],
 ): void {
   const [u0, v0, u1, v1] = tileUV(tile);
-  const shape = activeFlora().grass;
   const seed = hashPlant(wx, y, wz, 101);
-  const lo = Math.max(4, shape.blades?.[0] ?? 5);
-  const hi = Math.max(lo, shape.blades?.[1] ?? lo + 3);
-  const blades = lo + Math.floor(seed * (hi - lo + 1));
+  const blades = 5 + Math.floor(seed * 3);
   for (let i = 0; i < blades; i++) {
     const r0 = hashPlant(wx, y, wz, 200 + i * 7);
     const r1 = hashPlant(wx, y, wz, 201 + i * 7);

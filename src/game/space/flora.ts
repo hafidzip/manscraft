@@ -94,10 +94,6 @@ const TRUNK_BY_SILHOUETTE: Record<TreeSilhouette, Omit<TreeShape, 'densityMul' |
 const FLORA_SALT = 0xf10a;
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-const MUST_HAVE_GRASS: ReadonlySet<PlanetType> = new Set([
-  'terran', 'jungle', 'savanna', 'alien', 'neon', 'ocean', 'tundra',
-]);
-
 export function floraFor(type: PlanetType, seed: bigint): Flora {
   const rule = RULES[type] ?? RULES.terran;
   const r = new Rng(derive(seed, FLORA_SALT));
@@ -126,11 +122,6 @@ export function floraFor(type: PlanetType, seed: bigint): Flora {
   const flower: FlowerShape = rule.flower === false
     ? { ...FLOWER_D, present: false }
     : jitterFlower({ ...FLOWER_D, ...(rule.flower ?? {}) }, r);
-
-  if (MUST_HAVE_GRASS.has(type)) {
-    grass.present = true;
-    if (grass.blades[1] < 5) grass.blades = [5, 9];
-  }
 
   return { tree, grass, flower };
 }

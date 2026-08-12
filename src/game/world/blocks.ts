@@ -419,17 +419,13 @@ function tintColors(base: number[], m: readonly [number, number, number] | null 
   });
 }
 
-// textures now carry planet identity; vertex colours only need a whisper of grade
-const VERTEX_TINT = 0.3;
-
 export function applyThemeToBlockColors(theme?: PlanetTheme | null): void {
   const tints = tintsFromTheme(theme);
   for (let id = 0; id < DEFS.length; id++) {
     const d = DEFS[id];
     if (!d) continue;
     const base = BASE_COLORS[id];
-    const raw = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
-    const m = raw ? (raw.map((v) => 1 + (v - 1) * VERTEX_TINT) as [number, number, number]) : null;
+    const m = tints ? tints[BLOCK_GROUP[id] ?? ''] : null;
     d.colors = tintColors(base, m);
   }
 }
