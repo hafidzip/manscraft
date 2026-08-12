@@ -33,7 +33,7 @@ const FACES: Face[] = [
   { dir: [0, 0, -1], shade: 0.70, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
 ];
 
-function minecraftVertexAO(side1: boolean, side2: boolean, corner: boolean): number {
+function vertexAO(side1: boolean, side2: boolean, corner: boolean): number {
   const s1 = side1 ? 0.2 : 1.0;
   const s2 = side2 ? 0.2 : 1.0;
   const cr = side1 && side2 ? s1 : corner ? 0.2 : 1.0;
@@ -399,7 +399,7 @@ export function buildChunkGeometry(
                 ey + (d1[1] - ey) + (d2[1] - ey),
                 ez + (d2[2] - ez) + (d1[2] - ez),
               );
-              const ao = minecraftVertexAO(side1, side2, corner);
+              const ao = vertexAO(side1, side2, corner);
               aos[ci] = ao;
               shade *= ao;
             }
