@@ -33,21 +33,6 @@ const FACES: Face[] = [
   { dir: [0, 0, -1], shade: 0.70, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
 ];
 
-/**
- * Minecraft smooth-lighting per-vertex AO.
- *
- * Each vertex averages the AO light values of the 4 voxels around it:
- * the face-adjacent cell (always open — the face is only emitted when
- * visible) plus the two orthogonal side voxels and the diagonal corner.
- *
- * Matches Block.getAmbientOcclusionLightValue():
- *   opaque full-cube → 0.2, air / transparent → 1.0
- *
- * If both side voxels are solid the corner is ignored so light cannot
- * leak through cracks (the classic Minecraft both-sides rule).
- *
- * Result is a multiplier in {0.4, 0.6, 0.8, 1.0}.
- */
 function minecraftVertexAO(side1: boolean, side2: boolean, corner: boolean): number {
   const s1 = side1 ? 0.2 : 1.0;
   const s2 = side2 ? 0.2 : 1.0;
@@ -73,7 +58,6 @@ for (let id = 0; id < 256; id++) {
   SKIP_ID[id]  = (isInserter(id) || isLaserMiner(id) || isTurret(id)) ? 1 : 0;
   const fullOpaque = !!d.solid && !d.cross && !d.cutout && !d.water;
   IS_CUBE[id]  = fullOpaque ? 1 : 0;
-  // Minecraft isOpaqueFullCube: only truly opaque cubes cast AO.
   OCCLUDES[id] = d.opaque ? 1 : 0;
 }
 OCCLUDES[UNKNOWN] = 1;
@@ -371,8 +355,6 @@ export function buildChunkGeometry(
           const us = isWater ? [0, 0, 1, 1] : [u0, u0, u1, u1];
           const vs = isWater ? [1, 0, 0, 1] : [v1, v0, v0, v1];
 
-          // Water and cross-plants use their own lighting; cubes, glass and
-          // leaves all receive Minecraft per-vertex AO.
           const doAO = !isWater && !d.cross;
           let fu = 0;
           let fv = 0;
@@ -386,8 +368,6 @@ export function buildChunkGeometry(
               case 5: fu = -flowX; break;
             }
           }
-          // Tangent axes of this face, used to walk to the two side voxels
-          // and the diagonal corner around each vertex.
           const t1 = f.dir[0] !== 0 ? 1 : 0;
           const t2 = f.dir[0] !== 0 ? 2 : f.dir[1] !== 0 ? 2 : 1;
           const ex = x + f.dir[0];
@@ -426,9 +406,6 @@ export function buildChunkGeometry(
             bucket.col.push(shade * voxelMul[0], shade * voxelMul[1], shade * voxelMul[2]);
           }
 
-          // Flip the quad so the shared triangle diagonal is the darker one.
-          // Prevents the anisotropic interpolation artefact Minecraft/0fps
-          // describe (bright "X" across a saddle of mixed AO).
           if (doAO && aos[0] + aos[2] > aos[1] + aos[3]) {
             bucket.idx.push(vbase, vbase + 1, vbase + 3, vbase + 1, vbase + 2, vbase + 3);
           } else {

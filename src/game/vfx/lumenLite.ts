@@ -1,9 +1,6 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
-/* ------------------------------------------------------------------------- */
-/* Shared GLSL (GLSL ES 1.00 — texture2D / gl_FragColor)                      */
-/* ------------------------------------------------------------------------- */
 
 const VERT = `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
@@ -74,7 +71,6 @@ float hash12(vec2 p) {
 
 `;
 
-// Lifted out of SSR so SSGI's missed rays can sample the exact same sky model.
 const SKY_GLSL = `
 uniform vec3 uSkyColor;
 uniform vec3 uSunDirWorld;
@@ -94,11 +90,6 @@ vec3 skyColor(vec3 R, vec3 sunDir) {
 }
 `;
 
-/* ------------------------------------------------------------------------- */
-/* SSGI (rgb) — half res.                                                    */
-/* Alpha is now a constant 1.0. It is kept (rather than dropping to RGB) so   */
-/* the blur, the joint upsample and the composite stay bit-identical.         */
-/* ------------------------------------------------------------------------- */
 
 const SSGI_FRAG = `
 varying vec2 vUv;
@@ -210,9 +201,6 @@ void main() {
 }
 `;
 
-/* ------------------------------------------------------------------------- */
-/* Bilateral blur — unchanged 5 tap, now ping-ponged correctly by the pass     */
-/* ------------------------------------------------------------------------- */
 
 const BLUR_FRAG = `
 varying vec2 vUv;
@@ -251,9 +239,6 @@ void main() {
 }
 `;
 
-/* ------------------------------------------------------------------------- */
-/* SSR — full res composite, water only                                       */
-/* ------------------------------------------------------------------------- */
 
 const SSR_FRAG = `
 varying vec2 vUv;
@@ -441,24 +426,14 @@ void main() {
 }
 `;
 
-/* ------------------------------------------------------------------------- */
-/* Pass                                                                       */
-/* ------------------------------------------------------------------------- */
 
 export interface LumenLiteParams {
-  /** master SSGI scale */
   giIntensity: number;
-  /** bounce albedo boost (0.8 - 1.2) */
   giBoost: number;
-  /** skylight added to missed GI rays */
   skyGi: number;
-  /** minimum SSGI ray thickness (view units) */
   giThickness: number;
-  /** SSR max ray length (view units) */
   ssrMaxDistance: number;
-  /** SSR hit thickness */
   ssrThickness: number;
-  /** global SSR multiplier */
   ssrStrength: number;
 }
 
@@ -479,7 +454,6 @@ export class LumenLitePass {
   public giRT?: THREE.WebGLRenderTarget;
   public blurRT?: THREE.WebGLRenderTarget;
 
-  /** Single source of truth — renderPipeline no longer hardcodes values. */
   readonly params: LumenLiteParams = { ...LUMEN_LITE_DEFAULTS };
 
   private giMat: THREE.ShaderMaterial;
@@ -504,7 +478,6 @@ export class LumenLitePass {
         uGiBoost: { value: p.giBoost },
         uSkyGi: { value: p.skyGi },
         uThickness: { value: p.giThickness },
-        // sky model — SSGI now needs these for missed-ray fill
         uSkyColor: { value: new THREE.Color(0x8fb4d8) },
         uSunColor: { value: new THREE.Color(0xfff3d0) },
         uSunDirWorld: { value: new THREE.Vector3(0, 1, 0) },
@@ -559,7 +532,6 @@ export class LumenLitePass {
     this.fsQuad = this.ssrQuad;
   }
 
-  /** Tune GI/AO/SSR without touching the shader. */
   setParams(next: Partial<LumenLiteParams>): void {
     Object.assign(this.params, next);
   }
@@ -579,7 +551,6 @@ export class LumenLitePass {
 
   private syncCamera(mat: THREE.ShaderMaterial): void {
     const cam = this.camera as unknown as { projectionMatrixInverse?: THREE.Matrix4 };
-    // Guarded: the blur material now needs uInvProj but has no uProj.
     if (mat.uniforms.uInvProj) {
       (mat.uniforms.uInvProj.value as THREE.Matrix4).copy(
         cam.projectionMatrixInverse ?? new THREE.Matrix4().copy(this.camera.projectionMatrix).invert()
@@ -610,7 +581,6 @@ export class LumenLitePass {
     dayFactor: number,
     seaLevel: number,
   ): void {
-    // SSGI needs the same sky model as SSR now (missed rays sample skylight).
     const g = this.giMat.uniforms;
     (g.uSkyColor.value as THREE.Color).copy(skyColor);
     (g.uSunColor.value as THREE.Color).copy(sunColor);
@@ -637,7 +607,6 @@ export class LumenLitePass {
     const h = Math.max(1, this.H);
     this.applyParams();
 
-    // 1. SSGI -> giTarget (half res)
     this.giMat.uniforms.tDiffuse.value = mainRT.texture;
     this.giMat.uniforms.tDepth.value = mainRT.depthTexture;
     this.syncCamera(this.giMat);
@@ -646,25 +615,22 @@ export class LumenLitePass {
     renderer.clear();
     this.giQuad.render(renderer);
 
-    // 2a. Horizontal blur: giTarget -> blurTarget
     this.blurMat.uniforms.tDiffuse.value = giTarget.texture;
     this.blurMat.uniforms.tDepth.value = mainRT.depthTexture;
-    this.syncCamera(this.blurMat);   // plane-aware weights need the inverse projection
+    this.syncCamera(this.blurMat);
     (this.blurMat.uniforms.uDirection.value as THREE.Vector2).set(1, 0);
     renderer.setRenderTarget(blurTarget);
     renderer.clear();
     this.blurQuad.render(renderer);
 
-    // 2b. Vertical blur: blurTarget -> giTarget  (ping-pong; never read+write one RT)
     this.blurMat.uniforms.tDiffuse.value = blurTarget.texture;
     (this.blurMat.uniforms.uDirection.value as THREE.Vector2).set(0, 1);
     renderer.setRenderTarget(giTarget);
     renderer.clear();
     this.blurQuad.render(renderer);
 
-    // 3. Composite + water SSR -> lightingRT (full res, linear HDR)
     this.ssrMat.uniforms.tScene.value = mainRT.texture;
-    this.ssrMat.uniforms.tGi.value = giTarget.texture;   // <- denoised result now lives here
+    this.ssrMat.uniforms.tGi.value = giTarget.texture;
     this.ssrMat.uniforms.tDepth.value = mainRT.depthTexture;
     this.syncCamera(this.ssrMat);
     (this.ssrMat.uniforms.uTexel.value as THREE.Vector2).set(1 / w, 1 / h);
@@ -675,7 +641,6 @@ export class LumenLitePass {
     this.ssrQuad.render(renderer);
   }
 
-  /** Legacy standalone path (SSR only, no GI buffer). */
   render(
     renderer: THREE.WebGLRenderer,
     writeBuffer: THREE.WebGLRenderTarget,
@@ -684,7 +649,6 @@ export class LumenLitePass {
     this.applyParams();
     this.ssrMat.uniforms.tScene.value = readBuffer.texture;
     if (!this.ssrMat.uniforms.tGi.value) {
-      // neutral GI: rgb = 0 (no bounce), a = 1 (scene untouched)
       this.fallbackGi = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
       this.fallbackGi.needsUpdate = true;
       this.ssrMat.uniforms.tGi.value = this.fallbackGi;
