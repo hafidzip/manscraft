@@ -287,6 +287,59 @@ export class GameEngine {
     this.textures = createTextures(this.theme);
     applyThemeToBlockColors(this.theme);
 
+    const AO_GAMMA = 2.2;
+
+    const injectVertexAO = (shader: { vertexShader: string; fragmentShader: string }) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+attribute vec4 aAO;    // (ao@00, ao@10, ao@11, ao@01) - constant per quad
+attribute vec2 aQUV;   // this vertex's corner on the unit quad
+varying   vec4 vAO4;
+varying   vec2 vQUV;`,
+        )
+        .replace(
+          '#include <color_vertex>',
+          `#include <color_vertex>
+vAO4 = aAO;
+vQUV = aQUV;`,
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+varying vec4 vAO4;
+varying vec2 vQUV;
+#define AO_GAMMA ${AO_GAMMA.toFixed(2)}
+
+float aoBayer2(vec2 a) { a = floor(a); return fract(a.x * 0.5 + a.y * a.y * 0.75); }
+#define AO_BAYER4(p) (aoBayer2(0.5 * (p)) * 0.25 + aoBayer2(p))`,
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+           {
+             // TRUE BILINEAR AO.
+             // A voxel face is a unit square, so position -> quad-UV is affine
+             // across the whole quad: vQUV is exact under either triangulation,
+             // and vAO4 is constant. The reconstruction below is therefore
+             // provably split-independent - the diagonal crease cannot exist.
+             vec2  q  = clamp(vQUV, 0.0, 1.0);
+             float ao = mix(mix(vAO4.x, vAO4.y, q.x),
+                            mix(vAO4.w, vAO4.z, q.x), q.y);
+
+             // Display-space match (restore vanilla contrast).
+             ao = pow(clamp(ao, 0.0, 1.0), AO_GAMMA);
+
+             // Ordered dither against 8-bit gradient banding.
+             ao += (AO_BAYER4(gl_FragCoord.xy) - 0.5) * (1.0 / 512.0);
+
+             diffuseColor.rgb *= ao;
+           }`,
+        );
+    };
+
     const mats: ChunkMaterials & {
       opaque: THREE.MeshLambertMaterial;
       cutout: THREE.MeshLambertMaterial;
@@ -308,6 +361,8 @@ export class GameEngine {
     mats.opaque.shadowSide = THREE.DoubleSide;
     mats.cutout.shadowSide = THREE.DoubleSide;
     mats.foliage.shadowSide = THREE.DoubleSide;
+    mats.opaque.customProgramCacheKey = () => 'terrain-ao-v2';
+    mats.opaque.onBeforeCompile = (shader) => { injectVertexAO(shader); };
     mats.water.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = WATER_TIME;
       shader.vertexShader = shader.vertexShader
@@ -335,7 +390,9 @@ export class GameEngine {
            diffuseColor *= sampledDiffuseColor;`
         );
     };
+    mats.cutout.customProgramCacheKey = () => 'terrain-cutout-ao-v2';
     mats.cutout.onBeforeCompile = (shader) => {
+      injectVertexAO(shader);
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
@@ -401,7 +458,9 @@ export class GameEngine {
         );
     };
 
+    mats.foliage.customProgramCacheKey = () => 'terrain-foliage-ao-v2';
     mats.foliage.onBeforeCompile = (shader) => {
+      injectVertexAO(shader);
       shader.vertexShader = shader.vertexShader.replace(
         '#include <beginnormal_vertex>',
         `#include <beginnormal_vertex>

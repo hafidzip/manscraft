@@ -22,24 +22,37 @@ interface Face {
   dir: [number, number, number];
   corners: [number, number, number][];
   shade: number;
+  au: 0 | 1 | 2;
+  av: 0 | 1 | 2;
 }
 
 const FACES: Face[] = [
-  { dir: [1, 0, 0], shade: 0.76, corners: [[1, 1, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]] },
-  { dir: [-1, 0, 0], shade: 0.76, corners: [[0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 1, 1]] },
-  { dir: [0, 1, 0], shade: 1.00, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
-  { dir: [0, -1, 0], shade: 0.62, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
-  { dir: [0, 0, 1], shade: 0.82, corners: [[0, 1, 1], [0, 0, 1], [1, 0, 1], [1, 1, 1]] },
-  { dir: [0, 0, -1], shade: 0.70, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
+  { dir: [ 1, 0, 0], shade: 0.60, au: 1, av: 2, corners: [[1, 1, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]] },
+  { dir: [-1, 0, 0], shade: 0.60, au: 1, av: 2, corners: [[0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 1, 1]] },
+  { dir: [ 0, 1, 0], shade: 1.00, au: 0, av: 2, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
+  { dir: [ 0, -1, 0], shade: 0.50, au: 0, av: 2, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+  { dir: [ 0, 0, 1], shade: 0.80, au: 0, av: 1, corners: [[0, 1, 1], [0, 0, 1], [1, 0, 1], [1, 1, 1]] },
+  { dir: [ 0, 0, -1], shade: 0.80, au: 0, av: 1, corners: [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]] },
 ];
 
-function vertexAO(side1: boolean, side2: boolean, corner: boolean): number {
-  const s1 = side1 ? 0.2 : 1.0;
-  const s2 = side2 ? 0.2 : 1.0;
-  const cr = side1 && side2 ? s1 : corner ? 0.2 : 1.0;
-  return (1.0 + s1 + s2 + cr) * 0.25;
+const AO4 = new Float32Array(4);
+const QUV = Int8Array.from([0, 0, 1, 0, 1, 1, 0, 1]);
+
+export const AO_LEVEL = Float32Array.from([1.0, 0.8, 0.6, 0.4]);
+const AO_SLOPE = (AO_LEVEL[0] - AO_LEVEL[3]) / 3;
+
+export function vertexAO(side1: number, side2: number, corner: number): number {
+  const pinch = side1 < side2 ? side1 : side2;
+  const c     = corner > pinch ? corner : pinch;
+
+  let occ = side1 + side2 + c;
+  if (occ > 3) occ = 3;
+  else if (occ < 0) occ = 0;
+
+  return AO_LEVEL[0] - AO_SLOPE * occ;
 }
 
+const LEAF_AO = 0.25;
 
 const PW    = S + 2;
 const PLANE = PW * PW;
@@ -62,6 +75,15 @@ for (let id = 0; id < 256; id++) {
 }
 OCCLUDES[UNKNOWN] = 1;
 
+const AO_WEIGHT = new Float32Array(256);
+for (let id = 0; id < 256; id++) {
+  const d = DEFS[id];
+  if (!d) continue;
+  if (d.opaque && d.solid && !d.cross && !d.water) AO_WEIGHT[id] = 1;
+  else if (isLeaves(id)) AO_WEIGHT[id] = LEAF_AO;
+}
+AO_WEIGHT[UNKNOWN] = 0;
+
 const PAD      = new Uint8Array(PAD_LEN);
 const NONAIR   = new Uint32Array(H * S);
 const CUBEMASK = new Uint32Array(H * S);
@@ -75,13 +97,17 @@ interface Bucket {
   nrm: number[];
   uv: number[];
   col: number[];
+  ao4: number[];
+  quv: number[];
   flow: number[];
   sway: number[];
   idx: number[];
   base: number;
 }
 
-const newBucket = (): Bucket => ({ pos: [], nrm: [], uv: [], col: [], flow: [], sway: [], idx: [], base: 0 });
+const newBucket = (): Bucket => ({
+  pos: [], nrm: [], uv: [], col: [], ao4: [], quv: [], flow: [], sway: [], idx: [], base: 0,
+});
 
 export const WATER_TIME = { value: 0 };
 export const GRASS_TIME = { value: 0 };
@@ -103,6 +129,15 @@ function buildGeom(b: Bucket, withFlow = false, withSway = false): THREE.BufferG
   g.setAttribute('normal', new THREE.Float32BufferAttribute(b.nrm, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
   g.setAttribute('color', new THREE.Float32BufferAttribute(b.col, 3));
+
+  const ao8 = new Uint8Array(b.ao4.length);
+  for (let i = 0; i < ao8.length; i++) ao8[i] = (b.ao4[i] * 255 + 0.5) | 0;
+  g.setAttribute('aAO', new THREE.BufferAttribute(ao8, 4, true));
+
+  const quv8 = new Uint8Array(b.quv.length);
+  for (let i = 0; i < quv8.length; i++) quv8[i] = b.quv[i] ? 255 : 0;
+  g.setAttribute('aQUV', new THREE.BufferAttribute(quv8, 2, true));
+
   if (withFlow) g.setAttribute('aFlow', new THREE.Float32BufferAttribute(b.flow, 2));
   if (withSway) g.setAttribute('aSway', new THREE.Float32BufferAttribute(b.sway, 4));
   g.setIndex(b.idx);
@@ -129,9 +164,8 @@ export function buildChunkGeometry(
     return id === UNKNOWN ? -1 : id;
   };
 
-  const occludes = (lx: number, ly: number, lz: number): boolean => {
-    return OCCLUDES[PAD[pIdx(lx, ly, lz)]] === 1;
-  };
+  const aoOcc = (lx: number, ly: number, lz: number): number =>
+    AO_WEIGHT[PAD[pIdx(lx, ly, lz)]];
 
   NONAIR.fill(0); CUBEMASK.fill(0);
   let maxY = -1;
@@ -368,15 +402,32 @@ export function buildChunkGeometry(
               case 5: fu = -flowX; break;
             }
           }
-          const t1 = f.dir[0] !== 0 ? 1 : 0;
-          const t2 = f.dir[0] !== 0 ? 2 : f.dir[1] !== 0 ? 2 : 1;
           const ex = x + f.dir[0];
           const ey = y + f.dir[1];
           const ez = z + f.dir[2];
 
-          const vbase = bucket.base;
-          const aos = [1, 1, 1, 1];
+          const au = f.au, av = f.av;
+          const ux = au === 0 ? 1 : 0, uy = au === 1 ? 1 : 0, uz = au === 2 ? 1 : 0;
+          const vx = av === 0 ? 1 : 0, vy = av === 1 ? 1 : 0, vz = av === 2 ? 1 : 0;
 
+          const aos = AO4;
+          aos[0] = aos[1] = aos[2] = aos[3] = 1;
+
+          if (doAO) {
+            for (let ci = 0; ci < 4; ci++) {
+              const c = f.corners[ci];
+              const su = c[au] ? 1 : -1;
+              const sv = c[av] ? 1 : -1;
+
+              const s1 = aoOcc(ex + su * ux,           ey + su * uy,           ez + su * uz);
+              const s2 = aoOcc(ex + sv * vx,           ey + sv * vy,           ez + sv * vz);
+              const cr = aoOcc(ex + su * ux + sv * vx, ey + su * uy + sv * vy, ez + su * uz + sv * vz);
+
+              aos[ci] = vertexAO(s1, s2, cr);
+            }
+          }
+
+          const vbase = bucket.base;
           for (let ci = 0; ci < 4; ci++) {
             const c = f.corners[ci];
             const vTop = isWater ? cornerH[c[0] + c[2] * 2] : 1;
@@ -386,31 +437,14 @@ export function buildChunkGeometry(
             if (isWater) bucket.flow.push(fu, fv);
             if (bucket === cutoutB) bucket.sway.push(0, 0, 0, 0);
 
+            bucket.ao4.push(aos[0], aos[1], aos[2], aos[3]);
+            bucket.quv.push(QUV[ci * 2], QUV[ci * 2 + 1]);
+
             let shade = f.shade;
-            if (doAO) {
-              const d1: [number, number, number] = [ex, ey, ez];
-              const d2: [number, number, number] = [ex, ey, ez];
-              d1[t1] += c[t1] ? 1 : -1;
-              d2[t2] += c[t2] ? 1 : -1;
-              const side1 = occludes(d1[0], d1[1], d1[2]);
-              const side2 = occludes(d2[0], d2[1], d2[2]);
-              const corner = occludes(
-                ex + (d1[0] - ex) + (d2[0] - ex),
-                ey + (d1[1] - ey) + (d2[1] - ey),
-                ez + (d2[2] - ez) + (d1[2] - ez),
-              );
-              const ao = vertexAO(side1, side2, corner);
-              aos[ci] = ao;
-              shade *= ao;
-            }
             bucket.col.push(shade * voxelMul[0], shade * voxelMul[1], shade * voxelMul[2]);
           }
 
-          if (doAO && aos[0] + aos[2] > aos[1] + aos[3]) {
-            bucket.idx.push(vbase, vbase + 1, vbase + 3, vbase + 1, vbase + 2, vbase + 3);
-          } else {
-            bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
-          }
+          bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
           bucket.base += 4;
         }
       }
@@ -461,6 +495,8 @@ function emitCross(
       tip * mul[0],  tip * mul[1],  tip * mul[2],
       root * mul[0], root * mul[1], root * mul[2],
     );
+    bucket.ao4.push(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+    bucket.quv.push(0, 0, 1, 0, 1, 1, 0, 1);
     bucket.sway.push(
       phase, swayStrength, 0, 0,
       phase, swayStrength, 1, 0.5,
@@ -522,6 +558,8 @@ function emitTorch(
     for (let i = 0; i < 4; i++) bucket.nrm.push(q.n[0], q.n[1], q.n[2]);
     bucket.uv.push(u0, v0, u0, v1, u1, v1, u1, v0);
     for (let i = 0; i < 4; i++) bucket.col.push(1, 1, 1);
+    bucket.ao4.push(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+    bucket.quv.push(0, 0, 1, 0, 1, 1, 0, 1);
     for (let i = 0; i < 4; i++) bucket.sway.push(0, -1, 0, 0);
     bucket.idx.push(vbase, vbase + 1, vbase + 2, vbase, vbase + 2, vbase + 3);
     bucket.base += 4;
@@ -579,6 +617,8 @@ function emitTallGrass(
       tipShade * mul[0],  tipShade * mul[1],  tipShade * mul[2],
       rootShade * mul[0], rootShade * mul[1], rootShade * mul[2],
     );
+    bucket.ao4.push(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+    bucket.quv.push(0, 0, 1, 0, 1, 1, 0, 1);
     bucket.sway.push(
       phase, strength, 0, h,
       phase, strength, 1, h,

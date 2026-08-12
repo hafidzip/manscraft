@@ -192,7 +192,7 @@ DEFS[B.WATER] = def({
 });
 DEFS[B.SNOW] = def({
   name: 'Snow Block', top: TILES.snow, side: TILES.snow_side, bottom: TILES.dirt, icon: TILES.snow,
-  hardness: 0.3, sound: 'sand', colors: [0xeef6f8, 0xd6e8ee, 0x79553a],
+  hardness: 0.3, sound: 'sand', colors: [0xeef6f8, 0xd6e8ee, 0xf0f7fa],
 });
 DEFS[B.PLANKS] = def({
   name: 'Oak Planks', top: TILES.planks, hardness: 0.8, sound: 'wood',
