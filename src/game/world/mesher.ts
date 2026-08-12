@@ -38,7 +38,7 @@ const FACES: Face[] = [
 const AO4 = new Float32Array(4);
 const QUV = Int8Array.from([0, 0, 1, 0, 1, 1, 0, 1]);
 
-export const AO_LEVEL = Float32Array.from([1.0, 0.8, 0.6, 0.4]);
+export const AO_LEVEL = Float32Array.from([1.0, 0.75, 0.5, 0.25]);
 const AO_SLOPE = (AO_LEVEL[0] - AO_LEVEL[3]) / 3;
 
 export function vertexAO(side1: number, side2: number, corner: number): number {
