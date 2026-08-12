@@ -12,9 +12,7 @@ import type { PlanetType } from '../space/palettes';
 
 const TREE_SALT = 0x5eed;
 const W = WORLD_SIZE;
-/** How far outside a chunk we still plant trunks so their canopy can own in-chunk leaves. */
 const TREE_HALO = 10;
-/** Max XZ distance² at which a leaf is claimed by a trunk (covers mega / clustered canopies). */
 const TREE_OWNER_R2 = 12 * 12;
 
 interface PlantedTree {
@@ -493,11 +491,6 @@ export class TerrainGenerator {
     return pal;
   }
 
-  /**
-   * Overlapping canopies at snow/grass borders used to interleave green and white
-   * leaves (first-writer-wins on air). Reassign every leaf to the nearest trunk
-   * so each tree is a single color.
-   */
   private unifyCanopyLeaves(
     data: Uint8Array,
     baseX: number,
