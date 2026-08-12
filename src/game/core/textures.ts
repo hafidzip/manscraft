@@ -1,8 +1,9 @@
-
 import * as THREE from 'three';
 import { mulberry32 } from './noise';
 import { PLANET_PALETTES } from '../space/palettes';
 import type { PlanetTheme } from '../space/theme';
+import { TINT_REF, GROUP_H, strengthFor } from './tintGroups';
+import type { RGB } from './tintGroups';
 
 export const TILE = 16;
 export const TPR = 8;
@@ -22,6 +23,10 @@ const TILE_NAMES = [
   'conveyor_side',
   'inserter_top_n', 'inserter_top_e', 'inserter_top_s', 'inserter_top_w',
   'inserter_side',
+  'log_birch_side', 'log_birch_top', 'log_spruce_side', 'log_spruce_top',
+  'log_palm_side', 'log_palm_top', 'log_alien_side', 'log_alien_top',
+  'leaves_birch', 'leaves_spruce', 'leaves_autumn', 'leaves_jungle',
+  'leaves_alien', 'leaves_crimson', 'leaves_neon', 'leaves_crystal',
 ] as const;
 
 export const TILES: Record<string, number> = {};
@@ -32,10 +37,8 @@ export const ATLAS_ROWS = Math.ceil(TILE_NAMES.length / TPR);
 export const ATLAS_W = ATLAS_COLS * TILE;
 export const ATLAS_H = ATLAS_ROWS * TILE;
 
-
-type RGB = readonly [number, number, number];
 const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
-const rgb = (r: number, g: number, b: number): RGB => [clampByte(r), clampByte(g), clampByte(b)] as const;
+const rgb = (r: number, g: number, b: number): RGB => [clampByte(r), clampByte(g), clampByte(b)] as unknown as RGB;
 const map3 = (base: RGB, f: (c: number, i: number) => number): RGB =>
   rgb(f(base[0], 0), f(base[1], 1), f(base[2], 2));
 
@@ -48,7 +51,6 @@ const vary = (base: RGB, amt: number, r: () => number): RGB => {
   const v = Math.floor((r() * 2 - 1) * amt);
   return map3(base, (c) => c + v);
 };
-
 
 function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RGB {
   let i = 0;
@@ -64,42 +66,35 @@ function rampAt(stops: Array<[number, [number, number, number]]>, h: number): RG
     a[1][0] + (b[1][0] - a[1][0]) * t,
     a[1][1] + (b[1][1] - a[1][1]) * t,
     a[1][2] + (b[1][2] - a[1][2]) * t,
-  ] as const;
+  ] as unknown as RGB;
 }
-
-const TINT_REF: Record<string, RGB> = {
-  grass: [96, 162, 54],
-  dirt: [121, 85, 58],
-  stone: [128, 128, 128],
-  sand: [219, 207, 163],
-  leaves: [56, 120, 40],
-  log: [104, 76, 44],
-  planks: [164, 129, 80],
-  snow: [238, 246, 248],
-  water: [58, 102, 222],
-  cactus: [62, 138, 56],
-};
 
 const TILE_GROUP: Record<string, string> = {
   grass_top: 'grass', grass_side: 'grass', tallgrass: 'grass',
   dirt: 'dirt', snow_side: 'snow',
   stone: 'stone', gravel: 'stone', bedrock: 'stone', cobble: 'stone',
-  furnace_top: 'stone', furnace_side: 'stone', furnace_front: 'stone',
-  sand: 'sand', leaves: 'leaves',
+  furnace_top: 'stone', furnace_side: 'stone', furnace_front: 'stone', furnace_front_lit: 'stone',
+  sand: 'sand',
+  leaves: 'leaves',
   log_side: 'log', log_top: 'log', planks: 'planks',
   craft_top: 'planks', craft_side: 'planks', craft_bottom: 'planks',
   snow: 'snow', water: 'water', cactus_side: 'cactus', cactus_top: 'cactus',
+  log_birch_side: 'log_birch', log_birch_top: 'log_birch',
+  log_spruce_side: 'log_spruce', log_spruce_top: 'log_spruce',
+  log_palm_side: 'log_palm', log_palm_top: 'log_palm',
+  log_alien_side: 'log_alien', log_alien_top: 'log_alien',
+  leaves_birch: 'leaves_birch', leaves_spruce: 'leaves_spruce', leaves_autumn: 'leaves_autumn',
+  leaves_jungle: 'leaves_jungle', leaves_alien: 'leaves_alien', leaves_crimson: 'leaves_crimson',
+  leaves_neon: 'leaves_neon', leaves_crystal: 'leaves_crystal',
+  ore_ruby: 'stone', ore_amber: 'stone', ore_luminescence: 'stone', ore_diamond: 'stone',
+  ore_gold: 'stone', ore_silver: 'stone', ore_jade: 'stone', ore_emerald: 'stone',
+  coal_ore: 'stone',
 };
 
 export type TintMap = Record<string, RGB>;
 
-const TINT_STRENGTH = 0.85;
 const clampMul = (v: number) => Math.max(0.22, Math.min(2.4, v));
 
-const GROUP_H: Record<string, number> = {
-  grass: 0.14, leaves: 0.22, dirt: 0.08, sand: 0.04, stone: 0.5,
-  log: 0.3, planks: 0.36, water: -0.2, cactus: 0.18,
-};
 function targetFor(group: string, theme: PlanetTheme): RGB {
   const pal = PLANET_PALETTES[theme.type];
   if (group === 'snow') return pal.pole as unknown as RGB;
@@ -115,12 +110,12 @@ export function tintsFromTheme(theme?: PlanetTheme | null): TintMap | null {
     const m: number[] = [];
     for (let k = 0; k < 3; k++) {
       const raw = clampMul((tgt[k] * 255) / Math.max(1, ref[k]));
-      m[k] = 1 + (raw - 1) * TINT_STRENGTH;
+      m[k] = 1 + (raw - 1) * strengthFor(g);
     }
     if (theme.lava && (g === 'stone' || g === 'dirt')) {
       m[0] *= 1.18; m[1] *= 0.9; m[2] *= 0.78;
     }
-    out[g] = [m[0], m[1], m[2]] as const;
+    out[g] = [m[0], m[1], m[2]] as unknown as RGB;
   }
   return out;
 }
@@ -156,15 +151,14 @@ function tileRegion(
   }
 }
 
-
 type Painter = (img: ImageData, r: () => number) => void;
 
-const GRASS_BASE: RGB = [96, 162, 54];
+const GRASS_BASE: RGB = [96, 162, 54] as unknown as RGB;
 
 const shadeMul = (base: RGB, f: number): RGB => map3(base, (c) => Math.floor(c * f));
 
 const paintDirt: Painter = (img, r) =>
-  tileRegion(img, TILES.dirt, () => (r() < 0.08 ? vary([88, 62, 42], 10, r) : vary([121, 85, 58], 20, r)));
+  tileRegion(img, TILES.dirt, () => (r() < 0.08 ? vary([88, 62, 42] as unknown as RGB, 10, r) : vary([121, 85, 58] as unknown as RGB, 20, r)));
 
 function pixelHash(x: number, y: number, salt: number): number {
   let h = Math.imul(x + 0x9e37, 0x85ebca6b) ^ Math.imul(y + 0x1b87, 0xc2b2ae35) ^ salt;
@@ -185,21 +179,21 @@ function paintBeltTop(img: ImageData, tile: number, rot: number, phase: number):
     else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
     else if (rot === 3) { x = N - 1 - py; y = px; }
 
-    if (y === 0 || y === N - 1) return varyH([44, 44, 50], 5, pixelHash(x, y, 11));
-    if (y === 1 || y === N - 2) return varyH([88, 88, 96], 7, pixelHash(x, y, 12));
+    if (y === 0 || y === N - 1) return varyH([44, 44, 50] as unknown as RGB, 5, pixelHash(x, y, 11));
+    if (y === 1 || y === N - 2) return varyH([88, 88, 96] as unknown as RGB, 7, pixelHash(x, y, 12));
 
     const wx = ((x - phase) % N + N) % N;
 
-    if (wx % 4 === 0) return varyH([50, 50, 56], 6, pixelHash(wx, y, 13));
+    if (wx % 4 === 0) return varyH([50, 50, 56] as unknown as RGB, 6, pixelHash(wx, y, 13));
     const cw = wx % 8;
     const dx = cw - 5;
     if (dx >= -2 && dx <= 0) {
       const spread = -dx;
       const off = Math.abs(y - 7.5);
       if (off >= spread - 0.5 && off <= spread + 1.5)
-        return varyH([226, 146, 34], 12, pixelHash(wx, y, 14));
+        return varyH([226, 146, 34] as unknown as RGB, 12, pixelHash(wx, y, 14));
     }
-    return varyH([74, 74, 80], 9, pixelHash(wx, y, 15));
+    return varyH([74, 74, 80] as unknown as RGB, 9, pixelHash(wx, y, 15));
   });
 }
 
@@ -211,28 +205,26 @@ function paintInserterTop(img: ImageData, tile: number, rot: number, r: () => nu
     else if (rot === 2) { x = N - 1 - px; y = N - 1 - py; }
     else if (rot === 3) { x = N - 1 - py; y = px; }
 
-    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42], 5, r);
-    if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68], 7, r);
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) return vary([36, 36, 42] as unknown as RGB, 5, r);
+    if (x === 1 || y === 1 || x === N - 2 || y === N - 2) return vary([60, 60, 68] as unknown as RGB, 7, r);
 
     const dx = x - 7.5;
     const dz = y - 7.5;
     const d = Math.sqrt(dx * dx + dz * dz);
-    if (d < 2.2) return vary([28, 28, 32], 4, r);
-    if (d < 3.4) return vary([98, 98, 106], 8, r);
+    if (d < 2.2) return vary([28, 28, 32] as unknown as RGB, 4, r);
+    if (d < 3.4) return vary([98, 98, 106] as unknown as RGB, 8, r);
 
     if (x >= 10 && x <= 13 && Math.abs(y - 7.5) <= (x - 10) + 1 && Math.abs(y - 7.5) > (x - 10) - 1)
-      return vary([226, 146, 34], 10, r);
+      return vary([226, 146, 34] as unknown as RGB, 10, r);
 
     if ((x === 3 || x === 12) && Math.abs(y - 7.5) > 4 && (y === 3 + (Math.abs(x - 7.5) > 3 ? 1 : 0) || y === 12 - (Math.abs(x - 7.5) > 3 ? 1 : 0)))
-      return vary([110, 110, 118], 8, r);
+      return vary([110, 110, 118] as unknown as RGB, 8, r);
 
-    return vary([72, 72, 80], 9, r);
+    return vary([72, 72, 80] as unknown as RGB, 9, r);
   });
 }
 
-
 const BELT_ANIM_PX_PER_SEC = 20;
-
 let beltPhase = -1;
 
 export function animateConveyorTiles(set: TextureSet, time: number): void {
@@ -261,6 +253,33 @@ export function animateConveyorTiles(set: TextureSet, time: number): void {
   set.atlas.needsUpdate = true;
 }
 
+type LeafOpts = { holes?: number; grain?: number; speck?: RGB; speckChance?: number; vein?: RGB };
+
+const leafPainter = (tile: number, dark: RGB, light: RGB, o: LeafOpts = {}): Painter =>
+  (img, r) => tileRegion(img, tile, (x, y) => {
+    const holes = o.holes ?? 0.14;
+    const corner = (Math.abs(x - 7.5) + Math.abs(y - 7.5)) / 15;
+    if (r() < holes * (0.5 + corner)) return null;
+    if (o.vein && ((x + y) % 7 === 0) && r() < 0.5) return vary(o.vein, 8, r);
+    if (o.speck && r() < (o.speckChance ?? 0)) return vary(o.speck, 10, r);
+    const g = o.grain ?? 16;
+    return r() < 0.42 ? vary(dark, g - 2, r) : vary(light, g, r);
+  });
+
+const barkPainter = (tile: number, base: RGB, dark: RGB, stripe = 4, noise = 0.18): Painter =>
+  (img, r) => {
+    const cols: RGB[] = [];
+    for (let x = 0; x < TILE; x++) cols[x] = (x % stripe === 0 || r() < noise) ? dark : base;
+    return tileRegion(img, tile, (x, y) => vary(cols[x], 10 + ((y + x) % 3) * 2, r));
+  };
+
+const ringPainter = (tile: number, bark: RGB, ringA: RGB, ringB: RGB): Painter =>
+  (img, r) => tileRegion(img, tile, (x, y) => {
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    if (d > 6.5) return vary(bark, 10, r);
+    return (Math.floor(d + r() * 0.6) % 2 === 0) ? vary(ringA, 8, r) : vary(ringB, 8, r);
+  });
+
 const PAINTERS: Partial<Record<string, Painter>> = {
   grass_top: (img, r) =>
     tileRegion(img, TILES.grass_top, () => {
@@ -277,108 +296,88 @@ const PAINTERS: Partial<Record<string, Painter>> = {
         if (r() < 0.06) s *= 0.82;
         return shadeMul(GRASS_BASE, s);
       }
-      const c = vary([121, 85, 58], 20, r);
-      return r() < 0.08 ? vary([88, 62, 42], 10, r) : c;
+      const c = vary([121, 85, 58] as unknown as RGB, 20, r);
+      return r() < 0.08 ? vary([88, 62, 42] as unknown as RGB, 10, r) : c;
     });
   },
   dirt: paintDirt,
   stone: (img, r) =>
     tileRegion(img, TILES.stone, (x, y) => {
       const vein = Math.sin(x * 0.7 + y * 0.45) > 0.75 && r() < 0.6;
-      return vein ? vary([104, 104, 108], 10, r) : vary([128, 128, 128], 12, r);
+      return vein ? vary([104, 104, 108] as unknown as RGB, 10, r) : vary([128, 128, 128] as unknown as RGB, 12, r);
     }),
   sand: (img, r) =>
     tileRegion(img, TILES.sand, () =>
-      r() < 0.1 ? vary([199, 184, 133], 8, r) : vary([219, 207, 163], 12, r)
+      r() < 0.1 ? vary([199, 184, 133] as unknown as RGB, 8, r) : vary([219, 207, 163] as unknown as RGB, 12, r)
     ),
   gravel: (img, r) => {
     const pebbles: RGB[] = [
-      [128, 126, 123],
-      [142, 135, 128],
-      [104, 101, 98],
-      [162, 151, 136],
+      [128, 126, 123] as unknown as RGB,
+      [142, 135, 128] as unknown as RGB,
+      [104, 101, 98] as unknown as RGB,
+      [162, 151, 136] as unknown as RGB,
     ];
     return tileRegion(img, TILES.gravel, () => {
       const p = pebbles[Math.floor(r() * pebbles.length)];
       return vary(p, 10, r);
     });
   },
-  log_side: (img, r) => {
-    const cols: RGB[] = [];
-    for (let x = 0; x < TILE; x++) {
-      const dark = x % 4 === 0 || r() < 0.18;
-      cols[x] = dark ? [86, 60, 34] : [104, 76, 44];
-    }
-    return tileRegion(img, TILES.log_side, (x, y) =>
-      vary(cols[x], 10 + ((y + x) % 3) * 2, r)
-    );
-  },
-  log_top: (img, r) =>
-    tileRegion(img, TILES.log_top, (x, y) => {
-      const dx = x - 7.5;
-      const dy = y - 7.5;
-      const d = Math.max(Math.abs(dx), Math.abs(dy));
-      if (d > 6.5) return vary([86, 60, 34], 10, r);
-      const ring = Math.floor(d + r() * 0.6) % 2 === 0;
-      return ring ? vary([176, 138, 90], 8, r) : vary([150, 114, 70], 8, r);
-    }),
-  leaves: (img, r) =>
-    tileRegion(img, TILES.leaves, () => {
-      if (r() < 0.14) return null;
-      return r() < 0.4 ? vary([38, 96, 34], 14, r) : vary([52, 124, 44], 18, r);
-    }),
+  log_side: barkPainter(TILES.log_side, [104,76,44] as unknown as RGB, [86,60,34] as unknown as RGB, 4, 0.18),
+  log_top: ringPainter(TILES.log_top, [86,60,34] as unknown as RGB, [176,138,90] as unknown as RGB, [150,114,70] as unknown as RGB),
+  leaves: leafPainter(TILES.leaves, [38,96,34] as unknown as RGB, [52,124,44] as unknown as RGB),
+
   planks: (img, r) =>
     tileRegion(img, TILES.planks, (x, y) => {
-      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
+      if (y % 4 === 3) return vary([96, 70, 40] as unknown as RGB, 8, r);
       const joint = (Math.floor(y / 4) % 2 === 0 ? x === 11 : x === 4);
-      if (joint) return vary([96, 70, 40], 8, r);
-      return vary([164, 129, 76], 10, r);
+      if (joint) return vary([96, 70, 40] as unknown as RGB, 8, r);
+      return vary([164, 129, 76] as unknown as RGB, 10, r);
     }),
   glass: (img) =>
     tileRegion(img, TILES.glass, (x, y) => {
       const border = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (border) return [206, 232, 245];
-      if (x === y + 6 || x === y + 7 || (x < 6 && x === y - 3)) return [224, 244, 252];
+      if (border) return [206, 232, 245] as unknown as RGB;
+      if (x === y + 6 || x === y + 7 || (x < 6 && x === y - 3)) return [224, 244, 252] as unknown as RGB;
       return null;
     }),
   snow: (img, r) =>
     tileRegion(img, TILES.snow, () =>
-      r() < 0.12 ? vary([214, 232, 238], 6, r) : vary([238, 246, 248], 7, r)
+      r() < 0.12 ? vary([214, 232, 238] as unknown as RGB, 6, r) : vary([238, 246, 248] as unknown as RGB, 7, r)
     ),
   snow_side: (img, r) => {
     const edge: number[] = [];
     for (let x = 0; x < TILE; x++) edge[x] = 3 + Math.floor(r() * 2);
     return tileRegion(img, TILES.snow_side, (x, y) => {
-      if (y < edge[x]) return vary([238, 246, 248], 7, r);
-      return vary([121, 85, 58], 18, r);
+      if (y < edge[x]) return vary([238, 246, 248] as unknown as RGB, 7, r);
+      return vary([121, 85, 58] as unknown as RGB, 18, r);
     });
   },
   bedrock: (img, r) =>
     tileRegion(img, TILES.bedrock, () => {
       const v = r();
-      return v < 0.4 ? vary([56, 56, 56], 10, r) : v < 0.75 ? vary([88, 88, 88], 10, r) : vary([30, 30, 30], 8, r);
+      return v < 0.4 ? vary([56, 56, 56] as unknown as RGB, 10, r) : v < 0.75 ? vary([88, 88, 88] as unknown as RGB, 10, r) : vary([30, 30, 30] as unknown as RGB, 8, r);
     }),
   flower_red: (img, r) =>
     tileRegion(img, TILES.flower_red, (x, y) => {
-      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r);
-      if (y === 8 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r);
+      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44] as unknown as RGB, 10, r);
+      if (y === 8 && (x === 6 || x === 9)) return vary([48, 100, 38] as unknown as RGB, 8, r);
       const px = x - 7.5;
       const py = y - 3.5;
       const petal = Math.abs(px) <= 1.6 && Math.abs(py) <= 1.6 && !(Math.abs(px) === 1.5 && Math.abs(py) === 1.5);
-      if (petal && y < 6) return vary([205, 47, 42], 18, r);
-      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [255, 214, 92];
-      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
+      if (petal && y < 6) return vary([205, 47, 42] as unknown as RGB, 18, r);
+      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [255, 214, 92] as unknown as RGB;
+      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44] as unknown as RGB, 8, r) : null;
     }),
   flower_yellow: (img, r) =>
     tileRegion(img, TILES.flower_yellow, (x, y) => {
-      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44], 10, r);
-      if (y === 9 && (x === 6 || x === 9)) return vary([48, 100, 38], 8, r);
+      if (y >= 6 && (x === 7 || x === 8)) return vary([58, 122, 44] as unknown as RGB, 10, r);
+      if (y === 9 && (x === 6 || x === 9)) return vary([48, 100, 38] as unknown as RGB, 8, r);
       const px = x - 7.5;
       const py = y - 3.5;
       const petal = Math.abs(px) <= 1.6 && Math.abs(py) <= 1.6 && !(Math.abs(px) === 1.5 && Math.abs(py) === 1.5);
-      if (petal && y < 6) return vary([228, 198, 66], 16, r);
-      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [180, 120, 40];
-      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44], 8, r) : null;
+      if (petal && y < 6) return vary([228, 198, 66] as unknown as RGB, 16, r);
+      if (Math.abs(px) < 0.6 && Math.abs(py) < 0.6 && y < 6) return [180, 120, 40] as unknown as RGB;
+      return y === 15 && x > 4 && x < 11 ? vary([58, 122, 44] as unknown as RGB, 8, r) : null;
     }),
   tallgrass: (img, r) => {
     const blades: { x: number; h: number; lean: number }[] = [];
@@ -403,46 +402,46 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   cactus_side: (img, r) =>
     tileRegion(img, TILES.cactus_side, (x) => {
       const rib = x % 4 === 1;
-      const c = rib ? vary([42, 106, 40], 8, r) : vary([62, 138, 56], 10, r);
-      return r() < 0.04 ? [226, 236, 214] : c;
+      const c = rib ? vary([42, 106, 40] as unknown as RGB, 8, r) : vary([62, 138, 56] as unknown as RGB, 10, r);
+      return r() < 0.04 ? [226, 236, 214] as unknown as RGB : c;
     }),
   cactus_top: (img, r) =>
     tileRegion(img, TILES.cactus_top, (x, y) => {
       const border = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (border) return vary([42, 106, 40], 8, r);
-      if (x === 7 || x === 8 || y === 7 || y === 8) return vary([52, 122, 48], 8, r);
-      return vary([62, 138, 56], 9, r);
+      if (border) return vary([42, 106, 40] as unknown as RGB, 8, r);
+      if (x === 7 || x === 8 || y === 7 || y === 8) return vary([52, 122, 48] as unknown as RGB, 8, r);
+      return vary([62, 138, 56] as unknown as RGB, 9, r);
     }),
   water: (img, r) =>
     tileRegion(img, TILES.water, (x, y) => {
       const wave = (x + y * 3) % 7 === 0;
-      return wave ? vary([92, 138, 244], 8, r) : vary([58, 102, 222], 10, r);
+      return wave ? vary([92, 138, 244] as unknown as RGB, 8, r) : vary([58, 102, 222] as unknown as RGB, 10, r);
     }),
 
   craft_top: (img, r) =>
     tileRegion(img, TILES.craft_top, (x, y) => {
       const seam = x === 7 || x === 8 || y === 7 || y === 8;
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([96, 70, 40], 8, r);
-      if (seam) return vary([70, 50, 28], 6, r);
-      return vary([164, 129, 76], 10, r);
+      if (rim) return vary([96, 70, 40] as unknown as RGB, 8, r);
+      if (seam) return vary([70, 50, 28] as unknown as RGB, 6, r);
+      return vary([164, 129, 76] as unknown as RGB, 10, r);
     }),
   craft_side: (img, r) => {
     const base: RGB[] = [];
-    for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] : [164, 129, 76];
+    for (let x = 0; x < TILE; x++) base[x] = x % 4 === 0 ? [96, 70, 40] as unknown as RGB : [164, 129, 76] as unknown as RGB;
     return tileRegion(img, TILES.craft_side, (x, y) => {
-      if (y < 2) return vary([120, 92, 54], 8, r);
+      if (y < 2) return vary([120, 92, 54] as unknown as RGB, 8, r);
       if (y >= 4 && y <= 9 && x >= 4 && x <= 11) {
-        if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28], 6, r);
-        return vary([132, 102, 60], 8, r);
+        if (y === 4 || y === 9 || x === 4 || x === 11) return vary([70, 50, 28] as unknown as RGB, 6, r);
+        return vary([132, 102, 60] as unknown as RGB, 8, r);
       }
       return vary(base[x], 10, r);
     });
   },
   craft_bottom: (img, r) =>
     tileRegion(img, TILES.craft_bottom, (_x, y) => {
-      if (y % 4 === 3) return vary([96, 70, 40], 8, r);
-      return vary([150, 118, 70], 10, r);
+      if (y % 4 === 3) return vary([96, 70, 40] as unknown as RGB, 8, r);
+      return vary([150, 118, 70] as unknown as RGB, 10, r);
     }),
 
   cobble: (img, r) =>
@@ -450,131 +449,131 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       const cell = ((x + (Math.floor(y / 5) % 2) * 3) / 5) | 0;
       const row = (y / 5) | 0;
       const edge = x % 5 === 4 || y % 5 === 4;
-      if (edge) return vary([74, 74, 78], 8, r);
+      if (edge) return vary([74, 74, 78] as unknown as RGB, 8, r);
       const tone = (cell + row) % 3;
-      const base: RGB = tone === 0 ? [140, 140, 144] : tone === 1 ? [118, 118, 122] : [100, 100, 104];
+      const base: RGB = tone === 0 ? [140, 140, 144] as unknown as RGB : tone === 1 ? [118, 118, 122] as unknown as RGB : [100, 100, 104] as unknown as RGB;
       return vary(base, 12, r);
     }),
 
   furnace_top: (img, r) =>
     tileRegion(img, TILES.furnace_top, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
-      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66], 8, r);
-      return vary([124, 124, 128], 12, r);
+      if (rim) return vary([88, 88, 92] as unknown as RGB, 8, r);
+      if (x >= 5 && x <= 10 && y >= 5 && y <= 10) return vary([62, 62, 66] as unknown as RGB, 8, r);
+      return vary([124, 124, 128] as unknown as RGB, 12, r);
     }),
   furnace_side: (img, r) =>
     tileRegion(img, TILES.furnace_side, () =>
-      Math.random() < 0.001 ? vary([100, 100, 104], 8, r) : vary([120, 120, 124], 14, r)
+      Math.random() < 0.001 ? vary([100, 100, 104] as unknown as RGB, 8, r) : vary([120, 120, 124] as unknown as RGB, 14, r)
     ),
   furnace_front: (img, r) =>
     tileRegion(img, TILES.furnace_front, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
+      if (rim) return vary([88, 88, 92] as unknown as RGB, 8, r);
       if (x >= 3 && x <= 12) {
-        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
-        if (y >= 7 && y <= 11) return vary([22, 22, 24], 5, r);
-        if (y === 12) return vary([70, 70, 74], 6, r);
+        if (y >= 4 && y <= 6) return vary([48, 48, 52] as unknown as RGB, 6, r);
+        if (y >= 7 && y <= 11) return vary([22, 22, 24] as unknown as RGB, 5, r);
+        if (y === 12) return vary([70, 70, 74] as unknown as RGB, 6, r);
       }
-      return vary([124, 124, 128], 12, r);
+      return vary([124, 124, 128] as unknown as RGB, 12, r);
     }),
   furnace_front_lit: (img, r) =>
     tileRegion(img, TILES.furnace_front_lit, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([88, 88, 92], 8, r);
+      if (rim) return vary([88, 88, 92] as unknown as RGB, 8, r);
       if (x >= 3 && x <= 12) {
-        if (y >= 4 && y <= 6) return vary([48, 48, 52], 6, r);
+        if (y >= 4 && y <= 6) return vary([48, 48, 52] as unknown as RGB, 6, r);
         if (y >= 7 && y <= 11) {
           const h = 11 - y;
           const flame = (x * 7 + h * 3) % 5;
-          if (h >= 3) return flame < 2 ? vary([255, 214, 92], 18, r) : vary([28, 24, 22], 5, r);
-          if (h === 2) return flame < 3 ? vary([255, 160, 40], 20, r) : vary([120, 40, 16], 12, r);
-          return vary([228, 88, 24], 22, r);
+          if (h >= 3) return flame < 2 ? vary([255, 214, 92] as unknown as RGB, 18, r) : vary([28, 24, 22] as unknown as RGB, 5, r);
+          if (h === 2) return flame < 3 ? vary([255, 160, 40] as unknown as RGB, 20, r) : vary([120, 40, 16] as unknown as RGB, 12, r);
+          return vary([228, 88, 24] as unknown as RGB, 22, r);
         }
-        if (y === 12) return vary([70, 70, 74], 6, r);
+        if (y === 12) return vary([70, 70, 74] as unknown as RGB, 6, r);
       }
-      return vary([124, 124, 128], 12, r);
+      return vary([124, 124, 128] as unknown as RGB, 12, r);
     }),
 
   ore_ruby: (img, r) =>
     tileRegion(img, TILES.ore_ruby, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const crystal = (x * 3 + y * 7) % 11 < 3 && r() < 0.5;
       if (crystal) {
         const bright = r() < 0.3;
-        return bright ? vary([255, 80, 90], 15, r) : vary([180, 30, 40], 12, r);
+        return bright ? vary([255, 80, 90] as unknown as RGB, 15, r) : vary([180, 30, 40] as unknown as RGB, 12, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_amber: (img, r) =>
     tileRegion(img, TILES.ore_amber, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const crystal = (x * 5 + y * 3) % 9 < 3 && r() < 0.45;
       if (crystal) {
         const bright = r() < 0.35;
-        return bright ? vary([255, 200, 60], 18, r) : vary([200, 140, 30], 14, r);
+        return bright ? vary([255, 200, 60] as unknown as RGB, 18, r) : vary([200, 140, 30] as unknown as RGB, 14, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_luminescence: (img, r) =>
     tileRegion(img, TILES.ore_luminescence, (x, y) => {
-      if (r() < 0.08) return vary([52, 52, 58], 8, r);
+      if (r() < 0.08) return vary([52, 52, 58] as unknown as RGB, 8, r);
       const crystal = (x * 7 + y * 5) % 10 < 3 && r() < 0.5;
       if (crystal) {
         const bright = r() < 0.4;
-        return bright ? vary([140, 255, 220], 20, r) : vary([60, 180, 150], 16, r);
+        return bright ? vary([140, 255, 220] as unknown as RGB, 20, r) : vary([60, 180, 150] as unknown as RGB, 16, r);
       }
-      return vary([108, 108, 114], 14, r);
+      return vary([108, 108, 114] as unknown as RGB, 14, r);
     }),
   ore_diamond: (img, r) =>
     tileRegion(img, TILES.ore_diamond, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const crystal = (x * 4 + y * 6) % 10 < 3 && r() < 0.4;
       if (crystal) {
         const bright = r() < 0.35;
-        return bright ? vary([180, 240, 255], 18, r) : vary([80, 180, 220], 14, r);
+        return bright ? vary([180, 240, 255] as unknown as RGB, 18, r) : vary([80, 180, 220] as unknown as RGB, 14, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_gold: (img, r) =>
     tileRegion(img, TILES.ore_gold, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const fleck = (x * 6 + y * 4) % 8 < 2 && r() < 0.5;
       if (fleck) {
         const bright = r() < 0.4;
-        return bright ? vary([255, 220, 80], 20, r) : vary([200, 160, 40], 14, r);
+        return bright ? vary([255, 220, 80] as unknown as RGB, 20, r) : vary([200, 160, 40] as unknown as RGB, 14, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_silver: (img, r) =>
     tileRegion(img, TILES.ore_silver, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const fleck = (x * 5 + y * 7) % 9 < 2 && r() < 0.5;
       if (fleck) {
         const bright = r() < 0.4;
-        return bright ? vary([230, 235, 240], 15, r) : vary([170, 175, 180], 12, r);
+        return bright ? vary([230, 235, 240] as unknown as RGB, 15, r) : vary([170, 175, 180] as unknown as RGB, 12, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_jade: (img, r) =>
     tileRegion(img, TILES.ore_jade, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const crystal = (x * 4 + y * 5) % 9 < 3 && r() < 0.45;
       if (crystal) {
         const bright = r() < 0.35;
-        return bright ? vary([140, 220, 160], 16, r) : vary([70, 150, 90], 14, r);
+        return bright ? vary([140, 220, 160] as unknown as RGB, 16, r) : vary([70, 150, 90] as unknown as RGB, 14, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
   ore_emerald: (img, r) =>
     tileRegion(img, TILES.ore_emerald, (x, y) => {
-      if (r() < 0.08) return vary([62, 62, 68], 8, r);
+      if (r() < 0.08) return vary([62, 62, 68] as unknown as RGB, 8, r);
       const crystal = (x * 6 + y * 4) % 10 < 3 && r() < 0.4;
       if (crystal) {
         const bright = r() < 0.35;
-        return bright ? vary([80, 255, 120], 18, r) : vary([30, 160, 80], 14, r);
+        return bright ? vary([80, 255, 120] as unknown as RGB, 18, r) : vary([30, 160, 80] as unknown as RGB, 14, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
 
   coal_ore: (img, r) =>
@@ -582,9 +581,9 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       const chunk = (x * 5 + y * 3) % 9 < 3 && r() < 0.55;
       if (chunk) {
         const bright = r() < 0.25;
-        return bright ? vary([64, 64, 68], 10, r) : vary([26, 26, 30], 8, r);
+        return bright ? vary([64, 64, 68] as unknown as RGB, 10, r) : vary([26, 26, 30] as unknown as RGB, 8, r);
       }
-      return vary([118, 118, 124], 14, r);
+      return vary([118, 118, 124] as unknown as RGB, 14, r);
     }),
 
   coal: (img, r) =>
@@ -592,14 +591,14 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       const dx = x - 8, dy = y - 8;
       const d = Math.sqrt(dx * dx + dy * dy);
       if (d > 6.2) return null;
-      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76], 12, r);
-      return vary([28, 28, 32], 10, r);
+      if (d < 2.2 && r() < 0.6) return vary([70, 70, 76] as unknown as RGB, 12, r);
+      return vary([28, 28, 32] as unknown as RGB, 10, r);
     }),
 
   stick: (img, r) =>
     tileRegion(img, TILES.stick, (x, y) => {
-      if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58], 14, r);
-      if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38], 10, r);
+      if (Math.abs((x) - (15 - y)) <= 1) return vary([138, 100, 58] as unknown as RGB, 14, r);
+      if (Math.abs((x) - (15 - y)) === 2) return vary([96, 68, 38] as unknown as RGB, 10, r);
       return null;
     }),
 
@@ -608,16 +607,16 @@ const PAINTERS: Partial<Record<string, Painter>> = {
     return tileRegion(img, TILES.torch, (x, y) => {
       const cx = x >= 6 && x <= 9;
       if (cx && y >= 6) {
-        if (y === 6) return [120, 88, 50];
-        return (x === 6) ? [96, 68, 38] : (x === 9 ? [80, 56, 32] : [138, 100, 58]);
+        if (y === 6) return [120, 88, 50] as unknown as RGB;
+        return (x === 6) ? [96, 68, 38] as unknown as RGB : (x === 9 ? [80, 56, 32] as unknown as RGB : [138, 100, 58] as unknown as RGB);
       }
-      if (x >= 6 && x <= 9 && y >= 4 && y <= 5) return [40, 30, 24];
+      if (x >= 6 && x <= 9 && y >= 4 && y <= 5) return [40, 30, 24] as unknown as RGB;
       const fx = x - 7.5, fy = y - 2;
       const df = Math.sqrt(fx * fx + fy * fy * 0.6);
       if (y <= 5) {
-        if (df < 1.3) return [255, 246, 200];
-        if (df < 2.4) return [255, 200, 70];
-        if (df < 3.4) return [240, 130, 30];
+        if (df < 1.3) return [255, 246, 200] as unknown as RGB;
+        if (df < 2.4) return [255, 200, 70] as unknown as RGB;
+        if (df < 3.4) return [240, 130, 30] as unknown as RGB;
       }
       return null;
     });
@@ -630,14 +629,14 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   conveyor_side: (img, r) =>
     tileRegion(img, TILES.conveyor_side, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([42, 42, 48], 5, r);
+      if (rim) return vary([42, 42, 48] as unknown as RGB, 5, r);
       if (y >= 5 && y <= 10 && (x <= 4 || x >= 11)) {
         const cx = x <= 4 ? 2.5 : 13.5;
         const dx = x - cx, dy = y - 7.5;
-        if (dx * dx + dy * dy < 5) return vary([100, 100, 106], 8, r);
+        if (dx * dx + dy * dy < 5) return vary([100, 100, 106] as unknown as RGB, 8, r);
       }
-      if (y >= 3 && y <= 5) return vary([58, 58, 64], 6, r);
-      return vary([66, 66, 72], 8, r);
+      if (y >= 3 && y <= 5) return vary([58, 58, 64] as unknown as RGB, 6, r);
+      return vary([66, 66, 72] as unknown as RGB, 8, r);
     }),
 
   inserter_top_n: (img, r) => paintInserterTop(img, TILES.inserter_top_n, 0, r),
@@ -647,17 +646,68 @@ const PAINTERS: Partial<Record<string, Painter>> = {
   inserter_side: (img, r) =>
     tileRegion(img, TILES.inserter_side, (x, y) => {
       const rim = x === 0 || y === 0 || x === TILE - 1 || y === TILE - 1;
-      if (rim) return vary([40, 40, 46], 5, r);
+      if (rim) return vary([40, 40, 46] as unknown as RGB, 5, r);
       if (x >= 5 && x <= 10 && y >= 2) {
-        if (x === 5 || x === 10) return vary([100, 100, 108], 8, r);
-        if (y === 8 || y === 9) return vary([226, 146, 34], 10, r);
-        return vary([62, 62, 70], 8, r);
+        if (x === 5 || x === 10) return vary([100, 100, 108] as unknown as RGB, 8, r);
+        if (y === 8 || y === 9) return vary([226, 146, 34] as unknown as RGB, 10, r);
+        return vary([62, 62, 70] as unknown as RGB, 8, r);
       }
-      if (y >= 12 && y <= 14 && x % 3 !== 0) return vary([30, 30, 34], 4, r);
-      return vary([56, 56, 62], 8, r);
+      if (y >= 12 && y <= 14 && x % 3 !== 0) return vary([30, 30, 34] as unknown as RGB, 4, r);
+      return vary([56, 56, 62] as unknown as RGB, 8, r);
     }),
-};
 
+  log_birch_side: (img, r) => {
+    const base: RGB = [222, 220, 208] as unknown as RGB, warm: RGB = [203, 198, 179] as unknown as RGB;
+    const marks: Array<[number, number, number]> = [];
+    for (let y = 1; y < TILE; y += 3 + Math.floor(r() * 2)) {
+      const n = 1 + Math.floor(r() * 2);
+      for (let k = 0; k < n; k++) marks.push([y, Math.floor(r() * TILE), 2 + Math.floor(r() * 4)]);
+    }
+    return tileRegion(img, TILES.log_birch_side, (x, y) => {
+      for (const [my, mx, len] of marks) {
+        const within = ((x - mx + TILE) % TILE) < len;
+        if (y === my && within) return vary([44, 40, 36] as unknown as RGB, 12, r);
+        if (y === my + 1 && within && r() < 0.35) return vary([88, 82, 74] as unknown as RGB, 12, r);
+      }
+      if (x === 0 || x === TILE - 1) return vary(warm, 8, r);
+      return vary(r() < 0.2 ? warm : base, 9, r);
+    });
+  },
+  log_birch_top: ringPainter(TILES.log_birch_top, [214,210,196] as unknown as RGB, [236,231,214] as unknown as RGB, [206,198,176] as unknown as RGB),
+
+  log_spruce_side: barkPainter(TILES.log_spruce_side, [74,54,38] as unknown as RGB, [48,33,22] as unknown as RGB, 3, 0.26),
+  log_spruce_top: ringPainter(TILES.log_spruce_top, [48,33,22] as unknown as RGB, [132,96,64] as unknown as RGB, [104,74,48] as unknown as RGB),
+
+  log_palm_side: (img, r) => tileRegion(img, TILES.log_palm_side, (x, y) => {
+    const band = (y + (x < 8 ? x : TILE - x)) % 5;
+    const c: RGB = band === 0 ? [92,72,44] as unknown as RGB : band === 1 ? [122,98,62] as unknown as RGB : [138,113,74] as unknown as RGB;
+    return vary(c, 11, r);
+  }),
+  log_palm_top: ringPainter(TILES.log_palm_top, [92,72,44] as unknown as RGB, [166,138,92] as unknown as RGB, [138,113,74] as unknown as RGB),
+
+  log_alien_side: (img, r) => tileRegion(img, TILES.log_alien_side, (x, y) => {
+    const vein = (x * 3 + y * 5) % 11 === 0;
+    return vein ? vary([196,124,236] as unknown as RGB, 14, r) : vary(x % 5 === 0 ? [70,48,96] as unknown as RGB : [96,70,124] as unknown as RGB, 12, r);
+  }),
+  log_alien_top: ringPainter(TILES.log_alien_top, [70,48,96] as unknown as RGB, [176,116,214] as unknown as RGB, [118,80,152] as unknown as RGB),
+
+  leaves_birch: leafPainter(TILES.leaves_birch, [86,132,48] as unknown as RGB, [124,170,72] as unknown as RGB,
+    { holes: 0.19, speck: [178,198,98] as unknown as RGB, speckChance: 0.05 }),
+  leaves_spruce: leafPainter(TILES.leaves_spruce, [24,66,54] as unknown as RGB, [38,92,72] as unknown as RGB,
+    { holes: 0.21, grain: 12 }),
+  leaves_autumn: leafPainter(TILES.leaves_autumn, [154,84,22] as unknown as RGB, [206,138,38] as unknown as RGB,
+    { holes: 0.17, speck: [122,52,28] as unknown as RGB, speckChance: 0.11 }),
+  leaves_jungle: leafPainter(TILES.leaves_jungle, [26,86,26] as unknown as RGB, [58,140,42] as unknown as RGB,
+    { holes: 0.09, grain: 20, vein: [96,164,58] as unknown as RGB }),
+  leaves_alien: leafPainter(TILES.leaves_alien, [122,36,146] as unknown as RGB, [196,84,206] as unknown as RGB,
+    { holes: 0.15, speck: [238,170,246] as unknown as RGB, speckChance: 0.13 }),
+  leaves_crimson: leafPainter(TILES.leaves_crimson, [126,26,34] as unknown as RGB, [180,48,46] as unknown as RGB,
+    { holes: 0.16, speck: [222,120,86] as unknown as RGB, speckChance: 0.07 }),
+  leaves_neon: leafPainter(TILES.leaves_neon, [22,150,128] as unknown as RGB, [64,236,196] as unknown as RGB,
+    { holes: 0.10, speck: [224,255,242] as unknown as RGB, speckChance: 0.15 }),
+  leaves_crystal: leafPainter(TILES.leaves_crystal, [86,150,190] as unknown as RGB, [166,216,240] as unknown as RGB,
+    { holes: 0.23, grain: 22, speck: [236,250,255] as unknown as RGB, speckChance: 0.10 }),
+};
 
 export interface TextureSet {
   atlas: THREE.CanvasTexture;
@@ -793,12 +843,12 @@ export function createTextures(theme?: PlanetTheme | null): TextureSet {
   for (let y = 0; y < TILE; y++)
     for (let x = 0; x < TILE; x++) {
       const wave = (x + y * 3) % 7 === 0;
-      const c = wave ? vary([92, 138, 244], 8, wr) : vary([58, 102, 222], 10, wr);
+      const c = wave ? vary([92, 138, 244] as unknown as RGB, 8, wr) : vary([58, 102, 222] as unknown as RGB, 10, wr);
       put(wimg.data, TILE, x, y, [
         Math.max(0, Math.min(255, c[0] * wm[0])),
         Math.max(0, Math.min(255, c[1] * wm[1])),
         Math.max(0, Math.min(255, c[2] * wm[2])),
-      ] as const);
+      ] as unknown as RGB);
     }
   wctx.putImageData(wimg, 0, 0);
   const water = configure(new THREE.CanvasTexture(wc));

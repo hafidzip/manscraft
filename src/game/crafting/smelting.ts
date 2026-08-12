@@ -16,6 +16,7 @@ export const SMELT_RECIPES: SmeltRecipe[] = [
   { input: B.COBBLE, output: B.STONE, count: 1 },
   { input: B.GRASS, output: B.DIRT, count: 1 },
   { input: B.RAW_COAL_ORE, output: B.COAL, count: 1 },
+  { input: B.LOG, output: B.COAL, count: 1 },
 ];
 
 const SMELT_INDEX = new Map<number, SmeltRecipe>(SMELT_RECIPES.map((r) => [r.input, r]));

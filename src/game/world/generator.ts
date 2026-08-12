@@ -1,12 +1,12 @@
-
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, SEA_LEVEL, WORLD_SIZE, wrapBlock, chunkIndex } from '../core/constants';
 import {
   Torus2, PeriodicPerlin2, fbm, ridged, billow, warp2,
   smoothstep, to01, hash2, clamp, type Periodic2,
 } from '../core/noise';
 import { B, DEFS } from './blocks';
-import { Biome, BIOME_DEFS, pickBiome } from './biomes';
+import { Biome, BIOME_DEFS, type BiomeDef, pickBiome } from './biomes';
 import { floraFor, type Flora, type TreeShape } from '../space/flora';
+import { resolveSpecies, type TreePalette, type SpeciesMix } from './treeSpecies';
 import { NO_ORIGIN, type OriginTag } from '../core/origin';
 import type { PlanetType } from '../space/palettes';
 
@@ -427,7 +427,7 @@ export class TerrainGenerator {
         if (h <= this.sea + 1) continue;
         const surface = this.surfaceBlock(biome, h);
         if (surface !== bDef.surface) continue;
-        this.placeTree(set, px, h, pz);
+        this.placeTree(set, px, h, pz, bDef);
       }
     }
   }
@@ -451,130 +451,202 @@ export class TerrainGenerator {
     return range[0] + Math.floor(t * Math.max(1, range[1] - range[0] + 1));
   }
 
-  private placeTree(set: SetFn, wx: number, h: number, wz: number): void {
+  private treeMixFor(bDef: BiomeDef | undefined, s: TreeShape): readonly SpeciesMix[] {
+    if (s.earthlike && bDef?.treeMix?.length) return bDef.treeMix;
+    return s.mix;
+  }
+
+  private pickPalette(wx: number, wz: number, mix: readonly SpeciesMix[]): TreePalette {
+    const groveT = hash2(this.seed ^ 0x67a0, Math.floor(wx / 24), Math.floor(wz / 24));
+    const localT = this.j(wx, wz, 0x67a1);
+    return resolveSpecies(mix, localT < 0.72 ? groveT : localT);
+  }
+
+  private placeTree(set: SetFn, wx: number, h: number, wz: number, bDef?: BiomeDef): void {
     const s = this.flora.tree;
+    const pal = this.pickPalette(wx, wz, this.treeMixFor(bDef, s));
     switch (s.silhouette) {
-      case 'conifer': return this.tConifer(set, wx, h, wz, s);
-      case 'palm': return this.tPalm(set, wx, h, wz, s);
-      case 'spire': return this.tSpire(set, wx, h, wz, s);
-      case 'crystal': return this.tCrystal(set, wx, h, wz, s);
-      case 'succulent': return this.tSucculent(set, wx, h, wz, s);
-      case 'umbrella': return this.tUmbrella(set, wx, h, wz, s);
-      case 'fungal': return this.tFungal(set, wx, h, wz, s);
-      case 'none': return;
-      default: return this.tBroadleaf(set, wx, h, wz, s);
+      case 'conifer':   return this.tConifer(set, wx, h, wz, s, pal);
+      case 'palm':      return this.tPalm(set, wx, h, wz, s, pal);
+      case 'spire':     return this.tSpire(set, wx, h, wz, s, pal);
+      case 'crystal':   return this.tCrystal(set, wx, h, wz, s, pal);
+      case 'succulent': return this.tSucculent(set, wx, h, wz, s, pal);
+      case 'umbrella':  return this.tUmbrella(set, wx, h, wz, s, pal);
+      case 'fungal':    return this.tFungal(set, wx, h, wz, s, pal);
+      case 'mega':      return this.tMega(set, wx, h, wz, s, pal);
+      case 'none':      return;
+      default:          return this.tBroadleaf(set, wx, h, wz, s, pal);
     }
   }
 
-  private blob(set: SetFn, cx: number, cy: number, cz: number, rx: number, ry: number, rz: number, density: number, salt: number): void {
-    for (let dy = -ry; dy <= ry; dy++) {
-      for (let dx = -rx; dx <= rx; dx++) {
+
+  private blob(set: SetFn, cx: number, cy: number, cz: number,
+               rx: number, ry: number, rz: number,
+               density: number, salt: number, pal: TreePalette): void {
+    for (let dy = -ry; dy <= ry; dy++)
+      for (let dx = -rx; dx <= rx; dx++)
         for (let dz = -rz; dz <= rz; dz++) {
-          const d = (dx * dx) / Math.max(1, rx * rx) + (dy * dy) / Math.max(1, ry * ry) + (dz * dz) / Math.max(1, rz * rz);
-          if (d > 1.05) continue;
+          const wob = 0.88 + hash2(this.seed ^ (salt ^ 0x0b10), cx * 13 + dx, cz * 29 + dz) * 0.30;
+          const d = (dx*dx)/Math.max(1,rx*rx) + (dy*dy)/Math.max(1,ry*ry) + (dz*dz)/Math.max(1,rz*rz);
+          if (d > 1.05 * wob) continue;
           const edge = d > 0.55;
-          if (edge && hash2(this.seed ^ salt, cx * 31 + dx, (cy + dy) * 7 + dz) > density) continue;
-          set(cx + dx, cy + dy, cz + dz, B.LEAVES, false);
+          if (edge && hash2(this.seed ^ salt, cx*31+dx, (cy+dy)*7+dz) > density) continue;
+          const alt = pal.leavesAlt !== undefined &&
+            hash2(this.seed ^ (salt ^ 0x5bd1), cx*17+dx, (cy+dy)*11+dz) < pal.altChance;
+          set(cx + dx, cy + dy, cz + dz, alt ? pal.leavesAlt! : pal.leaves, false);
         }
-      }
-    }
   }
 
-  private trunk(set: SetFn, wx: number, h: number, wz: number, len: number, lean: number, dirX: number, dirZ: number): [number, number, number] {
+  private trunk(set: SetFn, wx: number, h: number, wz: number, len: number,
+                lean: number, dirX: number, dirZ: number,
+                pal: TreePalette, thick = 0): [number, number, number] {
     let tx = wx, tz = wz;
     for (let i = 1; i <= len; i++) {
       const t = i / Math.max(1, len);
-      tx = wx + Math.round(dirX * lean * t * t);
-      tz = wz + Math.round(dirZ * lean * t * t);
-      set(tx, h + i, tz, B.LOG, true);
+      const bend = lean >= 1 ? Math.sin(t * 1.35) / Math.sin(1.35) : t * t;
+      tx = wx + Math.round(dirX * lean * bend);
+      tz = wz + Math.round(dirZ * lean * bend);
+      const rad = (thick > 0 && t < 0.72) ? thick : 0;
+      for (let dx = 0; dx <= rad; dx++)
+        for (let dz = 0; dz <= rad; dz++)
+          set(tx + dx, h + i, tz + dz, pal.log, true);
     }
     return [tx, h + len, tz];
   }
 
-  private tBroadleaf(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private limb(set: SetFn, x0: number, y0: number, z0: number,
+               dx: number, dz: number, len: number, rise: number,
+               pal: TreePalette): [number, number, number] {
+    let x = x0, y = y0, z = z0;
+    for (let i = 1; i <= len; i++) {
+      x = x0 + Math.round(dx * i);
+      z = z0 + Math.round(dz * i);
+      y = y0 + Math.round(rise * i);
+      set(x, y, z, pal.log, true);
+    }
+    return [x, y, z];
+  }
+
+
+  private tBroadleaf(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0xa7ee));
     const ang = this.j(wx, wz, 0xa1) * 6.283;
-    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(ang), Math.sin(ang));
-    const r = this.pickI(s.canopyR, this.j(wx, wz, 0xa2));
-    this.blob(set, tx, top - 1, tz, r, Math.max(1, s.canopyH >> 1), r, s.leafDensity, 0x1eaf);
-    this.blob(set, tx, top + 1, tz, Math.max(1, r - 1), 1, Math.max(1, r - 1), s.leafDensity * 0.9, 0x1eb0);
+    const big = trunkH >= 8 && this.j(wx, wz, 0xa8) < 0.35;
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean,
+                                     Math.cos(ang), Math.sin(ang), pal, big ? 1 : 0);
+    const r = Math.max(2, this.pickI(s.canopyR, this.j(wx, wz, 0xa2)) + (big ? 1 : 0));
+
+    const limbs = 2 + Math.floor(this.j(wx, wz, 0xa3) * 3);
+    for (let k = 0; k < limbs; k++) {
+      const la = ang + (k / limbs) * 6.283 + (this.jn(wx, wz, 0xa4, k) - 0.5) * 0.8;
+      const ly = top - 1 - Math.floor(this.jn(wx, wz, 0xa5, k) * Math.max(1, trunkH * 0.35));
+      const reach = 1 + Math.floor(this.jn(wx, wz, 0xa6, k) * Math.max(1, r - 1));
+      const [bx, by, bz] = this.limb(set, tx, ly, tz, Math.cos(la), Math.sin(la), reach, 0.55, pal);
+      this.blob(set, bx, by + 1, bz,
+                Math.max(1, r - 1), Math.max(1, (s.canopyH >> 1) - 1), Math.max(1, r - 1),
+                s.leafDensity * 0.92, 0x1eb1 + k, pal);
+    }
+    this.blob(set, tx, top - 1, tz, r, Math.max(1, s.canopyH >> 1), r, s.leafDensity, 0x1eaf, pal);
+    this.blob(set, tx, top + 1, tz, Math.max(1, r - 1), 1, Math.max(1, r - 1),
+              s.leafDensity * 0.9, 0x1eb0, pal);
   }
 
-  private tConifer(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tConifer(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0xc0f1));
-    this.trunk(set, wx, h, wz, trunkH, 0, 0, 0);
-    const rMax = s.canopyR[1];
-    const base = h + Math.max(2, Math.round(trunkH * 0.32));
-    for (let ly = base; ly <= h + trunkH + 1; ly++) {
-      const t = (ly - base) / Math.max(1, h + trunkH + 1 - base);
-      const rad = Math.max(0, Math.round(rMax * (1 - t) + ((ly & 1) ? 0 : 0.6)));
-      if (rad <= 0) { set(wx, ly, wz, B.LEAVES, false); continue; }
+    this.trunk(set, wx, h, wz, trunkH + 1, 0, 0, 0, pal);
+    const rMax = Math.max(2, s.canopyR[1]);
+    const bare = Math.max(2, Math.round(trunkH * (0.24 + this.j(wx, wz, 0xc0f3) * 0.16)));
+    const base = h + bare, tipY = h + trunkH + 1, span = Math.max(1, tipY - base);
+
+    for (let ly = base; ly <= tipY; ly++) {
+      const t = (ly - base) / span;
+      const whorl = (ly - base) % 3;
+      const flare = whorl === 0 ? 1 : whorl === 1 ? 0.62 : 0.28;
+      const rad = Math.round((rMax * (1 - t) + 0.4) * flare);
+      if (rad <= 0) { set(wx, ly, wz, pal.leaves, false); continue; }
       for (let dx = -rad; dx <= rad; dx++)
         for (let dz = -rad; dz <= rad; dz++) {
-          if (dx * dx + dz * dz > rad * rad + 1) continue;
-          if (Math.abs(dx) + Math.abs(dz) >= rad * 2 && hash2(this.seed ^ 0xc0f2, wx * 31 + dx, ly * 7 + dz) > s.leafDensity) continue;
+          const d2 = dx*dx + dz*dz;
+          if (d2 > rad*rad + rad) continue;
+          if (d2 > (rad-1)*(rad-1) &&
+              hash2(this.seed ^ 0xc0f2, wx*31+dx, ly*7+dz) > s.leafDensity) continue;
           if (dx === 0 && dz === 0 && ly <= h + trunkH) continue;
-          set(wx + dx, ly, wz + dz, B.LEAVES, false);
+          set(wx + dx, ly, wz + dz, pal.leaves, false);
         }
     }
+    set(wx, tipY + 1, wz, pal.leaves, false);
   }
 
-  private tPalm(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tPalm(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0x9a1));
     const a = this.j(wx, wz, 0x9a2) * Math.PI * 2;
-    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a));
-    const fronds = Math.max(4, s.branches);
-    const len = this.pickI(s.canopyR, this.j(wx, wz, 0x9a3)) + 1;
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a), pal);
+    const fronds = Math.max(5, s.branches);
+    const baseLen = this.pickI(s.canopyR, this.j(wx, wz, 0x9a3)) + 1;
+
     for (let f = 0; f < fronds; f++) {
       const fa = (f / fronds) * Math.PI * 2 + this.j(wx, wz, 0x9a4) * 0.9;
       const dx = Math.cos(fa), dz = Math.sin(fa);
+      const len = Math.max(2, baseLen - (this.jn(wx, wz, 0x9a6, f) < 0.4 ? 1 : 0));
       for (let i = 1; i <= len; i++) {
-        const drop = Math.round(s.droop * (i * i) / Math.max(1, len));
+        const t = i / len;
+        const drop = Math.round(s.droop * t * t * len);
         const px = tx + Math.round(dx * i), pz = tz + Math.round(dz * i);
-        set(px, top - drop, pz, B.LEAVES, false);
+        set(px, top - drop + (i === 1 ? 1 : 0), pz, pal.leaves, false);
         if (i < len && this.jn(wx, wz, 0x9a5, f * 8 + i) < s.leafDensity) {
-          set(px + Math.round(-dz), top - drop, pz + Math.round(dx), B.LEAVES, false);
+          set(px + Math.round(-dz), top - drop, pz + Math.round(dx), pal.leaves, false);
+          set(px + Math.round(dz),  top - drop, pz + Math.round(-dx), pal.leaves, false);
         }
       }
     }
+    set(tx, top + 1, tz, pal.leaves, false);
+    if (pal.fruit !== undefined && this.j(wx, wz, 0x9a7) < 0.5) {
+      const ca = this.j(wx, wz, 0x9a8) * Math.PI * 2;
+      set(tx + Math.round(Math.cos(ca)), top - 1, tz + Math.round(Math.sin(ca)), pal.fruit, false);
+    }
   }
 
-  private tSpire(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tSpire(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0x5a1));
     const a = this.j(wx, wz, 0x5a2) * Math.PI * 2;
-    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a));
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a), pal);
     const blobs = Math.max(1, s.branches);
     for (let n = 0; n < blobs; n++) {
       const y = h + Math.round(((n + 1) / (blobs + 1)) * trunkH);
-      const r = this.pickI(s.canopyR, this.jn(wx, wz, 0x5a3, n));
+      const shrink = 1 - (n / Math.max(1, blobs)) * 0.35;
+      const r = Math.max(1, Math.round(this.pickI(s.canopyR, this.jn(wx, wz, 0x5a3, n)) * shrink));
       const off = Math.round((this.jn(wx, wz, 0x5a4, n) - 0.5) * 2.4);
-      this.blob(set, tx + off, y, tz - off, r, r, r, s.leafDensity, 0x5a5 + n);
+      this.limb(set, tx, y, tz, Math.sign(off) || 1, -(Math.sign(off) || 1), Math.abs(off), 0, pal);
+      this.blob(set, tx + off, y, tz - off, r, r, r, s.leafDensity, 0x5a5 + n, pal);
     }
-    this.blob(set, tx, top + 1, tz, 1, 2, 1, 1, 0x5a9);
+    this.blob(set, tx, top + 1, tz, 1, 2, 1, 1, 0x5a9, pal);
   }
 
-  private tCrystal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tCrystal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const coreH = this.pickI(s.trunkH, this.j(wx, wz, 0x1c1));
-    this.trunk(set, wx, h, wz, coreH, 0, 0, 0);
+    this.trunk(set, wx, h, wz, coreH, 0, 0, 0, pal);
     const shards = Math.max(2, s.branches);
     for (let k = 0; k < shards; k++) {
       const ka = (k / shards) * Math.PI * 2 + this.j(wx, wz, 0x1c2) * 1.2;
-      const bx = wx + Math.round(Math.cos(ka) * (1 + this.jn(wx, wz, 0x1c3, k)));
-      const bz = wz + Math.round(Math.sin(ka) * (1 + this.jn(wx, wz, 0x1c3, k)));
+      const dist = 1 + this.jn(wx, wz, 0x1c3, k);
+      const bx = wx + Math.round(Math.cos(ka) * dist);
+      const bz = wz + Math.round(Math.sin(ka) * dist);
       const hgt = 2 + Math.floor(this.jn(wx, wz, 0x1c4, k) * s.canopyH);
       for (let ly = 0; ly < hgt; ly++) {
         const rad = ly < hgt * 0.5 ? 1 : 0;
         for (let dx = -rad; dx <= rad; dx++)
-          for (let dz = -rad; dz <= rad; dz++)
-            set(bx + dx, h + 1 + ly, bz + dz, B.LEAVES, false);
+          for (let dz = -rad; dz <= rad; dz++) {
+            if (rad === 1 && dx !== 0 && dz !== 0 && ly > hgt * 0.3) continue;
+            set(bx + dx, h + 1 + ly, bz + dz, pal.leaves, false);
+          }
       }
     }
-    this.blob(set, wx, h + coreH + 1, wz, 1, 2, 1, 1, 0x1c5);
+    this.blob(set, wx, h + coreH + 1, wz, 1, 2, 1, 1, 0x1c5, pal);
   }
 
-  private tSucculent(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tSucculent(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const stemH = this.pickI(s.trunkH, this.j(wx, wz, 0xd51));
-    this.trunk(set, wx, h, wz, stemH, 0, 0, 0);
+    this.trunk(set, wx, h, wz, stemH, 0, 0, 0, pal);
     const arms = Math.max(1, s.branches);
     for (let k = 0; k < arms; k++) {
       const ka = (k / arms) * Math.PI * 2 + this.j(wx, wz, 0xd52) * 1.5;
@@ -582,48 +654,92 @@ export class TerrainGenerator {
       if (!dx && !dz) continue;
       const atY = h + 2 + Math.floor(this.jn(wx, wz, 0xd53, k) * Math.max(1, stemH - 3));
       const reach = 1 + Math.floor(this.jn(wx, wz, 0xd54, k) * 2);
-      for (let i = 1; i <= reach; i++) set(wx + dx * i, atY, wz + dz * i, B.LOG, true);
+      for (let i = 1; i <= reach; i++) set(wx + dx * i, atY, wz + dz * i, pal.log, true);
       const rise = 2 + Math.floor(this.jn(wx, wz, 0xd55, k) * 3);
-      for (let i = 1; i <= rise; i++) set(wx + dx * reach, atY + i, wz + dz * reach, B.LOG, true);
-      if (s.leafDensity > 0.25) set(wx + dx * reach, atY + rise + 1, wz + dz * reach, B.LEAVES, false);
+      for (let i = 1; i <= rise; i++) set(wx + dx * reach, atY + i, wz + dz * reach, pal.log, true);
+      if (s.leafDensity > 0.25)
+        set(wx + dx * reach, atY + rise + 1, wz + dz * reach, pal.leaves, false);
     }
-    if (s.leafDensity > 0.25) set(wx, h + stemH + 1, wz, B.LEAVES, false);
+    if (s.leafDensity > 0.25) set(wx, h + stemH + 1, wz, pal.leaves, false);
   }
 
-  private tUmbrella(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tUmbrella(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0x8b1));
     const a = this.j(wx, wz, 0x8b2) * Math.PI * 2;
-    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a));
-    const r = this.pickI(s.canopyR, this.j(wx, wz, 0x8b3));
-    for (let ly = 0; ly < Math.max(1, s.canopyH); ly++) {
-      const rad = r - ly;
-      if (rad <= 0) break;
-      for (let dx = -rad; dx <= rad; dx++)
-        for (let dz = -rad; dz <= rad; dz++) {
-          if (dx * dx + dz * dz > rad * rad) continue;
-          if (dx * dx + dz * dz > (rad - 1) * (rad - 1) && this.jn(wx, wz, 0x8b4, dx * 13 + dz) > s.leafDensity) continue;
-          set(tx + dx, top + ly, tz + dz, B.LEAVES, false);
-        }
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, trunkH, s.trunkLean, Math.cos(a), Math.sin(a), pal);
+    const r = Math.max(2, this.pickI(s.canopyR, this.j(wx, wz, 0x8b3)));
+    const forks = 2 + (this.j(wx, wz, 0x8b5) < 0.4 ? 1 : 0);
+
+    const crowns: Array<[number, number, number, boolean]> = [[tx, top, tz, true]];
+    for (let k = 0; k < forks; k++) {
+      const fa = a + Math.PI + (k / forks) * 6.283 + (this.jn(wx, wz, 0x8b6, k) - 0.5) * 0.7;
+      const reach = 1 + Math.floor(this.jn(wx, wz, 0x8b7, k) * 2);
+      const [fx, fy, fz] = this.limb(set, tx, top, tz, Math.cos(fa), Math.sin(fa), reach, 0.8, pal);
+      crowns.push([fx, fy, fz, false]);
+    }
+    for (const [cx, cy, cz, main] of crowns) {
+      for (let ly = 0; ly < Math.max(1, s.canopyH); ly++) {
+        const rad = r - ly - (main ? 0 : 1);
+        if (rad <= 0) break;
+        for (let dx = -rad; dx <= rad; dx++)
+          for (let dz = -rad; dz <= rad; dz++) {
+            const d2 = dx*dx + dz*dz;
+            if (d2 > rad*rad) continue;
+            if (d2 > (rad-1)*(rad-1) &&
+                this.jn(wx, wz, 0x8b4, dx*13 + dz + cx) > s.leafDensity) continue;
+            set(cx + dx, cy + 1 + ly, cz + dz, pal.leaves, false);
+          }
+      }
     }
   }
 
-  private tFungal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape) {
+  private tFungal(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
     const stalkH = this.pickI(s.trunkH, this.j(wx, wz, 0xf01));
     const a = this.j(wx, wz, 0xf02) * Math.PI * 2;
-    const [tx, top, tz] = this.trunk(set, wx, h, wz, stalkH, s.trunkLean, Math.cos(a), Math.sin(a));
+    const [tx, top, tz] = this.trunk(set, wx, h, wz, stalkH, s.trunkLean, Math.cos(a), Math.sin(a), pal);
     const r = this.pickI(s.canopyR, this.j(wx, wz, 0xf03));
+
     for (let dy = 0; dy <= Math.max(1, s.canopyH - 1); dy++) {
       const rad = Math.round(r * Math.cos((dy / Math.max(1, s.canopyH)) * (Math.PI / 2)));
       for (let dx = -rad; dx <= rad; dx++)
         for (let dz = -rad; dz <= rad; dz++) {
-          if (dx * dx + dz * dz > rad * rad) continue;
-          set(tx + dx, top + dy, tz + dz, B.LEAVES, false);
+          const d2 = dx*dx + dz*dz;
+          if (d2 > rad*rad) continue;
+          if (dy === 0 && d2 < (rad-1)*(rad-1)) continue;
+          set(tx + dx, top + dy, tz + dz, pal.leaves, false);
         }
     }
-    const skirt = Math.round(s.droop * r);
+    const skirt = Math.round(s.droop * r * 2);
     for (let i = 0; i < skirt; i++) {
       const ga = this.jn(wx, wz, 0xf04, i) * Math.PI * 2;
-      set(tx + Math.round(Math.cos(ga) * r), top - 1, tz + Math.round(Math.sin(ga) * r), B.LEAVES, false);
+      set(tx + Math.round(Math.cos(ga) * r), top - 1, tz + Math.round(Math.sin(ga) * r),
+          pal.leaves, false);
+    }
+  }
+
+  private tMega(set: SetFn, wx: number, h: number, wz: number, s: TreeShape, pal: TreePalette) {
+    const trunkH = this.pickI(s.trunkH, this.j(wx, wz, 0x3e01)) + 4;
+    for (let i = 1; i <= trunkH; i++)
+      for (let dx = 0; dx <= 1; dx++)
+        for (let dz = 0; dz <= 1; dz++)
+          set(wx + dx, h + i, wz + dz, pal.log, true);
+    const top = h + trunkH;
+    const r = Math.max(3, s.canopyR[1] + 2);
+
+    this.blob(set, wx, top, wz, r, 2, r, s.leafDensity, 0x3e02, pal);
+    this.blob(set, wx + 1, top + 2, wz + 1, Math.max(2, r - 2), 1, Math.max(2, r - 2),
+              s.leafDensity * 0.9, 0x3e03, pal);
+
+    const strands = 4 + Math.floor(this.j(wx, wz, 0x3e04) * 5);
+    for (let k = 0; k < strands; k++) {
+      const va = this.jn(wx, wz, 0x3e05, k) * 6.283;
+      const vx = wx + Math.round(Math.cos(va) * r), vz = wz + Math.round(Math.sin(va) * r);
+      const drop = 2 + Math.floor(this.jn(wx, wz, 0x3e06, k) * 5);
+      for (let d = 0; d < drop; d++) set(vx, top - 1 - d, vz, pal.leaves, false);
+    }
+    for (let k = 0; k < 4; k++) {
+      const ba = (k / 4) * 6.283 + 0.78;
+      set(wx + Math.round(Math.cos(ba) * 2), h + 1, wz + Math.round(Math.sin(ba) * 2), pal.log, true);
     }
   }
 }

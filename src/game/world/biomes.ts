@@ -1,5 +1,5 @@
-
 import { B } from './blocks';
+import type { SpeciesMix } from './treeSpecies';
 
 export enum Biome {
   PLAINS = 0,
@@ -22,16 +22,19 @@ export interface BiomeDef {
   flowers: number;
   grass: number;
   cactus: number;
+  treeMix?: SpeciesMix[];
 }
 
 export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Plains', surface: B.GRASS, sub: B.DIRT, hill: 2.0,
     trees: 0.006, tree: 'auto', flowers: 0.03, grass: 0.58, cactus: 0,
+    treeMix: [{ species: 'oak', w: 6 }, { species: 'birch', w: 3 }, { species: 'autumn', w: 1 }],
   },
   {
     name: 'Forest', surface: B.GRASS, sub: B.DIRT, hill: 3.0,
     trees: 0.05, tree: 'auto', flowers: 0.012, grass: 0.64, cactus: 0,
+    treeMix: [{ species: 'oak', w: 5 }, { species: 'birch', w: 3 }, { species: 'autumn', w: 2 }],
   },
   {
     name: 'Desert', surface: B.SAND, sub: B.SAND, hill: 1.5,
@@ -40,10 +43,12 @@ export const BIOME_DEFS: BiomeDef[] = [
   {
     name: 'Mountains', surface: B.GRASS, sub: B.STONE, hill: 7,
     trees: 0.006, tree: 'auto', flowers: 0.01, grass: 0.32, cactus: 0,
+    treeMix: [{ species: 'spruce', w: 5 }, { species: 'oak', w: 2 }, { species: 'autumn', w: 1 }],
   },
   {
     name: 'Snowy Taiga', surface: B.SNOW, sub: B.DIRT, hill: 4,
     trees: 0.022, tree: 'auto', flowers: 0, grass: 0.02, cactus: 0,
+    treeMix: [{ species: 'spruce', w: 8 }, { species: 'birch', w: 2 }],
   },
 ];
 

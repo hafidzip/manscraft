@@ -50,7 +50,32 @@ export const B = {
   LASER_MINER_S: 62,
   LASER_MINER_W: 63,
   TURRET: 64,
+
+  LOG_BIRCH: 110,
+  LOG_SPRUCE: 111,
+  LOG_PALM: 112,
+  LOG_ALIEN: 113,
+  LEAVES_BIRCH: 114,
+  LEAVES_SPRUCE: 115,
+  LEAVES_AUTUMN: 116,
+  LEAVES_JUNGLE: 117,
+  LEAVES_ALIEN: 118,
+  LEAVES_CRIMSON: 119,
+  LEAVES_NEON: 120,
+  LEAVES_CRYSTAL: 121,
 } as const;
+
+export const LOG_IDS: readonly number[] = [
+  B.LOG, B.LOG_BIRCH, B.LOG_SPRUCE, B.LOG_PALM, B.LOG_ALIEN,
+] as const;
+export const LEAF_IDS: readonly number[] = [
+  B.LEAVES, B.LEAVES_BIRCH, B.LEAVES_SPRUCE, B.LEAVES_AUTUMN, B.LEAVES_JUNGLE,
+  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
+] as const;
+const LOG_SET = new Set<number>(LOG_IDS);
+const LEAF_SET = new Set<number>(LEAF_IDS);
+export const isLog = (id: number): boolean => LOG_SET.has(id);
+export const isLeaves = (id: number): boolean => LEAF_SET.has(id);
 
 export type SoundMat = 'grass' | 'dirt' | 'sand' | 'stone' | 'wood' | 'glass' | 'plant';
 
@@ -130,10 +155,35 @@ DEFS[B.LOG] = def({
   name: 'Oak Log', top: TILES.log_top, side: TILES.log_side, hardness: 0.8, sound: 'wood',
   colors: [0x684c2c, 0x563e24, 0xb08a5a],
 });
-DEFS[B.LEAVES] = def({
-  name: 'Leaves', top: TILES.leaves, opaque: false, cutout: true, hardness: 0.15, sound: 'plant',
-  colors: [0x2e6626, 0x3f8428, 0x27571f],
+DEFS[B.LOG_BIRCH] = def({
+  name: 'Birch Log', top: TILES.log_birch_top, side: TILES.log_birch_side, hardness: 0.8, sound: 'wood',
+  colors: [0xd6d2c4, 0xbfbaa8, 0x2c2824],
 });
+DEFS[B.LOG_SPRUCE] = def({
+  name: 'Spruce Log', top: TILES.log_spruce_top, side: TILES.log_spruce_side, hardness: 0.85, sound: 'wood',
+  colors: [0x4a3626, 0x38281c, 0x6d523a],
+});
+DEFS[B.LOG_PALM] = def({
+  name: 'Palm Log', top: TILES.log_palm_top, side: TILES.log_palm_side, hardness: 0.7, sound: 'wood',
+  colors: [0x7a623e, 0x5f4c30, 0x9c8154],
+});
+DEFS[B.LOG_ALIEN] = def({
+  name: 'Xeno Stalk', top: TILES.log_alien_top, side: TILES.log_alien_side, hardness: 0.7, sound: 'wood',
+  colors: [0x60467c, 0x452f5c, 0x9a6ec4], light: 4,
+});
+
+const leafDef = (name: string, tile: number, colors: number[], light?: number) =>
+  def({ name, top: tile, opaque: false, cutout: true, hardness: 0.15, sound: 'plant', colors, light });
+
+DEFS[B.LEAVES] = leafDef('Oak Leaves', TILES.leaves, [0x2e6626, 0x3f8428, 0x27571f]);
+DEFS[B.LEAVES_BIRCH] = leafDef('Birch Leaves', TILES.leaves_birch, [0x789a3c, 0x8fb04a, 0x5f8030]);
+DEFS[B.LEAVES_SPRUCE] = leafDef('Spruce Needles', TILES.leaves_spruce, [0x1f5044, 0x2b6a56, 0x17403a]);
+DEFS[B.LEAVES_AUTUMN] = leafDef('Autumn Leaves', TILES.leaves_autumn, [0xb4701e, 0xce8a26, 0x8c4c18]);
+DEFS[B.LEAVES_JUNGLE] = leafDef('Jungle Leaves', TILES.leaves_jungle, [0x2a7122, 0x3a8c2a, 0x1d551c]);
+DEFS[B.LEAVES_ALIEN] = leafDef('Xeno Fronds', TILES.leaves_alien, [0x9f3cb0, 0xc454d0, 0x7a2a8c], 5);
+DEFS[B.LEAVES_CRIMSON] = leafDef('Crimson Fronds', TILES.leaves_crimson, [0x992528, 0xb43a36, 0x71191d]);
+DEFS[B.LEAVES_NEON] = leafDef('Neon Caps', TILES.leaves_neon, [0x2bc1a2, 0x40e0c0, 0x1c8f78], 8);
+DEFS[B.LEAVES_CRYSTAL] = leafDef('Frost Shards', TILES.leaves_crystal, [0x7cb6d6, 0xa2d6ee, 0x5e93b4], 3);
 DEFS[B.WATER] = def({
   name: 'Water', top: TILES.water, solid: false, opaque: false, water: true, cutout: false,
   hardness: 0, sound: 'sand', colors: [0x3a66de, 0x5c8af4],
@@ -400,12 +450,27 @@ export const BLOCK_GROUP: Partial<Record<number, string>> = {
   [B.LOG]: 'log', [B.LEAVES]: 'leaves', [B.WATER]: 'water', [B.SNOW]: 'snow',
   [B.PLANKS]: 'planks', [B.TALLGRASS]: 'grass',
   [B.CACTUS]: 'cactus', [B.CRAFTING_TABLE]: 'planks',
+  [B.LOG_BIRCH]: 'log_birch',
+  [B.LOG_SPRUCE]: 'log_spruce',
+  [B.LOG_PALM]: 'log_palm',
+  [B.LOG_ALIEN]: 'log_alien',
+  [B.LEAVES_BIRCH]: 'leaves_birch',
+  [B.LEAVES_SPRUCE]: 'leaves_spruce',
+  [B.LEAVES_AUTUMN]: 'leaves_autumn',
+  [B.LEAVES_JUNGLE]: 'leaves_jungle',
+  [B.LEAVES_ALIEN]: 'leaves_alien',
+  [B.LEAVES_CRIMSON]: 'leaves_crimson',
+  [B.LEAVES_NEON]: 'leaves_neon',
+  [B.LEAVES_CRYSTAL]: 'leaves_crystal',
   ...Object.fromEntries(STONE_GROUP.map((id) => [id, 'stone'])),
 };
 
 export const THEMED_IDS: ReadonlySet<number> = new Set([
   B.GRASS, B.DIRT, B.SAND, B.LOG, B.LEAVES, B.PLANKS, B.TALLGRASS,
   B.FLOWER_RED, B.FLOWER_YELLOW, B.SNOW, B.WATER, B.CACTUS,
+  B.LOG_BIRCH, B.LOG_SPRUCE, B.LOG_PALM, B.LOG_ALIEN,
+  B.LEAVES_BIRCH, B.LEAVES_SPRUCE, B.LEAVES_AUTUMN, B.LEAVES_JUNGLE,
+  B.LEAVES_ALIEN, B.LEAVES_CRIMSON, B.LEAVES_NEON, B.LEAVES_CRYSTAL,
 ]);
 export const isThemedId = (id: number): boolean => THEMED_IDS.has(id);
 

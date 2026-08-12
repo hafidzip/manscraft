@@ -2,8 +2,9 @@
 import * as THREE from 'three';
 import { CHUNK_SIZE as S, WORLD_HEIGHT as H, chunkIndex } from '../core/constants';
 import { tileUV } from '../core/textures';
-import { B, DEFS, isWaterId, isInserter, isLaserMiner, isTurret, waterHeight, waterInfo, BLOCK_GROUP } from './blocks';
+import { B, DEFS, isWaterId, isInserter, isLaserMiner, isTurret, waterHeight, waterInfo, BLOCK_GROUP, isLeaves } from './blocks';
 import { relativeColorMul, type OriginTag } from '../core/origin';
+import type { RGB } from '../core/tintGroups';
 import { activeFlora, activeOriginTag } from './generator';
 
 export type BlockGetter = (wx: number, wy: number, wz: number) => number;
@@ -52,7 +53,7 @@ for (let id = 0; id < 256; id++) {
   SKIP_ID[id]  = (isInserter(id) || isLaserMiner(id) || isTurret(id)) ? 1 : 0;
   const fullOpaque = !!d.solid && !d.cross && !d.cutout && !d.water;
   IS_CUBE[id]  = fullOpaque ? 1 : 0;
-  OCCLUDES[id] = (d.opaque || id === B.LEAVES) ? 1 : 0;
+  OCCLUDES[id] = (d.opaque || isLeaves(id)) ? 1 : 0;
 }
 OCCLUDES[UNKNOWN] = 1;
 
@@ -250,7 +251,7 @@ export function buildChunkGeometry(
         }
 
         const isWater = !!d.water;
-        const isFoliage = id === B.LEAVES;
+        const isFoliage = isLeaves(id);
         const bucket = isWater ? waterB : isFoliage ? foliageB : d.cutout ? cutoutB : opaqueB;
         const voxelTag = tagAt(x, y, z);
         const voxelMul = relativeColorMul(voxelTag, nativeTag, BLOCK_GROUP[id]);
@@ -340,7 +341,7 @@ export function buildChunkGeometry(
 
           let visible: boolean;
           if (isWater) visible = !isWaterId(nid) && !nd.opaque;
-          else if (d.cutout || isFoliage) visible = nid !== id && !nd.opaque;
+          else if (d.cutout || isFoliage) visible = !(isFoliage && isLeaves(nid)) && nid !== id && !nd.opaque;
           else visible = !nd.opaque;
           if (!visible) continue;
 
@@ -421,7 +422,7 @@ export function buildChunkGeometry(
 
 function emitCross(
   bucket: Bucket, x: number, y: number, z: number, tile: number, swayStrength = 0,
-  wx = x, wz = z, mul: [number, number, number] = [1, 1, 1],
+  wx = x, wz = z, mul: RGB = [1, 1, 1] as RGB,
 ): void {
   const m = 0.15;
   const [u0, v0, u1, v1] = tileUV(tile);
@@ -532,7 +533,7 @@ function hashPlant(x: number, y: number, z: number, salt: number): number {
 
 function emitTallGrass(
   bucket: Bucket, x: number, y: number, z: number, tile: number, wx: number, wz: number,
-  mul: [number, number, number] = [1, 1, 1],
+  mul: RGB = [1, 1, 1] as RGB,
 ): void {
   const [u0, v0, u1, v1] = tileUV(tile);
   const seed = hashPlant(wx, y, wz, 101);

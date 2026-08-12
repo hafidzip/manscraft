@@ -1,9 +1,10 @@
-
 import { PLANET_PALETTES, rampAt255, type PlanetType } from '../space/palettes';
+import { TINT_REF, GROUP_H, TINT_LO, TINT_HI, strengthFor, type RGB } from './tintGroups';
 
 export type OriginTag = number;
-export type RGB = [number, number, number];
 export type TintMap = Record<string, RGB>;
+
+export { TINT_REF, GROUP_H };
 
 export const NO_ORIGIN: OriginTag = 0;
 
@@ -58,25 +59,6 @@ export function hueBucketOffsets(b: number): { hue: number; sat: number; val: nu
 }
 
 
-export const TINT_REF: TintMap = {
-  grass: [96, 162, 54],
-  dirt: [121, 85, 58],
-  stone: [128, 128, 128],
-  sand: [219, 207, 163],
-  leaves: [56, 120, 40],
-  log: [104, 76, 44],
-  planks: [164, 129, 80],
-  snow: [238, 246, 248],
-  water: [58, 102, 222],
-  cactus: [62, 138, 56],
-};
-
-export const GROUP_H: Record<string, number> = {
-  grass: 0.14, leaves: 0.22, dirt: 0.08, sand: 0.04, stone: 0.5,
-  log: 0.3, planks: 0.36, water: -0.2, cactus: 0.18,
-};
-
-const TINT_STRENGTH = 0.85, TINT_LO = 0.22, TINT_HI = 2.4;
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -138,14 +120,18 @@ export function originTints(tag: OriginTag): TintMap | null {
     const ref = TINT_REF[group];
     out[group] = [0, 1, 2].map((i) => {
       const raw = target[i] / Math.max(1, ref[i]);
-      return clamp(1 + (raw - 1) * TINT_STRENGTH, TINT_LO, TINT_HI);
-    }) as RGB;
+      return clamp(1 + (raw - 1) * strengthFor(group), TINT_LO, TINT_HI);
+    }) as unknown as RGB;
   }
   if (PLANET_PALETTES[type].lava) {
     for (const g of ['stone', 'dirt']) {
-      if (!out[g]) continue;
-      out[g][0] = clamp(out[g][0] * 1.14, TINT_LO, TINT_HI);
-      out[g][2] = clamp(out[g][2] * 0.86, TINT_LO, TINT_HI);
+      const cur = out[g];
+      if (!cur) continue;
+      out[g] = [
+        clamp(cur[0] * 1.14, TINT_LO, TINT_HI),
+        cur[1],
+        clamp(cur[2] * 0.86, TINT_LO, TINT_HI),
+      ] as RGB;
     }
   }
   tintCache.set(tag, out);
