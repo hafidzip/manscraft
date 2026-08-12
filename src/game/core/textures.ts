@@ -266,19 +266,125 @@ const leafPainter = (tile: number, dark: RGB, light: RGB, o: LeafOpts = {}): Pai
     return r() < 0.42 ? vary(dark, g - 2, r) : vary(light, g, r);
   });
 
-const barkPainter = (tile: number, base: RGB, dark: RGB, stripe = 4, noise = 0.18): Painter =>
+interface BarkStyle {
+  tile: number;
+  base: RGB;
+  ridge: RGB;
+  furrow: RGB;
+  knot?: RGB;
+  lichen?: RGB;
+  lichenChance?: number;
+  gap: number;
+  wander: number;
+  knots: number;
+  lenticel?: RGB;
+  lenticelGap?: number;
+  band?: RGB;
+  bandGap?: number;
+  vein?: RGB;
+}
+
+const barkPainter = (style: BarkStyle): Painter =>
   (img, r) => {
-    const cols: RGB[] = [];
-    for (let x = 0; x < TILE; x++) cols[x] = (x % stripe === 0 || r() < noise) ? dark : base;
-    return tileRegion(img, tile, (x, y) => vary(cols[x], 10 + ((y + x) % 3) * 2, r));
+    const furrows: { x: number; w: number; phase: number }[] = [];
+    let fx = 1 + Math.floor(r() * 2);
+    while (fx < TILE - 1) {
+      furrows.push({ x: fx, w: r() < 0.35 ? 2 : 1, phase: r() * 6.283 });
+      fx += Math.max(2, style.gap + Math.floor(r() * 2) - 1);
+    }
+
+    const knots: { x: number; y: number; rx: number; ry: number }[] = [];
+    const knotN = Math.max(0, Math.round(style.knots + (r() - 0.5)));
+    for (let i = 0; i < knotN; i++) {
+      knots.push({
+        x: 3 + Math.floor(r() * 10),
+        y: 3 + Math.floor(r() * 10),
+        rx: 1.2 + r() * 1.6,
+        ry: 0.8 + r() * 1.1,
+      });
+    }
+
+    const lenticels: { y: number; x0: number; len: number }[] = [];
+    if (style.lenticel) {
+      const gap = style.lenticelGap ?? 3;
+      for (let y = 1; y < TILE; y += gap + Math.floor(r() * 2)) {
+        const n = 1 + Math.floor(r() * 3);
+        for (let k = 0; k < n; k++) {
+          lenticels.push({ y, x0: Math.floor(r() * TILE), len: 2 + Math.floor(r() * 5) });
+        }
+      }
+    }
+
+    const bands = new Set<number>();
+    if (style.band && style.bandGap) {
+      for (let y = 1; y < TILE; y += style.bandGap + Math.floor(r() * 2)) bands.add(y);
+    }
+
+    tileRegion(img, style.tile, (x, y) => {
+      for (const k of knots) {
+        const dx = (x - k.x) / k.rx;
+        const dy = (y - k.y) / k.ry;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= 1.05) {
+          if (d2 > 0.42) return vary(style.furrow, 8, r);
+          return vary(style.knot ?? style.furrow, 10, r);
+        }
+      }
+
+      if (style.lenticel) {
+        for (const m of lenticels) {
+          const within = ((x - m.x0 + TILE) % TILE) < m.len;
+          if (y === m.y && within) return vary(style.lenticel, 10, r);
+          if (y === m.y + 1 && within && r() < 0.28) return vary(style.furrow, 8, r);
+        }
+      }
+
+      if (style.band && (bands.has(y) || (bands.has(y - 1) && r() < 0.35))) {
+        return vary(style.band, 9, r);
+      }
+
+      if (style.vein) {
+        const v = (x * 3 + y * 5 + Math.floor(Math.sin(y * 0.7) * 2)) % 11;
+        if (v === 0) return vary(style.vein, 14, r);
+      }
+
+      let inFurrow = false;
+      let nearRidge = false;
+      for (const f of furrows) {
+        const wander = Math.round(Math.sin(y * 0.55 + f.phase) * style.wander);
+        const col = f.x + wander;
+        if (Math.abs(x - col) < f.w) inFurrow = true;
+        else if (x === col - f.w) nearRidge = true;
+      }
+
+      if (inFurrow) return vary(style.furrow, 8, r);
+      if (style.lichen && r() < (style.lichenChance ?? 0)) return vary(style.lichen, 10, r);
+      if (nearRidge) return vary(style.ridge, 8, r);
+
+      const grain = ((x * 3 + y * 2) % 7 === 0) && r() < 0.45;
+      return vary(grain ? style.ridge : style.base, 10, r);
+    });
   };
 
-const ringPainter = (tile: number, bark: RGB, ringA: RGB, ringB: RGB): Painter =>
-  (img, r) => tileRegion(img, tile, (x, y) => {
-    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
-    if (d > 6.5) return vary(bark, 10, r);
-    return (Math.floor(d + r() * 0.6) % 2 === 0) ? vary(ringA, 8, r) : vary(ringB, 8, r);
-  });
+const ringPainter = (tile: number, bark: RGB, heart: RGB, sap: RGB): Painter =>
+  (img, r) => {
+    const cx = 7.15 + r() * 0.7;
+    const cy = 7.2 + r() * 0.6;
+    const squash = 0.88 + r() * 0.12;
+    tileRegion(img, tile, (x, y) => {
+      const dx = x - cx;
+      const dy = (y - cy) * squash;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 6.85) return vary(bark, 10, r);
+      if (d > 6.05) return vary(bark, 7, r);
+      if (d < 0.95) return vary(heart, 6, r);
+      const ang = Math.atan2(dy, dx);
+      const ray = Math.abs(Math.sin(ang * 5.0 + cx)) < 0.09 && d > 1.6 && d < 5.8;
+      if (ray) return vary(heart, 8, r);
+      const ring = Math.floor(d * 1.65 + r() * 0.32);
+      return (ring % 2 === 0) ? vary(sap, 7, r) : vary(heart, 7, r);
+    });
+  };
 
 const PAINTERS: Partial<Record<string, Painter>> = {
   grass_top: (img, r) =>
@@ -322,8 +428,19 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary(p, 10, r);
     });
   },
-  log_side: barkPainter(TILES.log_side, [104,76,44] as unknown as RGB, [86,60,34] as unknown as RGB, 4, 0.18),
-  log_top: ringPainter(TILES.log_top, [86,60,34] as unknown as RGB, [176,138,90] as unknown as RGB, [150,114,70] as unknown as RGB),
+  log_side: barkPainter({
+    tile: TILES.log_side,
+    base: [112, 80, 46] as unknown as RGB,
+    ridge: [138, 102, 62] as unknown as RGB,
+    furrow: [72, 48, 28] as unknown as RGB,
+    knot: [58, 38, 22] as unknown as RGB,
+    lichen: [86, 92, 48] as unknown as RGB,
+    lichenChance: 0.035,
+    gap: 4,
+    wander: 1.15,
+    knots: 1,
+  }),
+  log_top: ringPainter(TILES.log_top, [72, 48, 28] as unknown as RGB, [168, 126, 78] as unknown as RGB, [196, 154, 98] as unknown as RGB),
   leaves: leafPainter(TILES.leaves, [38,96,34] as unknown as RGB, [52,124,44] as unknown as RGB),
 
   planks: (img, r) =>
@@ -656,40 +773,58 @@ const PAINTERS: Partial<Record<string, Painter>> = {
       return vary([56, 56, 62] as unknown as RGB, 8, r);
     }),
 
-  log_birch_side: (img, r) => {
-    const base: RGB = [222, 220, 208] as unknown as RGB, warm: RGB = [203, 198, 179] as unknown as RGB;
-    const marks: Array<[number, number, number]> = [];
-    for (let y = 1; y < TILE; y += 3 + Math.floor(r() * 2)) {
-      const n = 1 + Math.floor(r() * 2);
-      for (let k = 0; k < n; k++) marks.push([y, Math.floor(r() * TILE), 2 + Math.floor(r() * 4)]);
-    }
-    return tileRegion(img, TILES.log_birch_side, (x, y) => {
-      for (const [my, mx, len] of marks) {
-        const within = ((x - mx + TILE) % TILE) < len;
-        if (y === my && within) return vary([44, 40, 36] as unknown as RGB, 12, r);
-        if (y === my + 1 && within && r() < 0.35) return vary([88, 82, 74] as unknown as RGB, 12, r);
-      }
-      if (x === 0 || x === TILE - 1) return vary(warm, 8, r);
-      return vary(r() < 0.2 ? warm : base, 9, r);
-    });
-  },
-  log_birch_top: ringPainter(TILES.log_birch_top, [214,210,196] as unknown as RGB, [236,231,214] as unknown as RGB, [206,198,176] as unknown as RGB),
-
-  log_spruce_side: barkPainter(TILES.log_spruce_side, [74,54,38] as unknown as RGB, [48,33,22] as unknown as RGB, 3, 0.26),
-  log_spruce_top: ringPainter(TILES.log_spruce_top, [48,33,22] as unknown as RGB, [132,96,64] as unknown as RGB, [104,74,48] as unknown as RGB),
-
-  log_palm_side: (img, r) => tileRegion(img, TILES.log_palm_side, (x, y) => {
-    const band = (y + (x < 8 ? x : TILE - x)) % 5;
-    const c: RGB = band === 0 ? [92,72,44] as unknown as RGB : band === 1 ? [122,98,62] as unknown as RGB : [138,113,74] as unknown as RGB;
-    return vary(c, 11, r);
+  log_birch_side: barkPainter({
+    tile: TILES.log_birch_side,
+    base: [226, 222, 208] as unknown as RGB,
+    ridge: [208, 200, 182] as unknown as RGB,
+    furrow: [188, 180, 162] as unknown as RGB,
+    knot: [52, 46, 40] as unknown as RGB,
+    gap: 7,
+    wander: 0.4,
+    knots: 0,
+    lenticel: [42, 38, 34] as unknown as RGB,
+    lenticelGap: 3,
   }),
-  log_palm_top: ringPainter(TILES.log_palm_top, [92,72,44] as unknown as RGB, [166,138,92] as unknown as RGB, [138,113,74] as unknown as RGB),
+  log_birch_top: ringPainter(TILES.log_birch_top, [214, 208, 190] as unknown as RGB, [236, 228, 206] as unknown as RGB, [210, 198, 172] as unknown as RGB),
 
-  log_alien_side: (img, r) => tileRegion(img, TILES.log_alien_side, (x, y) => {
-    const vein = (x * 3 + y * 5) % 11 === 0;
-    return vein ? vary([196,124,236] as unknown as RGB, 14, r) : vary(x % 5 === 0 ? [70,48,96] as unknown as RGB : [96,70,124] as unknown as RGB, 12, r);
+  log_spruce_side: barkPainter({
+    tile: TILES.log_spruce_side,
+    base: [78, 56, 38] as unknown as RGB,
+    ridge: [98, 72, 50] as unknown as RGB,
+    furrow: [42, 28, 18] as unknown as RGB,
+    knot: [36, 24, 16] as unknown as RGB,
+    gap: 3,
+    wander: 0.85,
+    knots: 1,
   }),
-  log_alien_top: ringPainter(TILES.log_alien_top, [70,48,96] as unknown as RGB, [176,116,214] as unknown as RGB, [118,80,152] as unknown as RGB),
+  log_spruce_top: ringPainter(TILES.log_spruce_top, [42, 28, 18] as unknown as RGB, [124, 88, 56] as unknown as RGB, [96, 68, 42] as unknown as RGB),
+
+  log_palm_side: barkPainter({
+    tile: TILES.log_palm_side,
+    base: [142, 116, 74] as unknown as RGB,
+    ridge: [158, 130, 86] as unknown as RGB,
+    furrow: [108, 86, 54] as unknown as RGB,
+    knot: [88, 66, 40] as unknown as RGB,
+    gap: 6,
+    wander: 0.35,
+    knots: 1,
+    band: [90, 68, 40] as unknown as RGB,
+    bandGap: 4,
+  }),
+  log_palm_top: ringPainter(TILES.log_palm_top, [90, 68, 40] as unknown as RGB, [172, 140, 92] as unknown as RGB, [144, 116, 74] as unknown as RGB),
+
+  log_alien_side: barkPainter({
+    tile: TILES.log_alien_side,
+    base: [96, 70, 124] as unknown as RGB,
+    ridge: [118, 86, 150] as unknown as RGB,
+    furrow: [58, 38, 82] as unknown as RGB,
+    knot: [48, 30, 70] as unknown as RGB,
+    gap: 4,
+    wander: 1.2,
+    knots: 1,
+    vein: [210, 132, 246] as unknown as RGB,
+  }),
+  log_alien_top: ringPainter(TILES.log_alien_top, [58, 38, 82] as unknown as RGB, [186, 122, 222] as unknown as RGB, [124, 84, 160] as unknown as RGB),
 
   leaves_birch: leafPainter(TILES.leaves_birch, [86,132,48] as unknown as RGB, [124,170,72] as unknown as RGB,
     { holes: 0.19, speck: [178,198,98] as unknown as RGB, speckChance: 0.05 }),

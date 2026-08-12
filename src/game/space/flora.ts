@@ -132,16 +132,16 @@ const GRASS_D: GrassShape = {
 const FLOWER_D: FlowerShape = { present: true, quads: 2, radius: 0.35, glow: 0 };
 
 const TRUNK_BY_SILHOUETTE: Record<TreeSilhouette, Omit<TreeShape, 'densityMul' | 'silhouette' | 'glow' | 'species' | 'mix' | 'earthlike'>> = {
-  broadleaf: { trunkH: [6, 9], canopyR: [2, 3], canopyH: 4, leafDensity: 0.78, branches: 0, droop: 0, trunkLean: 0.0 },
-  conifer: { trunkH: [8, 13], canopyR: [2, 3], canopyH: 8, leafDensity: 0.88, branches: 0, droop: 0.1, trunkLean: 0.0 },
-  palm: { trunkH: [9, 15], canopyR: [3, 4], canopyH: 2, leafDensity: 0.55, branches: 6, droop: 0.85, trunkLean: 1.6 },
-  spire: { trunkH: [12, 20], canopyR: [1, 2], canopyH: 2, leafDensity: 0.6, branches: 3, droop: 0.1, trunkLean: 0.7 },
-  crystal: { trunkH: [3, 6], canopyR: [1, 3], canopyH: 6, leafDensity: 0.95, branches: 4, droop: 0, trunkLean: 0.0 },
-  succulent: { trunkH: [4, 8], canopyR: [0, 1], canopyH: 1, leafDensity: 0.35, branches: 3, droop: 0, trunkLean: 0.0 },
-  umbrella: { trunkH: [4, 6], canopyR: [3, 5], canopyH: 2, leafDensity: 0.62, branches: 2, droop: 0, trunkLean: 0.3 },
-  fungal: { trunkH: [4, 7], canopyR: [2, 4], canopyH: 3, leafDensity: 0.92, branches: 0, droop: 0.4, trunkLean: 0.25 },
+  broadleaf: { trunkH: [6, 9], canopyR: [2, 3], canopyH: 4, leafDensity: 0.78, branches: 0, droop: 0, trunkLean: 0 },
+  conifer: { trunkH: [8, 13], canopyR: [2, 3], canopyH: 8, leafDensity: 0.88, branches: 0, droop: 0.1, trunkLean: 0 },
+  palm: { trunkH: [9, 15], canopyR: [3, 4], canopyH: 2, leafDensity: 0.55, branches: 6, droop: 0.85, trunkLean: 0 },
+  spire: { trunkH: [12, 20], canopyR: [1, 2], canopyH: 2, leafDensity: 0.6, branches: 3, droop: 0.1, trunkLean: 0 },
+  crystal: { trunkH: [3, 6], canopyR: [1, 3], canopyH: 6, leafDensity: 0.95, branches: 4, droop: 0, trunkLean: 0 },
+  succulent: { trunkH: [4, 8], canopyR: [0, 1], canopyH: 1, leafDensity: 0.35, branches: 3, droop: 0, trunkLean: 0 },
+  umbrella: { trunkH: [4, 6], canopyR: [3, 5], canopyH: 2, leafDensity: 0.62, branches: 2, droop: 0, trunkLean: 0 },
+  fungal: { trunkH: [4, 7], canopyR: [2, 4], canopyH: 3, leafDensity: 0.92, branches: 0, droop: 0.4, trunkLean: 0 },
   mega: { trunkH: [10, 16], canopyR: [4, 6], canopyH: 3, leafDensity: 0.8, branches: 2, droop: 0.3, trunkLean: 0 },
-  none: { trunkH: [0, 0], canopyR: [0, 0], canopyH: 0, leafDensity: 0, branches: 0, droop: 0, trunkLean: 0.0 },
+  none: { trunkH: [0, 0], canopyR: [0, 0], canopyH: 0, leafDensity: 0, branches: 0, droop: 0, trunkLean: 0 },
 };
 
 const SPECIES_BY_SILHOUETTE: Record<TreeSilhouette, TreeSpecies> = {
@@ -167,7 +167,7 @@ export function floraFor(type: PlanetType, seed: bigint): Flora {
       Math.max(0, Math.round(t.trunkH[0] * r.range(0.85, 1.15))),
       Math.max(0, Math.round(t.trunkH[1] * r.range(0.9, 1.2))),
     ],
-    trunkLean: t.trunkLean * r.range(0.6, 1.4),
+    trunkLean: 0,
     branches: Math.max(0, Math.round(t.branches * r.range(0.75, 1.3))),
     canopyR: [t.canopyR[0], Math.max(t.canopyR[0], Math.round(t.canopyR[1] * r.range(0.85, 1.25)))],
     canopyH: Math.max(1, Math.round(t.canopyH * r.range(0.85, 1.2))),
