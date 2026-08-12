@@ -1,5 +1,8 @@
 import { B } from './World';
-import { NO_ORIGIN, originLabel, type OriginTag } from '../core/origin';
+import { NO_ORIGIN, type OriginTag } from '../core/origin';
+import { planetName } from '../core/planetIdentity';
+import { isPlanetScoped } from '../crafting/categories';
+import { activeOriginTag } from '../world/generator';
 
 export type SlotItem =
   | { kind: 'weapon'; weaponId: string }
@@ -70,20 +73,19 @@ const originOf = (it: SlotItem): OriginTag => (it.kind === 'block' ? (it.origin 
 
 const sameStack = (a: SlotItem, b: SlotItem): boolean => {
   if (a.kind === 'block' && b.kind === 'block') {
-    // Same block id but a different origin planet keeps its own stack so a jungle log
-    // and an ice log never collapse into one visually-ambiguous stack.
     return a.blockId === b.blockId && originOf(a) === originOf(b);
   }
   if (a.kind === 'food' && b.kind === 'food') return a.foodId === b.foodId;
   return false;
 };
 
-/** "Jungle Wood Log" / "Ice Snow Block" — surfaces a block's origin planet in the UI. */
 export function itemDisplayName(it: SlotItem): string {
   if (it.kind === 'weapon') return it.weaponId;
   if (it.kind === 'food') return FOOD_NAMES[it.foodId] ?? it.foodId;
   const base = BLOCK_NAMES[it.blockId] ?? `Block ${it.blockId}`;
-  const label = it.origin ? originLabel(it.origin) : null;
+  if (!isPlanetScoped(it.blockId)) return base;
+  const tag = (it.origin && it.origin !== NO_ORIGIN) ? it.origin : activeOriginTag();
+  const label = planetName(tag);
   return label ? `${label} ${base}` : base;
 }
 
@@ -147,7 +149,9 @@ export class Inventory {
 
   addItem(item: SlotItem): boolean {
     if (item.kind === 'weapon') return this.addWeapon(item.weaponId);
-    if (item.kind === 'block') return this.addBlock(item.blockId, item.count);
+    if (item.kind === 'block') {
+      return this.addBlockFrom(item.blockId, item.origin ?? NO_ORIGIN, item.count);
+    }
     if (item.kind === 'food') return stackItem(this.hotbar, this.mainInv, item);
     return false;
   }
@@ -168,11 +172,12 @@ export class Inventory {
     return stackItem(this.hotbar, this.mainInv, { kind: 'block', blockId, count });
   }
 
-  /** Origin-aware pickup. Call this from the break/mine path with the voxel's origin tag. */
   addBlockFrom(blockId: number, origin: OriginTag, count = 1): boolean {
     if (blockId === B.AIR || blockId === B.BEDROCK) return false;
-    const item: SlotItem = origin
-      ? { kind: 'block', blockId, count, origin }
+    let tag = origin && origin !== NO_ORIGIN ? origin : NO_ORIGIN;
+    if (!tag && isPlanetScoped(blockId)) tag = activeOriginTag();
+    const item: SlotItem = tag
+      ? { kind: 'block', blockId, count, origin: tag }
       : { kind: 'block', blockId, count };
     return stackItem(this.hotbar, this.mainInv, item);
   }

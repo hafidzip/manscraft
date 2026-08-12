@@ -3,7 +3,7 @@ import { X, Package, ArrowDownUp } from 'lucide-react';
 import type { GameEngine, HudStats } from '../../game/engine';
 import { SHOP_ITEMS, getBlockSellPrice, getFoodSellPrice } from '../../game/fps/shop';
 import type { SlotItem } from '../../game/fps/Inventory';
-import { BLOCK_NAMES, FOODS } from '../../game/fps/Inventory';
+import { FOODS, itemDisplayName } from '../../game/fps/Inventory';
 import { CoinIcon, ShopItemIcon, BlockIcon, DrumstickIcon } from './icons';
 
 export function TradePrompt() {
@@ -173,7 +173,7 @@ export function ShopPanel({ stats, engineRef }: { stats: HudStats; engineRef: Re
                 const key = `${ref.isHotbar ? 'h' : 'm'}${ref.index}`;
                 const isFlashing = sellFlash === key;
                 const name = item.kind === 'block'
-                  ? (BLOCK_NAMES[item.blockId] ?? `Block #${item.blockId}`)
+                  ? itemDisplayName(item)
                   : (FOODS[item.foodId]?.name ?? item.foodId);
                 const icon = item.kind === 'block'
                   ? <BlockIcon blockId={item.blockId} size={20} />

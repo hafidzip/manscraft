@@ -21,8 +21,6 @@ export interface PlanetSave {
   seed: number;
   themeSea: number;
   themeJson: string | null;
-  /** This planet's own origin tag — the implicit tag of every unlisted/untagged voxel
-   *  (task 8). Optional so saves written before this field existed still load fine. */
   originTag?: number;
   savedAtMs: number;
   deltas: Uint8Array;
@@ -57,7 +55,6 @@ export interface EngineLike {
   furnaces: Map<string, FurnaceState>;
   craftingTables: Map<string, CraftingTableState>;
   playerState(): { x: number; y: number; z: number; yaw: number };
-  /** Optional: this planet's origin tag, persisted alongside the save (task 8). */
   planetTheme?: { originTag?: number } | null;
 }
 

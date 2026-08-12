@@ -1,7 +1,7 @@
 
 import type { SlotItem } from '../fps/Inventory';
 import { B } from '../fps/World';
-import { categoryOf } from './categories';
+import { isPlanetScoped } from './categories';
 import { NO_ORIGIN, type OriginTag } from '../core/origin';
 
 export interface Ingredient {
@@ -167,18 +167,12 @@ export function craftableCount(grid: (SlotItem | null)[], size: number, _recipe?
   return n === Infinity ? 0 : n;
 }
 
-/**
- * The origin a crafted output inherits (task 5/7): majority vote among grid cells whose
- * block belongs to a themed family (log/planks/leaves/stone/sand/dirt/grass/snow/cactus),
- * lowest tag wins ties for determinism. Non-themed ingredients (machines, coal, sticks)
- * never vote, so e.g. a furnace recipe never tries to tint its output.
- */
 export function craftOutputOrigin(grid: (SlotItem | null)[], size: number): OriginTag {
   const votes = new Map<OriginTag, number>();
   for (let i = 0; i < size * size; i++) {
     const it = grid[i];
     if (!it || it.kind !== 'block' || !it.origin) continue;
-    if (!categoryOf(it.blockId)) continue;
+    if (!isPlanetScoped(it.blockId)) continue;
     votes.set(it.origin, (votes.get(it.origin) ?? 0) + 1);
   }
   let best: OriginTag = NO_ORIGIN;
@@ -189,10 +183,10 @@ export function craftOutputOrigin(grid: (SlotItem | null)[], size: number): Orig
   return best;
 }
 
-/** Output resolved for a specific craft — carries origin when the input family is themed. */
 export function resolveOutput(grid: (SlotItem | null)[], size: number, recipe: Recipe): SlotItem {
   const o = recipe.output;
   if (o.kind !== 'block') return { ...o };
+  if (!isPlanetScoped(o.blockId)) return { ...o };
   const tag = craftOutputOrigin(grid, size);
   return tag ? { ...o, origin: tag } : { ...o };
 }

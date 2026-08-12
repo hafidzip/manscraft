@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { B, type WorldLike } from './World';
 import { Inventory, type SlotItem } from './Inventory';
+import { NO_ORIGIN, type OriginTag } from '../core/origin';
 import { AudioSynth } from './audio';
 import { getAtlas, blockCubeGeometry, buildExtrudedItem, paintDrumstick } from './textures';
 import { minImageF, WORLD_HALF } from '../core/constants';
@@ -73,6 +74,7 @@ export interface DroppedItem {
   sleeping: boolean;
   inst: number;
   alive: boolean;
+  origin?: OriginTag;
 }
 
 export interface ItemDropOptions {
@@ -185,7 +187,7 @@ export class ItemDropManager {
     this.stats.live = this.items.length;
   }
 
-  spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
+  spawn(blockId: number, pos: THREE.Vector3, velocity?: THREE.Vector3, origin: OriginTag = NO_ORIGIN): void {
     if (blockId === B.AIR || blockId === B.BEDROCK) return;
     if (this.ledger) {
       const dxw = minImageF(pos.x - this.lastPx);
@@ -201,6 +203,7 @@ export class ItemDropManager {
     const it = this.newItemRecord();
     it.kind = 'block'; it.weaponId = ''; it.foodId = '';
     it.blockId = blockId;
+    it.origin = origin;
     it.pos.copy(pos);
     if (velocity) it.vel.copy(velocity);
     else it.vel.set((Math.random() - 0.5) * 2.6, 2.4 + Math.random() * 1.4, (Math.random() - 0.5) * 2.6);
@@ -225,7 +228,7 @@ export class ItemDropManager {
   }
 
   spawnItem(item: SlotItem, pos: THREE.Vector3, velocity?: THREE.Vector3): void {
-    if (item.kind === 'block') { this.spawn(item.blockId, pos, velocity); return; }
+    if (item.kind === 'block') { this.spawn(item.blockId, pos, velocity, item.origin ?? NO_ORIGIN); return; }
     if (item.kind === 'weapon') this.spawnWeaponDrop(item.weaponId, pos, velocity);
     else if (item.kind === 'food') this.spawnFoodDrop(item.foodId, pos, velocity);
   }
@@ -684,7 +687,7 @@ export class ItemDropManager {
       } else if (it.kind === 'food') {
         if (!this.inv.addItem({ kind: 'food', foodId: it.foodId, count: 1 })) return;
       } else {
-        if (!this.inv.addBlock(it.blockId, 1)) return;
+        if (!this.inv.addBlockFrom(it.blockId, it.origin ?? NO_ORIGIN, 1)) return;
       }
       this.audio.foley('snap');
       this.onPickup?.(it.kind === 'block' ? it.blockId : -1);

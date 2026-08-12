@@ -11,7 +11,9 @@ import { FlowField } from './fps/FlowField';
 import { ChangeBus } from './world/changeBus';
 import { MachineRegistry, MK_GHOST } from './world/machineRegistry';
 import { MachineScheduler } from './fps/machineScheduler';
-import { setActivePlanetTheme, planetSeedToWorldSeed, TerrainGenerator } from './world/generator';
+import { setActivePlanetTheme, planetSeedToWorldSeed, TerrainGenerator, activeOriginTag } from './world/generator';
+import { NO_ORIGIN, type OriginTag } from './core/origin';
+import { isPlanetScoped } from './crafting/categories';
 import type { PlanetTheme } from './space/theme';
 import { hub, themeToJson } from './persist/planetStore';
 import { universeSim } from './factory/universeSim';
@@ -42,7 +44,7 @@ import { session, saveCoins } from './session';
 import { AudioSynth } from './fps/audio';
 import { HeldBlockTool } from './fps/HeldBlockTool';
 import { WEAPONS, WEAPON_ORDER, buildBody } from './fps/models';
-import { Inventory, BLOCK_NAMES, FOODS, type SlotItem } from './fps/Inventory';
+import { Inventory, FOODS, itemDisplayName, type SlotItem } from './fps/Inventory';
 import { matchCraft, craftableCount, RECIPES, recipeIngredients, resolveOutput } from './crafting/recipes';
 import { TorchLights } from './world/torchLights';
 import {
@@ -885,10 +887,11 @@ export class GameEngine {
     return c.toDataURL();
   }
 
-  private dropBlock(id: number, pos: THREE.Vector3): void {
+  private dropBlock(id: number, pos: THREE.Vector3, origin?: OriginTag): void {
     const fpsId = TO_FPS[id];
     if (fpsId === undefined) return;
-    this.itemDrops.spawn(fpsId, pos);
+    const tag = origin && origin !== NO_ORIGIN ? origin : activeOriginTag();
+    this.itemDrops.spawn(fpsId, pos, undefined, tag);
     this.blocksMined++;
   }
 
@@ -909,12 +912,14 @@ export class GameEngine {
     const id = this.world.getBlockRaw(x, y, z);
     if (id < 0 || !this.laserMinerCanMine(id)) return;
     const d = DEFS[id];
+    const origin = this.world.originAtWorld(x, y, z);
     const outcome = harvestOutcome(id, TO_FPS);
     if (!outcome) {
       if (!this.world.destroyBlockAt(x, y, z)) return;
       this.finalizeBlockRemoval(x, y, z, id, true);
       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 20, 3.2);
       this.sound.playBreak(d.sound);
+      this.dropBlock(id, dropPos.clone(), origin);
       this.blocksMined++;
       return;
     }
@@ -935,8 +940,12 @@ export class GameEngine {
       );
     }
 
-    this.itemDrops.spawn(outcome.itemId, dropPos.clone(), new THREE.Vector3(
-      (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4));
+    this.itemDrops.spawn(
+      outcome.itemId,
+      dropPos.clone(),
+      new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4),
+      origin,
+    );
     this.sound.playBreak(d.sound);
     this.blocksMined++;
   }
@@ -948,11 +957,12 @@ export class GameEngine {
       if (id === -1 || id === B.AIR) return;
       const d = DEFS[id];
       if (!d || d.cross !== true) return;
+      const origin = this.world.originAtWorld(x, cy, z);
       this.world.setBlock(x, cy, z, B.AIR);
       if (id === B.TORCH) this.torchLights.remove(x, cy, z);
       this.particles.burst(x + 0.5, cy + 0.5, z + 0.5, d.colors, 8, 1.6);
       this.sound.playBreak(d.sound);
-      this.dropBlock(id, new THREE.Vector3(x + 0.5, cy + 0.5, z + 0.5));
+      this.dropBlock(id, new THREE.Vector3(x + 0.5, cy + 0.5, z + 0.5), origin);
       cy++;
     }
   }
@@ -1021,10 +1031,14 @@ export class GameEngine {
     if (possible <= 0) return 0;
 
     const base = recipe.output;
-    const out: SlotItem = base.kind === 'weapon'
+    const count = base.kind === 'weapon' ? 1 : (base.count ?? 1) * possible;
+    const provisional: SlotItem = base.kind === 'weapon'
       ? { ...base }
-      : { ...base, count: (base.count ?? 1) * possible };
-    if (!inv.canAdd(out)) return 0;
+      : { ...base, count };
+    if (!inv.canAdd(provisional)) return 0;
+
+    const outPlanetScoped = base.kind === 'block' && isPlanetScoped(base.blockId);
+    const originVotes = new Map<OriginTag, number>();
 
     for (const [bid, per] of need) {
       let left = per * possible;
@@ -1034,11 +1048,26 @@ export class GameEngine {
           if (s && s.kind === 'block' && s.blockId === bid) {
             const take = Math.min(s.count, left);
             s.count -= take; left -= take;
+            if (outPlanetScoped && s.origin) {
+              originVotes.set(s.origin, (originVotes.get(s.origin) ?? 0) + take);
+            }
             if (s.count <= 0) arr[i] = null;
           }
         }
       }
     }
+
+    let dominant: OriginTag = NO_ORIGIN;
+    let bestN = 0;
+    for (const [tag, n] of [...originVotes].sort((a, b) => a[0] - b[0])) {
+      if (n > bestN) { dominant = tag; bestN = n; }
+    }
+    const out: SlotItem = base.kind === 'weapon'
+      ? { ...base }
+      : outPlanetScoped && dominant
+        ? { kind: 'block', blockId: base.blockId, count, origin: dominant }
+        : { ...base, count };
+
     inv.addItem(out);
     this.sound.playPlace('wood');
     return possible;
@@ -1474,7 +1503,7 @@ export class GameEngine {
       this.itemDrops.spawnItem({ kind: 'weapon', weaponId: item.weaponId }, this.dropPos, this.dropVel);
     } else if (item.kind === 'block') {
       this.inventory.consumeBlock({ isHotbar: true, index: this.sel });
-      this.itemDrops.spawn(item.blockId, this.dropPos, this.dropVel);
+      this.itemDrops.spawn(item.blockId, this.dropPos, this.dropVel, item.origin ?? NO_ORIGIN);
     } else if (item.kind === 'food') {
       this.inventory.consumeAt({ isHotbar: true, index: this.sel }, 1);
       this.itemDrops.spawnItem({ kind: 'food', foodId: item.foodId, count: 1 }, this.dropPos, this.dropVel);
@@ -2351,12 +2380,13 @@ export class GameEngine {
     if (this.breakT < 1) return;
 
     const { x, y, z, id } = this.target;
+    const origin = this.world.originAtWorld(x, y, z);
     const outcome = harvestOutcome(id, TO_FPS);
     if (!outcome) {
       if (!this.world.destroyBlockAt(x, y, z)) return;
       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 18, 2.6);
       this.sound.playBreak(d.sound);
-      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), origin);
       this.blocksMined++;
       this.finalizeBlockRemoval(x, y, z, id, true);
       this.breakT = 0;
@@ -2369,7 +2399,7 @@ export class GameEngine {
     if (!outcome.destroy) {
       this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 14, 2.4);
       this.sound.playBreak(d.sound);
-      this.itemDrops.spawn(outcome.itemId, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      this.itemDrops.spawn(outcome.itemId, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), undefined, origin);
       this.blocksMined++;
       this.breakT = 0;
       this.mineCharge = 0;
@@ -2380,7 +2410,7 @@ export class GameEngine {
     if (!this.world.destroyBlockAt(x, y, z)) return;
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, DEFS[id].colors, 26, 3.6);
     this.sound.playBreak(d.sound);
-    this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+    this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), origin);
     this.blocksMined++;
 
     this.finalizeBlockRemoval(x, y, z, id, true);
@@ -2488,7 +2518,7 @@ export class GameEngine {
       if (!supportDef?.solid) return;
     }
 
-    this.world.setBlock(x, y, z, ourId);
+    this.world.setBlock(x, y, z, ourId, item.origin ?? activeOriginTag());
     if (ourId === B.TORCH) this.torchLights.add(x, y, z, x - hit.nx, y - hit.ny, z - hit.nz);
     this.particles.burst(x + 0.5, y + 0.5, z + 0.5, d.colors, 8, 1.7);
     this.sound.playPlace(d.sound);
@@ -2803,13 +2833,14 @@ export class GameEngine {
     const MAX_BLAST_DROPS = 14;
     let drops = 0;
     const destroyed = this.world.destroySphere(pos, 2.9, (x, y, z, id) => {
+      const origin = this.world.originAtWorld(x, y, z);
       this.spillMachineOnBreak(x, y, z, id);
       this.removeFloatingPlantsAbove(x, y, z);
       if (id === B.TORCH) this.torchLights.remove(x, y, z);
       this.detachTorchesSupportedBy(x, y, z, false);
       if (drops >= MAX_BLAST_DROPS || Math.random() > 0.28) return;
       drops++;
-      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+      this.dropBlock(id, new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), origin);
     });
 
     if (destroyed > 0) {
@@ -2852,7 +2883,7 @@ export class GameEngine {
     const weaponName =
       selItem && selItem.kind === 'weapon' ? (WEAPONS[selItem.weaponId]?.name ?? LASER_NAME) :
       selItem && selItem.kind === 'food' ? (FOODS[selItem.foodId]?.name ?? 'Food') :
-      selItem && selItem.kind === 'block' ? (BLOCK_NAMES[selItem.blockId] ?? 'Block') :
+      selItem && selItem.kind === 'block' ? itemDisplayName(selItem) :
       this.toolMode === 'barehand' ? 'Bare Hands' : LASER_NAME;
     const ammo =
       selItem && (selItem.kind === 'block' || selItem.kind === 'food') ? selItem.count :

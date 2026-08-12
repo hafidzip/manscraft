@@ -5,8 +5,10 @@ import {
   wrapChunk, wrapBlock, wrapDelta, chunkIndex,
 } from '../core/constants';
 import { B, DEFS, isWaterId, isIndestructible } from './blocks';
-import { TerrainGenerator } from './generator';
-import { buildChunkGeometry } from './mesher';
+import { TerrainGenerator, activeOriginTag } from './generator';
+import { buildChunkGeometry, type MeshTheme } from './mesher';
+import { OriginStore } from './originStore';
+import { NO_ORIGIN, type OriginTag } from '../core/origin';
 import { raycastVoxel } from '../player/raycast';
 import type { DeltaSink } from '../persist/worldDelta';
 
@@ -49,6 +51,8 @@ interface Chunk {
 export class World {
   readonly group = new THREE.Group();
   readonly gen: TerrainGenerator;
+
+  readonly origins = new OriginStore();
 
   private chunks = new Map<number, Chunk>();
   private meshedChunks = new Set<Chunk>();
@@ -156,6 +160,7 @@ export class World {
           if (dx * dx + dy * dy + dz * dz > r2 + Math.random() * 1.2) continue;
           const b = this.getBlockRaw(x, y, z);
           if (b === B.AIR || isIndestructible(b)) continue;
+          onBlockDestroyed?.(x, y, z, b);
           this.setBlock(x, y, z, B.AIR);
 
           const px = Math.floor(wrapBlock(x));
@@ -165,7 +170,6 @@ export class World {
           touched.set(this.key(c.cx, c.cz), c);
           carved.push(px, y, pz, b);
 
-          onBlockDestroyed?.(x, y, z, b);
           count++;
         }
       }
@@ -351,7 +355,14 @@ export class World {
     return DEFS[id].solid;
   }
 
-  setBlock(wx: number, wy: number, wz: number, id: number): void {
+  originAtWorld(x: number, y: number, z: number): OriginTag {
+    const native = activeOriginTag();
+    if (this.origins.nativeTag !== native) this.origins.nativeTag = native;
+    const t = this.origins.atWorld(x, y, z);
+    return t || native;
+  }
+
+  setBlock(wx: number, wy: number, wz: number, id: number, origin?: OriginTag): void {
     if (wy < 0 || wy >= H) return;
     const px = Math.floor(wrapBlock(wx));
     const pz = Math.floor(wrapBlock(wz));
@@ -363,6 +374,11 @@ export class World {
     const oldId = c.data[chunkIndex(lx, wy, lz)];
     if (oldId === id) return;
     c.data[chunkIndex(lx, wy, lz)] = id;
+    if (id === B.AIR) {
+      this.origins.setWorld(px, wy, pz, NO_ORIGIN);
+    } else if (origin !== undefined && origin !== NO_ORIGIN && origin !== activeOriginTag()) {
+      this.origins.setWorld(px, wy, pz, origin);
+    }
     this.updateColumn(c, lx, lz, wy, id);
     if (this.batchDepth === 0) {
       c.dirty = true;
@@ -411,7 +427,11 @@ export class World {
     c.meshes.length = 0;
     c.grass = null;
 
-    const geoms = buildChunkGeometry(this.boundGet, c.cx, c.cz, c.data);
+    const theme: MeshTheme = {
+      nativeTag: activeOriginTag(),
+      originAt: (lx, ly, lz) => this.origins.atWorld(c.cx * S + lx, ly, c.cz * S + lz) || activeOriginTag(),
+    };
+    const geoms = buildChunkGeometry(this.boundGet, c.cx, c.cz, c.data, theme);
     const [ox, oz] = this.renderOffset(c.cx, c.cz);
     c.kx = ox;
     c.kz = oz;

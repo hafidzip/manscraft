@@ -1,7 +1,7 @@
 import { B } from '../../game/fps/World';
 import { tileUV, T, atlasDataUrl, drumstickDataUrl } from '../../game/fps/textures';
 import type { SlotItem } from '../../game/fps/Inventory';
-import { BLOCK_NAMES, FOODS } from '../../game/fps/Inventory';
+import { FOODS, itemDisplayName } from '../../game/fps/Inventory';
 import type { SHOP_ITEMS } from '../../game/fps/shop';
 
 type Rect = [number, number, number, number, string];
@@ -106,7 +106,7 @@ export const LABELS: Record<string, string> = { handgun: 'P9', smg: 'KV-9', rifl
 export function itemName(item: SlotItem | null): string {
   if (!item) return '';
   if (item.kind === 'weapon') return WEAPON_TITLES[item.weaponId] ?? item.weaponId;
-  if (item.kind === 'block') return BLOCK_NAMES[item.blockId] ?? `Block #${item.blockId}`;
+  if (item.kind === 'block') return itemDisplayName(item);
   return FOODS[item.foodId]?.name ?? item.foodId;
 }
 

@@ -75,7 +75,7 @@ export function InventoryOverlay({ stats, game, hoverSlot, selectedSlot, dragIte
           const s = arr[k];
           if (s?.kind === 'block' && s.blockId === id && s.count > 0) {
             if (--s.count <= 0) arr[k] = null;
-            inv.craft[i] = { kind: 'block', blockId: id, count: 1 };
+            inv.craft[i] = { kind: 'block', blockId: id, count: 1, origin: s.origin };
             break outer;
           }
         }

@@ -8,7 +8,6 @@ import {
 } from '../factory/machineProcessing';
 
 export const DELTA_MAGIC = 0x4d435744;
-/** v1: id byte only. v2: id(1) + originTag(1) packed as (tag << 8) | id — task 8. */
 export const DELTA_VERSION = 2;
 
 const localIdxOf = (lx: number, y: number, lz: number): number => (y * S + lz) * S + lx;
@@ -25,7 +24,6 @@ export interface DeltaSink {
 }
 
 export class WorldDeltaStore implements DeltaSink {
-  /** li -> (originTag << 8) | blockId. Reading callers that only want the id use `& 0xff`. */
   private chunks = new Map<number, Map<number, number>>();
 
   replaying = false;
@@ -76,7 +74,6 @@ export class WorldDeltaStore implements DeltaSink {
     return v === undefined ? -1 : v & 0xff;
   }
 
-  /** Origin tag of a recorded override, or 0 (untagged) if none is stored. */
   getOverrideTag(x: number, y: number, z: number): number {
     if (y < 0 || y >= H) return 0;
     const px = wrapBlock(Math.floor(x));
@@ -151,9 +148,6 @@ export class WorldDeltaStore implements DeltaSink {
       if (m) {
         gen.populateChunk(this.scratch, (ck >> 5) & 31, ck & 31);
         for (const [li, packed] of m) {
-          // Only prune when the record matches BOTH freshly-generated id and is untagged —
-          // tagged (foreign-origin) overrides never equal natural generation, so they
-          // conservatively stay recorded (see task 8 notes in persist/planetStore.ts).
           if (this.scratch[li] === packed) {
             m.delete(li);
             removed++;
@@ -198,7 +192,7 @@ export class WorldDeltaStore implements DeltaSink {
     if (dv.getUint32(0) !== DELTA_MAGIC) return s;
     const ver = dv.getUint16(4);
     if (ver !== 1 && ver !== 2) return s;
-    const recSize = ver === 1 ? 3 : 4; // v1: li(2) id(1). v2: li(2) id(1) tag(1) — no tag byte on v1.
+    const recSize = ver === 1 ? 3 : 4;
     const chunkCount = dv.getUint32(6);
     let o = 10;
     for (let c = 0; c < chunkCount && o + 4 <= bytes.byteLength; c++) {
