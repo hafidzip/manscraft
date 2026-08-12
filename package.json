@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:cdn": "esbuild src/game/fps/Enemy.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/Enemy.js && esbuild src/game/fps/reloads.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/reloads.js && esbuild src/game/fps/effects.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/effects.js && esbuild src/game/fps/models.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/models.js && esbuild src/game/vehicle/hullParts.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/hullParts.js && esbuild src/game/vehicle/spaceship.impl.ts --bundle --format=esm --external:three --outfile=dist/cdn/spaceship.js",
+    "build:cdn": "esbuild src/game/fps/Enemy.impl.ts --bundle --format=esm --outfile=dist/cdn/Enemy.js && esbuild src/game/fps/reloads.impl.ts --bundle --format=esm --outfile=dist/cdn/reloads.js && esbuild src/game/fps/effects.impl.ts --bundle --format=esm --outfile=dist/cdn/effects.js && esbuild src/game/fps/models.impl.ts --bundle --format=esm --outfile=dist/cdn/models.js && esbuild src/game/vehicle/hullParts.impl.ts --bundle --format=esm --outfile=dist/cdn/hullParts.js && esbuild src/game/vehicle/spaceship.impl.ts --bundle --format=esm --outfile=dist/cdn/spaceship.js",
     "preview": "vite preview"
   },
   "dependencies": {
