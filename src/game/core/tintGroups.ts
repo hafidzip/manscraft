@@ -1,7 +1,7 @@
 export type RGB = readonly [number, number, number];
 
 export const TINT_REF: Record<string, RGB> = {
-  grass: [96, 162, 54],
+  grass: [145, 189, 89],
   dirt: [121, 85, 58],
   stone: [128, 128, 128],
   sand: [219, 207, 163],

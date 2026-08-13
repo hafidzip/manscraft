@@ -31,7 +31,7 @@ export const B = {
 } as const;
 
 export const BLOCK_COLORS: Record<number, number> = {
-  [B.GRASS]: 0x5faa3c,
+  [B.GRASS]: 0x91bd59,
   [B.DIRT]: 0x7a5a38,
   [B.STONE]: 0x82858a,
   [B.SAND]: 0xddd3a0,

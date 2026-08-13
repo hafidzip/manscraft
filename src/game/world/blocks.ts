@@ -138,7 +138,7 @@ export const DEFS: BlockDef[] = [];
 DEFS[B.AIR] = def({ name: 'Air', top: 0, solid: false, opaque: false, hardness: 0 });
 DEFS[B.GRASS] = def({
   name: 'Grass Block', top: TILES.grass_top, side: TILES.grass_side, bottom: TILES.dirt, icon: TILES.grass_top,
-  hardness: 0.45, sound: 'grass', colors: [0x5e9c34, 0x6fb23e, 0x79553a, 0x4a7a2c],
+  hardness: 0.45, sound: 'grass', colors: [0x91bd59, 0xa4c86a, 0x79553a, 0x6b8c3a],
 });
 DEFS[B.DIRT] = def({
   name: 'Dirt', top: TILES.dirt, hardness: 0.4, sound: 'dirt',
@@ -212,7 +212,7 @@ DEFS[B.FLOWER_YELLOW] = def({
 });
 DEFS[B.TALLGRASS] = def({
   name: 'Tall Grass', top: TILES.tallgrass, solid: false, opaque: false, cutout: true, cross: true,
-  hardness: 0.05, sound: 'plant', colors: [0x589436, 0x467527],
+  hardness: 0.05, sound: 'plant', colors: [0x7fad4a, 0x5e8234],
 });
 DEFS[B.BEDROCK] = def({
   name: 'Bedrock', top: TILES.bedrock, hardness: Infinity, sound: 'stone',

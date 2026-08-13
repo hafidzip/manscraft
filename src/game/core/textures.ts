@@ -155,7 +155,7 @@ function tileRegion(
 
 type Painter = (img: ImageData, r: () => number) => void;
 
-const GRASS_BASE: RGB = [96, 162, 54] as unknown as RGB;
+const GRASS_BASE: RGB = [145, 189, 89] as unknown as RGB;
 
 const shadeMul = (base: RGB, f: number): RGB => map3(base, (c) => Math.floor(c * f));
 

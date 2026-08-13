@@ -87,7 +87,7 @@ export function buildAtlas(): THREE.CanvasTexture {
   };
 
   tile(T.GRASS_TOP, (ox, oy) => {
-    noisyTile(g, ox, oy, '#5faa3c', 18, 101, ['#6dc24a', '#4c8f2f']);
+    noisyTile(g, ox, oy, '#91bd59', 18, 101, ['#a4c86a', '#6b8c3a']);
   });
   tile(T.GRASS_SIDE, (ox, oy) => {
     noisyTile(g, ox, oy, '#7a5a38', 16, 102);
@@ -95,7 +95,7 @@ export function buildAtlas(): THREE.CanvasTexture {
     for (let x = 0; x < TILE; x++) {
       const d = 7 + Math.floor(rand() * 4);
       for (let y = 0; y < d; y++) {
-        g.fillStyle = shade('#5faa3c', Math.floor((rand() - 0.5) * 30));
+        g.fillStyle = shade('#91bd59', Math.floor((rand() - 0.5) * 30));
         g.fillRect(ox + x, oy + y, 1, 1);
       }
     }
